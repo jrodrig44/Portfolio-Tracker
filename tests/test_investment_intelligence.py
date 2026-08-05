@@ -194,6 +194,43 @@ class InvestmentIntelligenceTests(unittest.TestCase):
 
         self.assertEqual(rows, [])
 
+    def test_missing_yahoo_data_renders_graceful_empty_sections(self) -> None:
+        holdings = pd.DataFrame(
+            [
+                {
+                    "ticker": "NOPE",
+                    "shares": 10,
+                    "amount_invested": 1000,
+                    "annual_div_per_share": 0.0,
+                    "sector": "",
+                    "asset_type": "Stock",
+                }
+            ]
+        )
+        metrics = pd.DataFrame(
+            [
+                {
+                    "ticker": "NOPE",
+                    "current_price": 100.0,
+                    "market_value": 1000.0,
+                    "annual_income": 0.0,
+                    "portfolio_yield_pct": 0.0,
+                    "cost_basis": 1000.0,
+                    "unrealized_gain": 0.0,
+                    "sector": "",
+                    "asset_type": "Stock",
+                }
+            ]
+        )
+
+        with patch("app.yf.Ticker", side_effect=NoFundamentalsTicker):
+            content = _build_export_markdown(holdings, metrics)
+
+        self.assertIn("## Supplemental Yahoo Finance Fundamental Data", content)
+        self.assertIn("## Supplemental Yahoo Finance Earnings and Estimates", content)
+        self.assertIn("## Supplemental Yahoo Finance Fund Data", content)
+        self.assertIn("(No data available)", content)
+
     def test_export_markdown_renders_stock_and_fund_intelligence_details(self) -> None:
         holdings = pd.DataFrame(
             [

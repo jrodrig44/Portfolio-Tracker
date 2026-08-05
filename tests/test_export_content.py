@@ -338,8 +338,159 @@ class ExportMarkdownTests(unittest.TestCase):
         self.assertAlmostEqual(completeness["direct_sector_classification_coverage_pct"], 75.0, places=3)
         self.assertAlmostEqual(completeness["fund_lookthrough_coverage_pct"], 62.5, places=3)
         self.assertAlmostEqual(completeness["overall_resolved_exposure_coverage_pct"], 68.75, places=3)
-        self.assertAlmostEqual(payload["data_completeness"]["direct_sector_classification_coverage_pct"], 75.0, places=3)
-        self.assertAlmostEqual(payload["data_completeness"]["fund_lookthrough_coverage_pct"], 62.5, places=3)
+
+    def test_sdiv_is_not_classified_as_option_income_but_jepi_remains_option_income(self) -> None:
+        holdings = pd.DataFrame(
+            [
+                {"ticker": "SDIV", "shares": 10, "amount_invested": 1000, "annual_div_per_share": 1.2, "sector": "Real Estate", "asset_type": "ETF"},
+                {"ticker": "JEPI", "shares": 5, "amount_invested": 500, "annual_div_per_share": 2.4, "sector": "Financial Services", "asset_type": "ETF"},
+            ]
+        )
+        metrics = pd.DataFrame(
+            [
+                {"ticker": "SDIV", "current_price": 100.0, "market_value": 1000.0, "annual_income": 12.0, "portfolio_yield_pct": 1.2, "cost_basis": 1000.0, "unrealized_gain": 0.0, "sector": "Real Estate", "asset_type": "ETF", "dividend_yield_pct": 12.0},
+                {"ticker": "JEPI", "current_price": 100.0, "market_value": 500.0, "annual_income": 12.0, "portfolio_yield_pct": 2.4, "cost_basis": 500.0, "unrealized_gain": 0.0, "sector": "Financial Services", "asset_type": "ETF", "dividend_yield_pct": 12.0},
+            ]
+        )
+
+        payload = json.loads(_build_ai_export_json(holdings, metrics))
+        classification_map = {item["ticker"]: item["income_quality_classification"] for item in payload["income_quality_classification"]}
+        holding_classifications = payload["portfolio_health"]["income_quality"]["holding_classifications"]
+
+        self.assertNotEqual(classification_map["SDIV"], "option-income ETF distribution")
+        self.assertEqual(classification_map["JEPI"], "Option-income ETF distribution")
+        self.assertEqual(holding_classifications["SDIV"]["income_type"], "Variable / Unstable Distribution")
+        self.assertEqual(holding_classifications["JEPI"]["income_type"], "Option-Income ETF Distribution")
+
+    def test_concentration_context_uses_largest_holdings_own_income_share(self) -> None:
+        holdings = pd.DataFrame(
+            [
+                {"ticker": "HD", "shares": 10, "amount_invested": 1000, "annual_div_per_share": 1.0, "sector": "Consumer Cyclical", "asset_type": "Stock"},
+                {"ticker": "JEPI", "shares": 5, "amount_invested": 500, "annual_div_per_share": 1.0, "sector": "Financial Services", "asset_type": "ETF"},
+                {"ticker": "O", "shares": 2, "amount_invested": 200, "annual_div_per_share": 1.0, "sector": "Real Estate", "asset_type": "REIT"},
+            ]
+        )
+        metrics = pd.DataFrame(
+            [
+                {"ticker": "HD", "current_price": 100.0, "market_value": 1000.0, "annual_income": 10.0, "portfolio_yield_pct": 1.0, "cost_basis": 1000.0, "unrealized_gain": 0.0, "sector": "Consumer Cyclical", "asset_type": "Stock"},
+                {"ticker": "JEPI", "current_price": 100.0, "market_value": 500.0, "annual_income": 20.0, "portfolio_yield_pct": 4.0, "cost_basis": 500.0, "unrealized_gain": 0.0, "sector": "Financial Services", "asset_type": "ETF"},
+                {"ticker": "O", "current_price": 100.0, "market_value": 100.0, "annual_income": 5.0, "portfolio_yield_pct": 5.0, "cost_basis": 100.0, "unrealized_gain": 0.0, "sector": "Real Estate", "asset_type": "REIT"},
+            ]
+        )
+
+        payload = json.loads(_build_ai_export_json(holdings, metrics))
+        markdown = _build_export_markdown(holdings, metrics)
+
+        self.assertAlmostEqual(payload["concentration_context"]["largest_holding_income_weight_pct"], 28.5714, places=3)
+        self.assertAlmostEqual(payload["concentration_context"]["largest_income_weight_pct"], 57.1429, places=3)
+        self.assertIn("That same holding contributes 28.57% of estimated annual income.", markdown)
+        self.assertIn("Largest income contributor: JEPI (57.14% of estimated annual income).", markdown)
+
+    def test_sector_normalization_merges_realestate_labels_in_direct_and_lookthrough_exports(self) -> None:
+        holdings = pd.DataFrame(
+            [
+                {"ticker": "HD", "shares": 1, "amount_invested": 100, "annual_div_per_share": 1.0, "sector": "Realestate", "asset_type": "Stock"},
+                {"ticker": "O", "shares": 1, "amount_invested": 200, "annual_div_per_share": 1.0, "sector": "Real Estate", "asset_type": "REIT"},
+                {"ticker": "REET", "shares": 1, "amount_invested": 300, "annual_div_per_share": 0.0, "sector": "", "asset_type": "ETF"},
+            ]
+        )
+        metrics = pd.DataFrame(
+            [
+                {"ticker": "HD", "current_price": 100.0, "market_value": 100.0, "annual_income": 5.0, "portfolio_yield_pct": 5.0, "cost_basis": 100.0, "unrealized_gain": 0.0, "sector": "Realestate", "asset_type": "Stock"},
+                {"ticker": "O", "current_price": 200.0, "market_value": 200.0, "annual_income": 10.0, "portfolio_yield_pct": 5.0, "cost_basis": 200.0, "unrealized_gain": 0.0, "sector": "Real Estate", "asset_type": "REIT"},
+                {"ticker": "REET", "current_price": 300.0, "market_value": 300.0, "annual_income": 12.0, "portfolio_yield_pct": 4.0, "cost_basis": 300.0, "unrealized_gain": 0.0, "sector": "", "asset_type": "ETF"},
+            ]
+        )
+        with patch("app._latest_fund_sector_weights", return_value={"REET": {"realestate": 1.0}}):
+            payload = json.loads(_build_ai_export_json(holdings, metrics))
+
+        direct_real_estate = next(item for item in payload["direct_sector_exposure"] if item["sector"] == "Real Estate")
+
+        self.assertEqual(len([item for item in payload["direct_sector_exposure"] if item["sector"] == "Real Estate"]), 1)
+        self.assertAlmostEqual(direct_real_estate["market_value"], 300.0, places=3)
+        self.assertEqual(payload["look_through_sector_exposure"][0]["sector"], "Real Estate")
+
+    @patch("app._latest_historical_context")
+    def test_export_sanitizes_non_finite_values_in_json_and_markdown(self, historical_context_mock) -> None:
+        historical_context_mock.return_value = {
+            "SDIV": {
+                "ticker": "SDIV",
+                "price_trend": {"change_3m_pct": float("nan")},
+                "dividend_trend": {"change_1y_pct": float("inf")},
+                "start_price": float("nan"),
+                "end_price": float("inf"),
+                "return_pct": float("-inf"),
+                "52w_high": float("nan"),
+                "52w_low": float("inf"),
+                "drawdown": float("-inf"),
+                "volatility": float("nan"),
+                "history_summary": "Historical context unavailable.",
+            }
+        }
+        holdings = pd.DataFrame([{"ticker": "SDIV", "shares": 1, "amount_invested": 100, "annual_div_per_share": 1.0, "sector": "Real Estate", "asset_type": "ETF"}])
+        metrics = pd.DataFrame([{"ticker": "SDIV", "current_price": 100.0, "market_value": 100.0, "annual_income": 10.0, "portfolio_yield_pct": 10.0, "cost_basis": 100.0, "unrealized_gain": 0.0, "sector": "Real Estate", "asset_type": "ETF"}])
+
+        payload = json.loads(_build_ai_export_json(holdings, metrics))
+        markdown = _build_export_markdown(holdings, metrics)
+
+        self.assertIsNone(payload["historical_context"][0]["start_price"])
+        self.assertIsNone(payload["historical_context"][0]["end_price"])
+        self.assertIsNone(payload["historical_context"][0]["return_pct"])
+        self.assertNotRegex(markdown, r"\b(?:nan|NaN|Infinity|-Infinity)\b")
+        self.assertNotRegex(json.dumps(payload), r"\b(?:nan|NaN|Infinity|-Infinity)\b")
+        self.assertIn("start_price Unavailable", markdown)
+        self.assertIn("return_pct Unavailable", markdown)
+
+    def test_health_score_sections_match_and_concentration_alert_is_not_duplicated(self) -> None:
+        holdings = pd.DataFrame(
+            [
+                {"ticker": "HD", "shares": 10, "amount_invested": 1000, "annual_div_per_share": 1.0, "sector": "Consumer Cyclical", "asset_type": "Stock"},
+                {"ticker": "JEPI", "shares": 1, "amount_invested": 10, "annual_div_per_share": 1.0, "sector": "Financial Services", "asset_type": "ETF"},
+            ]
+        )
+        metrics = pd.DataFrame(
+            [
+                {"ticker": "HD", "current_price": 100.0, "market_value": 1000.0, "annual_income": 10.0, "portfolio_yield_pct": 1.0, "cost_basis": 1000.0, "unrealized_gain": 0.0, "sector": "Consumer Cyclical", "asset_type": "Stock", "dividend_yield_pct": 1.0},
+                {"ticker": "JEPI", "current_price": 10.0, "market_value": 10.0, "annual_income": 11.0, "portfolio_yield_pct": 110.0, "cost_basis": 10.0, "unrealized_gain": 0.0, "sector": "Financial Services", "asset_type": "ETF", "dividend_yield_pct": 11.0},
+            ]
+        )
+
+        payload = json.loads(_build_ai_export_json(holdings, metrics))
+        markdown = _build_export_markdown(holdings, metrics)
+        score = payload["portfolio_health"]["health_score"]
+
+        self.assertEqual(payload["health_score"]["health_score"], score)
+        self.assertIn(f"Tracker Health Score: {score:.1f}/100", markdown)
+        self.assertIn(f"- Health score: {score:.1f}/100", markdown)
+        self.assertEqual(markdown.count("Concentration alert: HD is 99.0% of portfolio."), 1)
+        self.assertLess(markdown.index("Concentration alert: HD is 99.0% of portfolio."), markdown.index("High-yield alert: one or more holdings exceed 10% yield."))
+
+    @patch("app._latest_historical_context")
+    def test_missing_historical_values_render_as_unavailable_not_zero(self, historical_context_mock) -> None:
+        historical_context_mock.return_value = {
+            "AAPL": {
+                "ticker": "AAPL",
+                "price_trend": {},
+                "dividend_trend": {},
+                "start_price": None,
+                "end_price": None,
+                "return_pct": None,
+                "52w_high": None,
+                "52w_low": None,
+                "drawdown": None,
+                "volatility": None,
+                "history_summary": "Historical context unavailable.",
+            }
+        }
+        holdings = pd.DataFrame([{"ticker": "AAPL", "shares": 1, "amount_invested": 100, "annual_div_per_share": 1.0, "sector": "Technology", "asset_type": "Stock"}])
+        metrics = pd.DataFrame([{"ticker": "AAPL", "current_price": 100.0, "market_value": 100.0, "annual_income": 10.0, "portfolio_yield_pct": 10.0, "cost_basis": 100.0, "unrealized_gain": 0.0, "sector": "Technology", "asset_type": "Stock"}])
+
+        payload = json.loads(_build_ai_export_json(holdings, metrics))
+        markdown = _build_export_markdown(holdings, metrics)
+
+        self.assertIsNone(payload["historical_context"][0]["return_pct"])
+        self.assertIn("return_pct Unavailable", markdown)
+        self.assertNotIn("return_pct 0.00%", markdown)
 
     def test_unresolved_fund_look_through_exposure_is_grouped_by_fund_type(self) -> None:
         holdings = pd.DataFrame(

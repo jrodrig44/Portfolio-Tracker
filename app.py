@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 import json
 import logging
+import math
 from pathlib import Path
 import re
 import sqlite3
@@ -32,6 +33,11 @@ ESPP_PURCHASE_FREQUENCY = "6_months"
 DEFAULT_EXPECTED_RETURN = 0.08
 DEFAULT_PROJECTION_BIWEEKLY_CONTRIB = 280.0
 EXPORT_VERSION = "2026.08"
+
+OPTION_INCOME_ETF_TICKERS = {"JEPI", "JEPQ", "QYLD", "RYLD", "XYLD"}
+SECTOR_LABEL_ALIASES = {
+    "realestate": "Real Estate",
+}
 
 REQUIRED_COLUMNS = [
     "ticker",
@@ -445,10 +451,10 @@ def _infer_sector_from_info(info: dict) -> str:
     # Prefer Yahoo's sector values and keep a conservative fallback.
     sector = str(info.get("sector") or info.get("sectorDisp") or "").strip()
     if sector:
-        return sector
+        return _normalize_sector_label(sector, unresolved_label="")
 
     industry = str(info.get("industry") or info.get("industryDisp") or "").strip()
-    return industry
+    return _normalize_sector_label(industry, unresolved_label="")
 
 
 def _sanitize_ticker_series(series: pd.Series) -> pd.Series:
@@ -479,6 +485,99 @@ def _parse_espp_frequency_months(value: object) -> int:
     except (TypeError, ValueError):
         return 6
     return parsed if parsed > 0 else 6
+
+
+def _coerce_finite_number(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)):
+        numeric_value = float(value)
+        return numeric_value if math.isfinite(numeric_value) else None
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if cleaned.lower() in {"", "n/a", "nan", "none", "infinity", "-infinity", "inf", "-inf"}:
+            return None
+        try:
+            numeric_value = float(cleaned)
+        except ValueError:
+            return None
+        return numeric_value if math.isfinite(numeric_value) else None
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric_value if math.isfinite(numeric_value) else None
+
+
+def _normalize_percentage_value(value: object, default_pct: float = 0.0) -> float:
+    numeric_value = _coerce_finite_number(value)
+    if numeric_value is None:
+        return default_pct
+    if 0.0 < abs(numeric_value) < 1.0:
+        return numeric_value * 100.0
+    return numeric_value
+
+
+def _normalize_sector_alias(value: object) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    alias_key = re.sub(r"[^a-z]", "", text.lower())
+    return SECTOR_LABEL_ALIASES.get(alias_key)
+
+
+def _dedupe_text_items(items: object) -> list[str]:
+    if not isinstance(items, list):
+        return []
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        identity = re.sub(r"\s+", " ", text).casefold()
+        if identity in seen:
+            continue
+        seen.add(identity)
+        deduped.append(text)
+    return deduped
+
+
+def _sanitize_export_value(value: object) -> object:
+    if isinstance(value, dict):
+        return {key: _sanitize_export_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_export_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_export_value(item) for item in value]
+    if isinstance(value, set):
+        return [_sanitize_export_value(item) for item in sorted(value, key=str)]
+    if isinstance(value, pd.DataFrame):
+        return _sanitize_export_value(value.to_dict(orient="records"))
+    if isinstance(value, pd.Series):
+        return _sanitize_export_value(value.tolist())
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        numeric_value = float(value)
+        return numeric_value if math.isfinite(numeric_value) else None
+    if isinstance(value, str) and value in {"nan", "NaN", "Infinity", "-Infinity", "inf", "-inf"}:
+        return None
+    return value
+
+
+def _format_optional_metric(value: object, decimals: int = 2, suffix: str = "", unavailable: str = "Unavailable") -> str:
+    numeric_value = _coerce_finite_number(value)
+    if numeric_value is None:
+        return unavailable
+    return f"{numeric_value:.{decimals}f}{suffix}"
+
+
+def _resolve_health_score_value(health: dict[str, object]) -> float:
+    if not isinstance(health, dict):
+        return 0.0
+    return _safe_float(health.get("health_score", health.get("overall", 0.0)), 0.0)
 
 def _normalize_columns(df: pd.DataFrame, drop_blank_tickers: bool = True) -> pd.DataFrame:
     output = pd.DataFrame()
@@ -579,7 +678,7 @@ def _normalize_columns(df: pd.DataFrame, drop_blank_tickers: bool = True) -> pd.
     if espp_discount_pct_key in lowered:
         output["espp_discount_pct"] = df[lowered[espp_discount_pct_key]]
     else:
-        output["espp_discount_pct"] = pd.to_numeric(output["espp_discount"], errors="coerce").fillna(ESPP_DISCOUNT) * 100.0
+        output["espp_discount_pct"] = output["espp_discount"].apply(lambda value: _normalize_percentage_value(value, ESPP_DISCOUNT * 100.0))
 
     if espp_frequency_months_key in lowered:
         output["espp_purchase_frequency_months"] = df[lowered[espp_frequency_months_key]]
@@ -613,6 +712,7 @@ def _normalize_columns(df: pd.DataFrame, drop_blank_tickers: bool = True) -> pd.
     output["ticker"] = _sanitize_ticker_series(output["ticker"])
     output["sector"] = output["sector"].astype(str).str.strip()
     output["sector"] = output["sector"].replace({"nan": "", "None": ""})
+    output["sector"] = output["sector"].apply(lambda value: _normalize_sector_label(value, unresolved_label=""))
     output["asset_type"] = output["asset_type"].apply(_canonical_asset_type)
 
     for numeric_col in [
@@ -639,6 +739,8 @@ def _normalize_columns(df: pd.DataFrame, drop_blank_tickers: bool = True) -> pd.
         "portfolio_yield_pct",
     ]:
         output[numeric_col] = pd.to_numeric(output[numeric_col], errors="coerce").fillna(0.0)
+
+    output["espp_discount_pct"] = output["espp_discount_pct"].apply(lambda value: _normalize_percentage_value(value, 0.0))
 
     output["is_espp"] = output["is_espp"].fillna(False).astype(str).str.strip().str.lower().isin({"1", "true", "yes", "y"})
     output["employer_stock"] = output["employer_stock"].fillna(False).astype(str).str.strip().str.lower().isin({"1", "true", "yes", "y"})
@@ -975,6 +1077,13 @@ def _latest_historical_context(
                     "ticker": ticker,
                     "price_trend": {},
                     "dividend_trend": {},
+                    "start_price": None,
+                    "end_price": None,
+                    "return_pct": None,
+                    "52w_high": None,
+                    "52w_low": None,
+                    "drawdown": None,
+                    "volatility": None,
                     "history_source": "Yahoo Finance",
                     "history_type": "supplemental",
                     "history_start_date": history_start_date,
@@ -988,13 +1097,13 @@ def _latest_historical_context(
                     "ticker": ticker,
                     "price_trend": {},
                     "dividend_trend": {},
-                    "start_price": 0.0,
-                    "end_price": 0.0,
-                    "return_pct": 0.0,
-                    "52w_high": 0.0,
-                    "52w_low": 0.0,
-                    "drawdown": 0.0,
-                    "volatility": 0.0,
+                    "start_price": None,
+                    "end_price": None,
+                    "return_pct": None,
+                    "52w_high": None,
+                    "52w_low": None,
+                    "drawdown": None,
+                    "volatility": None,
                     "history_source": "Yahoo Finance",
                     "history_type": "supplemental",
                     "history_start_date": history_start_date,
@@ -1058,13 +1167,13 @@ def _latest_historical_context(
                 "ticker": ticker,
                 "price_trend": {},
                 "dividend_trend": {},
-                "start_price": 0.0,
-                "end_price": 0.0,
-                "return_pct": 0.0,
-                "52w_high": 0.0,
-                "52w_low": 0.0,
-                "drawdown": 0.0,
-                "volatility": 0.0,
+                "start_price": None,
+                "end_price": None,
+                "return_pct": None,
+                "52w_high": None,
+                "52w_low": None,
+                "drawdown": None,
+                "volatility": None,
                 "history_source": "Yahoo Finance",
                 "history_type": "supplemental",
                 "history_start_date": history_start_date,
@@ -1075,22 +1184,7 @@ def _latest_historical_context(
 
 
 def _coerce_optional_number(value: object) -> float | None:
-    if value is None:
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        cleaned = value.strip()
-        if cleaned in {"", "n/a", "N/A", "nan", "NaN", "None", "none"}:
-            return None
-        try:
-            return float(cleaned)
-        except ValueError:
-            return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+    return _coerce_finite_number(value)
 
 
 def _is_fund_like_quote_type(quote_type: object) -> bool:
@@ -1303,7 +1397,9 @@ def _compute_metrics(df: pd.DataFrame, price_map: dict[str, float], yield_map: d
         discount_source = result.get("espp_discount")
     if discount_source is None:
         discount_source = pd.Series([ESPP_DISCOUNT] * len(result), index=result.index, dtype=float)
-    result["espp_discount_pct"] = pd.to_numeric(discount_source, errors="coerce").fillna(ESPP_DISCOUNT) * 100.0
+    result["espp_discount_pct"] = pd.Series(discount_source, index=result.index).apply(
+        lambda value: _normalize_percentage_value(value, ESPP_DISCOUNT * 100.0)
+    )
     result["espp_acquired_shares"] = result.get("espp_acquired_shares", 0.0)
     result["espp_acquired_shares"] = pd.to_numeric(result["espp_acquired_shares"], errors="coerce").fillna(0.0)
     result["espp_acquired_shares"] = result[["shares", "espp_acquired_shares"]].min(axis=1).clip(lower=0.0)
@@ -1492,6 +1588,9 @@ def evaluate_concentration(df: pd.DataFrame) -> dict[str, object]:
     return {
         "largest_holding_by_value": top_ticker,
         "largest_holding_weight_pct": (float(top_value_row.get("market_value", 0.0) or 0.0) / total_value * 100) if total_value > 0 else 0.0,
+        "largest_holding_income_weight_pct": (
+            float(top_value_row.get("annualized_income", top_value_row.get("annual_income", 0.0)) or 0.0) / total_income * 100
+        ) if total_income > 0 else 0.0,
         "largest_income_contributor": str(top_income_row.get("ticker", "N/A")),
         "largest_income_weight_pct": (float(top_income_row.get("annualized_income", top_income_row.get("annual_income", 0.0)) or 0.0) / total_income * 100) if total_income > 0 else 0.0,
         "espp_concentration_flag": espp_concentration_flag,
@@ -1682,9 +1781,14 @@ def _display_asset_type_label(asset_type: str) -> str:
     }.get(normalized_asset_type, "Unresolved Asset Type")
 
 
-def _normalize_sector_label(value: object) -> str:
+def _normalize_sector_label(value: object, unresolved_label: str = "Unresolved Direct Sector") -> str:
     sector = str(value or "").strip()
-    return sector or "Unresolved Direct Sector"
+    if sector.lower() in {"", "nan", "none", "n/a"}:
+        return unresolved_label
+    alias = _normalize_sector_alias(sector)
+    if alias:
+        return alias
+    return sector
 
 
 def _classification_label_for_holding(asset_type: str, sector: object) -> str:
@@ -1702,6 +1806,9 @@ def _humanize_sector_weight_label(value: object) -> str:
     text = str(value or "").strip().replace("_", " ")
     if not text:
         return "Unresolved Fund Exposure"
+    alias = _normalize_sector_alias(text)
+    if alias:
+        return alias
     return " ".join(part.capitalize() for part in text.split())
 
 
@@ -1911,13 +2018,14 @@ def _resolve_lookthrough_sector_exposure(metrics: pd.DataFrame) -> dict[str, obj
                 sector_source = "yahoo"
         resolved_for_fund = 0.0
         for sector_name, sector_weight in sector_weightings.items():
+            normalized_sector_name = _humanize_sector_weight_label(sector_name)
             safe_weight = max(0.0, min(float(sector_weight), 1.0))
             sector_value = market_value * safe_weight
             if sector_value <= 0:
                 continue
             resolved_for_fund += sector_value
-            sector_market_values[sector_name] = sector_market_values.get(sector_name, 0.0) + sector_value
-            sector_sources.setdefault(sector_name, set()).add(f"{ticker} ({sector_source})")
+            sector_market_values[normalized_sector_name] = sector_market_values.get(normalized_sector_name, 0.0) + sector_value
+            sector_sources.setdefault(normalized_sector_name, set()).add(f"{ticker} ({sector_source})")
 
         unresolved_for_fund = max(market_value - resolved_for_fund, 0.0)
         resolved_value += resolved_for_fund
@@ -2114,7 +2222,7 @@ def _build_concentration_context(metrics: pd.DataFrame) -> dict[str, object]:
         "flag_employer_stock": bool(concentration.get("espp_concentration_flag", False)),
         "largest_holding_by_value": largest_holding_ticker,
         "largest_holding_value_weight_pct": float(concentration.get("largest_holding_weight_pct", 0.0) or 0.0),
-        "largest_holding_income_weight_pct": float(concentration.get("largest_income_weight_pct", 0.0) or 0.0),
+        "largest_holding_income_weight_pct": float(concentration.get("largest_holding_income_weight_pct", 0.0) or 0.0),
         "largest_income_contributor": str(concentration.get("largest_income_contributor", "N/A")),
         "largest_income_weight_pct": float(concentration.get("largest_income_weight_pct", 0.0) or 0.0),
         "guidance": str(concentration.get("guidance", "Capital concentration and income concentration should be evaluated separately.")),
@@ -2573,7 +2681,7 @@ def _build_portfolio_health(metrics: pd.DataFrame) -> dict[str, object]:
         for name, score in sorted(scored_dimensions, key=lambda item: (item[1], item[0]))[:3]
     ]
 
-    alerts = score_payload.get("alerts", []) if isinstance(score_payload, dict) else []
+    alerts = _dedupe_text_items(score_payload.get("alerts", []) if isinstance(score_payload, dict) else [])
     notes = score_payload.get("notes", []) if isinstance(score_payload, dict) else []
     income_quality_package = score_payload.get("income_quality", {}) if isinstance(score_payload, dict) else {}
     largest_holding = str(score_payload.get("largest_holding", "N/A")) if isinstance(score_payload, dict) else "N/A"
@@ -2705,7 +2813,7 @@ def _classify_income_type(asset_type: str, ticker: str) -> str:
         return "REIT distribution"
     if asset == "Bond Fund":
         return "bond fund distribution"
-    if ticker_key in {"JEPI", "SDIV", "QYLD", "RYLD", "XYLD"}:
+    if ticker_key in OPTION_INCOME_ETF_TICKERS:
         return "option-income ETF distribution"
     return "traditional dividend"
 
@@ -2933,7 +3041,10 @@ def compute_full_portfolio_snapshot(
                 "ticker": str(employer_stock_concentration_context.get("primary_employer_ticker", "HD") or "HD"),
                 "biweekly_contribution": total_espp,
                 "annualized_contribution": total_espp * 26,
-                "purchase_discount": float(contribution_ctx.get("summary", {}).get("hd_espp_discount_pct", ESPP_DISCOUNT * 100.0) or (ESPP_DISCOUNT * 100.0)) / 100.0,
+                "purchase_discount": _normalize_percentage_value(
+                    contribution_ctx.get("summary", {}).get("hd_espp_discount_pct", ESPP_DISCOUNT * 100.0),
+                    ESPP_DISCOUNT * 100.0,
+                ) / 100.0,
                 "purchase_frequency": str(contribution_ctx.get("summary", {}).get("hd_espp_purchase_frequency", ESPP_PURCHASE_FREQUENCY)),
                 "employer_stock_concentration_context": employer_stock_concentration_context,
                 "income_vs_capital_concentration_comparison": {
@@ -2948,18 +3059,19 @@ def compute_full_portfolio_snapshot(
         "statement_history": statement_history_context or {},
         "health_score": {
             "overall": float(health_payload.get("overall_score", health_payload.get("health_score", 0.0)) or 0.0) if isinstance(health_payload, dict) else 0.0,
+            "health_score": float(health_payload.get("overall_score", health_payload.get("health_score", 0.0)) or 0.0) if isinstance(health_payload, dict) else 0.0,
             "subscores": health_payload.get("subscores", health_payload.get("health_score_breakdown", {})) if isinstance(health_payload, dict) else {},
             "strongest": health_payload.get("strongest", []) if isinstance(health_payload, dict) else [],
             "weakest": health_payload.get("weakest", []) if isinstance(health_payload, dict) else [],
-            "alerts": health_payload.get("alerts", []) if isinstance(health_payload, dict) else [],
+            "alerts": _dedupe_text_items(health_payload.get("alerts", []) if isinstance(health_payload, dict) else []),
             "notes": health_payload.get("notes", []) if isinstance(health_payload, dict) else [],
             "income_quality": float(intelligence_payload.get("income_quality_score", 0.0) or 0.0),
             "completeness": float(completeness.get("overall_resolved_exposure_coverage_pct", 0.0) or 0.0),
         },
         "income_quality": health_payload.get("income_quality", {}) if isinstance(health_payload, dict) else {},
         "alerts": {
-            "health_alerts": health_payload.get("alerts", []) if isinstance(health_payload, dict) else [],
-            "intelligence_alerts": intelligence_payload.get("alerts", []) if isinstance(intelligence_payload, dict) else [],
+            "health_alerts": _dedupe_text_items(health_payload.get("alerts", []) if isinstance(health_payload, dict) else []),
+            "intelligence_alerts": _dedupe_text_items(intelligence_payload.get("alerts", []) if isinstance(intelligence_payload, dict) else []),
             "concentration_alert": employer_stock_concentration_context,
         },
     }
@@ -3010,7 +3122,7 @@ def validate_snapshot(snapshot: dict[str, object]) -> None:
 
 def generate_portfolio_export_json(snapshot: dict[str, object]) -> dict[str, object]:
     meta = snapshot.get("meta", {}) if isinstance(snapshot, dict) else {}
-    return {
+    return _sanitize_export_value({
         "snapshot_timestamp": meta.get("snapshot_timestamp", datetime.now().isoformat(timespec="seconds")),
         "currency": meta.get("currency", "USD"),
         "export_version": meta.get("export_version", "2.0"),
@@ -3026,10 +3138,11 @@ def generate_portfolio_export_json(snapshot: dict[str, object]) -> dict[str, obj
         "health_score": snapshot.get("health_score", {}),
         "income_quality": snapshot.get("income_quality", {}),
         "alerts": snapshot.get("alerts", {}),
-    }
+    })
 
 
-def generate_portfolio_export(snapshot: dict[str, object]) -> str:
+def generate_portfolio_export(snapshot: dict[str, object], include_alerts: bool = True) -> str:
+    snapshot = _sanitize_export_value(snapshot)
     totals = snapshot.get("totals", {}) if isinstance(snapshot, dict) else {}
     contributions = snapshot.get("contributions", {}) if isinstance(snapshot, dict) else {}
     exposure = snapshot.get("exposure", {}) if isinstance(snapshot, dict) else {}
@@ -3046,6 +3159,7 @@ def generate_portfolio_export(snapshot: dict[str, object]) -> str:
     income_rows = income.get("by_holding", []) if isinstance(income, dict) else []
     resolved_income_rows = [row for row in income_rows if isinstance(row, dict) and float(row.get("annual_income", 0.0) or 0.0) >= 0]
     income_resolution = (len(resolved_income_rows) / len(income_rows) * 100.0) if isinstance(income_rows, list) and len(income_rows) > 0 else 100.0
+    health_alerts = _dedupe_text_items(alerts.get("health_alerts", []) if isinstance(alerts, dict) else [])
 
     lines = [
         "## AI Context Summary",
@@ -3053,16 +3167,16 @@ def generate_portfolio_export(snapshot: dict[str, object]) -> str:
         f"- Estimated Annual Income: {_format_currency(float(totals.get('annual_income', 0.0) or 0.0))}",
         "",
         "## Portfolio Health",
-        f"- Health score: {float(health.get('health_score', 0.0) or 0.0):.1f}/100",
+        f"- Health score: {_resolve_health_score_value(health):.1f}/100",
         "",
         "## Alerts",
-        *([f"- {item}" for item in alerts.get("health_alerts", [])] if isinstance(alerts, dict) and alerts.get("health_alerts") else ["- No alerts."]),
+        *([f"- {item}" for item in health_alerts] if include_alerts and health_alerts else (["- Alerts are summarized in the primary export sections above."] if not include_alerts else ["- No alerts."])),
         "",
         "## ESPP Context",
         f"- ESPP ticker: {contributions.get('espp', {}).get('ticker', 'HD') if isinstance(contributions.get('espp', {}), dict) else 'HD'}",
         f"- biweekly contribution: {_format_currency(float(contributions.get('espp', {}).get('biweekly_contribution', ESPP_CONTRIB_BIWEEKLY) or ESPP_CONTRIB_BIWEEKLY))}",
         f"- annualized contribution: {_format_currency(float(contributions.get('espp', {}).get('annualized_contribution', ESPP_CONTRIB_BIWEEKLY * 26) or ESPP_CONTRIB_BIWEEKLY * 26))}",
-        f"- purchase discount: {float(contributions.get('espp', {}).get('purchase_discount', ESPP_DISCOUNT) or ESPP_DISCOUNT) * 100:.0f}%",
+        f"- purchase discount: {_normalize_percentage_value(contributions.get('espp', {}).get('purchase_discount', ESPP_DISCOUNT), ESPP_DISCOUNT * 100.0):.1f}%",
         f"- purchase frequency: {contributions.get('espp', {}).get('purchase_frequency', ESPP_PURCHASE_FREQUENCY) if isinstance(contributions.get('espp', {}), dict) else ESPP_PURCHASE_FREQUENCY}",
         "",
         "## Contribution Context",
@@ -3072,27 +3186,27 @@ def generate_portfolio_export(snapshot: dict[str, object]) -> str:
         "",
         "## Asset Allocation",
         "```json",
-        json.dumps(snapshot.get("allocation", {}), indent=2, default=str),
+        json.dumps(snapshot.get("allocation", {}), indent=2, default=str, allow_nan=False),
         "```",
         "",
         "## Sector Exposure",
         "```json",
-        json.dumps(exposure, indent=2, default=str),
+        json.dumps(exposure, indent=2, default=str, allow_nan=False),
         "```",
         "",
         "## Income Allocation",
         "```json",
-        json.dumps(income, indent=2, default=str),
+        json.dumps(income, indent=2, default=str, allow_nan=False),
         "```",
         "",
         "## Economic Exposure",
         "```json",
-        json.dumps(snapshot.get("allocation", {}).get("economic_exposure", {}), indent=2, default=str),
+        json.dumps(snapshot.get("allocation", {}).get("economic_exposure", {}), indent=2, default=str, allow_nan=False),
         "```",
         "",
         "## Historical Context",
         "```json",
-        json.dumps(historical, indent=2, default=str),
+        json.dumps(historical, indent=2, default=str, allow_nan=False),
         "```",
         "",
         "## Holdings Table",
@@ -3149,9 +3263,7 @@ def _build_ai_holdings_export_frame(holdings: pd.DataFrame, metrics: pd.DataFram
         )
 
         raw_discount_pct = row.get("espp_discount_pct", row.get("espp_discount", ESPP_DISCOUNT) or ESPP_DISCOUNT)
-        espp_discount_pct = float(raw_discount_pct or 0.0)
-        if espp_discount_pct > 0 and espp_discount_pct <= 1:
-            espp_discount_pct *= 100.0
+        espp_discount_pct = _normalize_percentage_value(raw_discount_pct, ESPP_DISCOUNT * 100.0)
 
         export_rows.append(
             {
@@ -3163,7 +3275,7 @@ def _build_ai_holdings_export_frame(holdings: pd.DataFrame, metrics: pd.DataFram
                 "espp_biweekly_contribution": float(metric_row.get("espp_biweekly_contribution", 0.0) or 0.0),
                 "market_value": float(metric_row.get("market_value", 0.0) or 0.0),
                 "asset_type": str(metric_row.get("asset_type", row.get("asset_type", "")) or ""),
-                "sector": str(metric_row.get("sector", row.get("sector", "")) or ""),
+                "sector": _normalize_sector_label(metric_row.get("sector", row.get("sector", "")) or "", unresolved_label=""),
                 "employer_stock": bool(row.get("employer_stock", False) or (ticker == "HD")),
                 "espp_enabled": bool(row.get("espp_enabled", False) or (ticker == "HD")),
                 "espp_purchase_frequency": str(row.get("espp_purchase_frequency", "") or ""),
@@ -3224,7 +3336,10 @@ def _build_contribution_context(
         espp_frequency_label = str(row.get("espp_purchase_frequency", "")).strip() or (
             "approximately_every_6_months" if espp_enabled else ""
         )
-        espp_discount_pct = float(row.get("espp_discount_pct", espp_discount * 100) or (espp_discount * 100))
+        espp_discount_pct = _normalize_percentage_value(
+            row.get("espp_discount_pct", row.get("espp_discount", espp_discount)),
+            espp_discount * 100.0,
+        )
         if ticker == "HD":
             contribution_note = "HD is treated as an ESPP contribution made every biweekly paycheck, with purchases occurring approximately every six months."
             contribution_frequency = "biweekly"
@@ -3299,10 +3414,10 @@ def _build_contribution_context(
     hd_espp_discount_pct = 0.0
     for item in contribution_rows:
         if bool(item.get("espp_enabled", False)) and item.get("espp_discount_pct") not in [None, ""]:
-            hd_espp_discount_pct = float(item.get("espp_discount_pct", 0.0) or 0.0)
+            hd_espp_discount_pct = _normalize_percentage_value(item.get("espp_discount_pct", 0.0), 0.0)
             break
     if hd_espp_discount_pct <= 0:
-        hd_espp_discount_pct = espp_discount * 100
+        hd_espp_discount_pct = _normalize_percentage_value(espp_discount, ESPP_DISCOUNT * 100.0)
 
     summary = {
         "total_regular_biweekly_contribution": round(regular_contribution_total, 2),
@@ -3533,13 +3648,13 @@ def _build_ai_export_payload(
                         "ticker": ticker,
                         "price_trend": entry.get("price_trend", {}),
                         "dividend_trend": entry.get("dividend_trend", {}),
-                        "start_price": entry.get("start_price", 0.0),
-                        "end_price": entry.get("end_price", 0.0),
-                        "return_pct": entry.get("return_pct", 0.0),
-                        "52w_high": entry.get("52w_high", 0.0),
-                        "52w_low": entry.get("52w_low", 0.0),
-                        "drawdown": entry.get("drawdown", 0.0),
-                        "volatility": entry.get("volatility", 0.0),
+                        "start_price": entry.get("start_price"),
+                        "end_price": entry.get("end_price"),
+                        "return_pct": entry.get("return_pct"),
+                        "52w_high": entry.get("52w_high"),
+                        "52w_low": entry.get("52w_low"),
+                        "drawdown": entry.get("drawdown"),
+                        "volatility": entry.get("volatility"),
                         "history_summary": entry.get("history_summary", ""),
                     }
                 )
@@ -3825,6 +3940,8 @@ def _prepare_export_metrics(metrics: pd.DataFrame) -> pd.DataFrame:
         )
         export_metrics["reported_annual_div_per_share"] = reported_dividend_values
         export_metrics["annual_div_per_share"] = None
+    if "sector" in export_metrics.columns:
+        export_metrics["sector"] = export_metrics["sector"].apply(lambda value: _normalize_sector_label(value, unresolved_label=""))
     export_metrics = export_metrics.fillna(0)
     if "reported_annual_div_per_share" in export_metrics.columns:
         export_metrics["reported_annual_div_per_share"] = export_metrics["reported_annual_div_per_share"].where(
@@ -3861,7 +3978,7 @@ def _build_ai_export_json(
     payload["schema_version"] = "2.0"
     payload["export_generated_timestamp"] = datetime.now().isoformat(timespec="seconds")
     payload["export_generated_at"] = datetime.now().isoformat(timespec="seconds")
-    return json.dumps(payload, indent=2, default=str)
+    return json.dumps(_sanitize_export_value(payload), indent=2, default=str, allow_nan=False)
 
 
 _AI_ANALYSIS_INSTRUCTIONS_BLOCK = [
@@ -3882,18 +3999,14 @@ _AI_ANALYSIS_INSTRUCTIONS_BLOCK = [
 
 
 def _safe_float(value: object, default: float = 0.0) -> float:
-    try:
-        if value in [None, ""]:
-            return default
-        return float(value)
-    except (TypeError, ValueError):
-        return default
+    numeric_value = _coerce_finite_number(value)
+    return default if numeric_value is None else numeric_value
 
 
 def _records_table_text(records: object, preferred_columns: list[str] | None = None) -> str:
     if not isinstance(records, list) or not records:
         return "(No data available)"
-    normalized = [item for item in records if isinstance(item, dict)]
+    normalized = [_sanitize_export_value(item) for item in records if isinstance(item, dict)]
     if not normalized:
         return "(No data available)"
     df = pd.DataFrame(normalized)
@@ -3901,6 +4014,7 @@ def _records_table_text(records: object, preferred_columns: list[str] | None = N
         ordered = [col for col in preferred_columns if col in df.columns]
         extras = [col for col in df.columns if col not in ordered]
         df = df[ordered + extras]
+    df = df.astype(object).where(pd.notna(df), "N/A")
     return _format_table_for_export(df)
 
 
@@ -3971,7 +4085,7 @@ def build_espp_context(export_payload: dict[str, object]) -> list[str]:
         f"- ESPP contribution per paycheck: {_format_currency(_safe_float(summary.get('hd_espp_contribution_per_paycheck', 0.0)))}",
         f"- ESPP annualized contribution: {_format_currency(_safe_float(summary.get('annual_hd_espp_contribution', 0.0)))}",
         f"- ESPP purchase frequency: {str(summary.get('hd_espp_purchase_frequency', 'n/a'))}",
-        f"- ESPP discount: {_safe_float(summary.get('hd_espp_discount_pct', 0.0)):.0f}%",
+        f"- ESPP discount: {_normalize_percentage_value(summary.get('hd_espp_discount_pct', 0.0), 0.0):.1f}%",
         f"- ESPP holding weight: {_format_percent(_safe_float(employer_ctx.get('primary_employer_capital_concentration_pct', 0.0)))}",
         f"- ESPP income contribution: {_format_percent(_safe_float(employer_ctx.get('primary_employer_income_concentration_pct', 0.0)))}",
         "- Employer exposure notes: Treat employer-stock concentration separately and avoid automatic sell recommendations.",
@@ -3999,7 +4113,7 @@ def build_contribution_context(export_payload: dict[str, object]) -> list[str]:
         f"- Total Regular Biweekly Contributions: {_format_currency(_safe_float(summary.get('total_regular_biweekly_contribution', 0.0)))}",
         f"- Estimated Annual HD ESPP Contributions: {_format_currency(_safe_float(summary.get('annual_hd_espp_contribution', 0.0)))}",
         f"- HD ESPP Purchase Frequency: {str(summary.get('hd_espp_purchase_frequency', 'n/a'))}",
-        f"- HD ESPP Discount: {_safe_float(summary.get('hd_espp_discount_pct', 0.0)):.0f}%",
+        f"- HD ESPP Discount: {_normalize_percentage_value(summary.get('hd_espp_discount_pct', 0.0), 0.0):.1f}%",
         "- Per-holding contribution breakdown:",
     ]
 
@@ -4023,7 +4137,12 @@ def build_contribution_context(export_payload: dict[str, object]) -> list[str]:
 def build_health_score_section(export_payload: dict[str, object]) -> list[str]:
     portfolio_health = export_payload.get("portfolio_health", {}) if isinstance(export_payload, dict) else {}
     breakdown = portfolio_health.get("health_score_breakdown", {}) if isinstance(portfolio_health, dict) else {}
-    alerts = portfolio_health.get("alerts", []) if isinstance(portfolio_health, dict) else []
+    context_summary = portfolio_health.get("context_summary", {}) if isinstance(portfolio_health, dict) else {}
+    primary_alert = str(context_summary.get("primary_alert", "")).strip() if isinstance(context_summary, dict) else ""
+    alerts = [
+        alert for alert in _dedupe_text_items(portfolio_health.get("alerts", []) if isinstance(portfolio_health, dict) else [])
+        if alert != primary_alert
+    ]
 
     lines = [
         "## Health Score",
@@ -4036,10 +4155,10 @@ def build_health_score_section(export_payload: dict[str, object]) -> list[str]:
         f"- data quality: {_safe_float(breakdown.get('data_quality', 0.0)):.1f}",
         "",
         "## Portfolio Health and Alerts",
-        f"- Health score: {_safe_float(portfolio_health.get('health_score', 0.0)):.1f}/100",
-        f"- Concentration alert: {str(portfolio_health.get('largest_holding', 'N/A'))} is {_safe_float(portfolio_health.get('largest_holding_weight', 0.0)):.1f}% of portfolio.",
+        f"- Health score: {_resolve_health_score_value(portfolio_health):.1f}/100",
+        f"- Largest holding concentration: {str(portfolio_health.get('largest_holding', 'N/A'))} is {_safe_float(portfolio_health.get('largest_holding_weight', 0.0)):.1f}% of portfolio.",
     ]
-    if isinstance(alerts, list) and alerts:
+    if alerts:
         lines.extend([f"- {str(item)}" for item in alerts])
     lines.extend([
         "",
@@ -4259,13 +4378,13 @@ def build_historical_context_section(export_payload: dict[str, object]) -> list[
                 continue
             lines.append(
                 "- "
-                + f"{str(entry.get('ticker', 'N/A'))}: start_price {_safe_float(entry.get('start_price', 0.0)):.2f}, "
-                + f"end_price {_safe_float(entry.get('end_price', 0.0)):.2f}, "
-                + f"return_pct {_safe_float(entry.get('return_pct', 0.0)):.2f}%, "
-                + f"52w_high {_safe_float(entry.get('52w_high', 0.0)):.2f}, "
-                + f"52w_low {_safe_float(entry.get('52w_low', 0.0)):.2f}, "
-                + f"drawdown {_safe_float(entry.get('drawdown', 0.0)):.2f}%, "
-                + f"volatility {_safe_float(entry.get('volatility', 0.0)):.2f}%"
+                + f"{str(entry.get('ticker', 'N/A'))}: start_price {_format_optional_metric(entry.get('start_price'))}, "
+                + f"end_price {_format_optional_metric(entry.get('end_price'))}, "
+                + f"return_pct {_format_optional_metric(entry.get('return_pct'), suffix='%')}, "
+                + f"52w_high {_format_optional_metric(entry.get('52w_high'))}, "
+                + f"52w_low {_format_optional_metric(entry.get('52w_low'))}, "
+                + f"drawdown {_format_optional_metric(entry.get('drawdown'), suffix='%')}, "
+                + f"volatility {_format_optional_metric(entry.get('volatility'), suffix='%')}"
             )
     else:
         lines.append("(No data available)")
@@ -4414,6 +4533,7 @@ def build_metadata_section(export_payload: dict[str, object]) -> list[str]:
 
 
 def assemble_export(section_blocks: list[list[str]], export_payload: dict[str, object]) -> str:
+    export_payload = _sanitize_export_value(export_payload)
     lines: list[str] = []
     for block in section_blocks:
         lines.extend(block)
@@ -4442,12 +4562,13 @@ def assemble_export(section_blocks: list[list[str]], export_payload: dict[str, o
             validate_snapshot(unified_snapshot)
         except ValueError as exc:
             lines.extend(["", "## Snapshot Validation", f"- {exc}"])
-        lines.extend(["", "---", "", generate_portfolio_export(unified_snapshot)])
+        lines.extend(["", "---", "", generate_portfolio_export(unified_snapshot, include_alerts=False)])
 
     return "\n".join(lines)
 
 
 def generate_export(export_payload: dict[str, object]) -> str:
+    export_payload = _sanitize_export_value(export_payload)
     section_blocks = [
         build_context_summary(export_payload),
         build_concentration_context(export_payload),

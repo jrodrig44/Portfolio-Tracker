@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import pandas as pd
 
 
-OPTION_INCOME_ETFS = {"JEPI", "JEPQ", "QYLD", "RYLD", "XYLD", "SDIV"}
+OPTION_INCOME_ETFS = {"JEPI", "JEPQ", "QYLD", "RYLD", "XYLD"}
 TRADITIONAL_DIVIDEND_ETFS = {"SCHD", "VOO", "VTI", "SPY", "IVV"}
-HIGH_YIELD_OPTION_ETFS = {"JEPI", "JEPQ", "QYLD", "RYLD", "XYLD", "SDIV"}
+HIGH_YIELD_OPTION_ETFS = {"JEPI", "JEPQ", "QYLD", "RYLD", "XYLD"}
 REIT_ASSET_TYPES = {"REIT"}
 BOND_ASSET_TYPES = {"BOND FUND"}
 
@@ -16,7 +17,8 @@ def _to_float(value: Any, default: float = 0.0) -> float:
     try:
         if value in [None, ""]:
             return default
-        return float(value)
+        numeric_value = float(value)
+        return numeric_value if math.isfinite(numeric_value) else default
     except (TypeError, ValueError):
         return default
 

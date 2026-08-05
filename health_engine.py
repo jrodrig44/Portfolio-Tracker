@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import pandas as pd
@@ -7,7 +8,7 @@ import pandas as pd
 from income_quality_engine import compute_income_quality
 
 
-OPTION_INCOME_ETFS = {"JEPI", "SDIV", "QYLD", "RYLD", "XYLD"}
+OPTION_INCOME_ETFS = {"JEPI", "QYLD", "RYLD", "XYLD"}
 BROAD_ETFS = {"VTI", "VOO", "SPY", "IVV", "SCHD"}
 GROWTH_TICKERS = {"SCHD", "HD", "NVDA"}
 LOW_GROWTH_TICKERS = {"SDIV", "GOOD"}
@@ -20,7 +21,8 @@ def _to_float(value: Any, default: float = 0.0) -> float:
     try:
         if value in [None, ""]:
             return default
-        return float(value)
+        numeric_value = float(value)
+        return numeric_value if math.isfinite(numeric_value) else default
     except (TypeError, ValueError):
         return default
 

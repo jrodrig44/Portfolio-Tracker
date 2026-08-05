@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import pandas as pd
 
 
-HIGH_VOLATILITY_ETFS = {"JEPI", "SDIV", "QYLD", "RYLD", "XYLD"}
+HIGH_VOLATILITY_ETFS = {"JEPI", "QYLD", "RYLD", "XYLD"}
 EMPLOYER_TICKER = "HD"
 
 
 def _to_float(value: Any, default: float = 0.0) -> float:
     try:
-        return float(value)
+        numeric_value = float(value)
+        return numeric_value if math.isfinite(numeric_value) else default
     except (TypeError, ValueError):
         return default
 
@@ -133,7 +135,7 @@ def compute_distribution_stability(df: pd.DataFrame) -> float:
 
     stable_count = int(((metrics["annual_income"] > 0) & (metrics["dividend_yield_pct"] <= 10.0)).sum())
     stable_ratio = stable_count / len(metrics) if len(metrics) > 0 else 0.0
-    has_variable_etf = bool(metrics["ticker"].isin({"JEPI", "SDIV"}).any())
+    has_variable_etf = bool(metrics["ticker"].isin({"JEPI"}).any())
 
     score = 100.0
     score -= monthly_weight_variance * 100.0

@@ -1,8 +1,11 @@
+import json
 import unittest
 
 import pandas as pd
 
 from app import (
+    _build_ai_export_json,
+    _build_export_markdown,
     ESPP_CONTRIB_BIWEEKLY,
     _build_contribution_context,
     _normalize_columns,
@@ -84,6 +87,46 @@ class HDESPPNormalizationTests(unittest.TestCase):
         )
         self.assertTrue(changed)
         self.assertEqual(cleaned.iloc[0]["espp_acquired_shares"], 10.0)
+
+    def test_decimal_espp_discount_exports_as_15_percent(self) -> None:
+        holdings = pd.DataFrame(
+            [
+                {
+                    "ticker": "HD",
+                    "shares": 10.0,
+                    "amount_invested": 1000.0,
+                    "espp_enabled": True,
+                    "employer_stock": True,
+                    "espp_discount_pct": 0.15,
+                    "asset_type": "Stock",
+                    "sector": "Consumer Cyclical",
+                }
+            ]
+        )
+        metrics = pd.DataFrame(
+            [
+                {
+                    "ticker": "HD",
+                    "current_price": 100.0,
+                    "market_value": 1000.0,
+                    "annual_income": 10.0,
+                    "portfolio_yield_pct": 1.0,
+                    "cost_basis": 1000.0,
+                    "unrealized_gain": 0.0,
+                    "sector": "Consumer Cyclical",
+                    "asset_type": "Stock",
+                }
+            ]
+        )
+
+        contribution_context = _build_contribution_context(holdings, metrics)
+        payload = json.loads(_build_ai_export_json(holdings, metrics))
+        markdown = _build_export_markdown(holdings, metrics)
+
+        self.assertEqual(contribution_context["summary"]["hd_espp_discount_pct"], 15.0)
+        self.assertEqual(payload["holdings"][0]["espp_discount_pct"], 15.0)
+        self.assertIn("HD ESPP Discount: 15.0%", markdown)
+        self.assertNotIn("1500.0%", markdown)
 
 
 if __name__ == "__main__":
