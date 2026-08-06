@@ -8,8 +8,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import requests
-
 import pandas as pd
 
 import app
@@ -212,14 +210,18 @@ def _sample_full_ai_payload() -> dict[str, object]:
 
 
 class TokenRouterClientTests(unittest.TestCase):
-    def _fake_response(self, status_code: int, payload: object):
-        if isinstance(payload, (dict, list)):
-            text = json.dumps(payload)
-            content = text.encode("utf-8")
-        else:
-            text = str(payload)
-            content = text.encode("utf-8")
-        return SimpleNamespace(status_code=status_code, text=text, content=content)
+    class _FakeSDKObject:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self._payload = payload
+
+        def model_dump(self) -> dict[str, object]:
+            return self._payload
+
+    def _fake_sdk_client(self, create_result_or_side_effect: object, *, side_effect: bool = False):
+        create_mock = MagicMock(side_effect=create_result_or_side_effect) if side_effect else MagicMock(return_value=create_result_or_side_effect)
+        completions = SimpleNamespace(create=create_mock)
+        chat = SimpleNamespace(completions=completions)
+        return SimpleNamespace(chat=chat), create_mock
 
     def test_default_base_url_points_to_tokenrouter_com(self) -> None:
         self.assertEqual(TOKENROUTER_DEFAULT_BASE_URL, "https://api.tokenrouter.com/v1")
@@ -229,47 +231,37 @@ class TokenRouterClientTests(unittest.TestCase):
         self.assertEqual(client.timeout_seconds, 180.0)
 
     def test_chat_completions_sends_bearer_header_and_keeps_key_out_of_payload(self) -> None:
-        captured: dict[str, object] = {}
-
-        def fake_post(url, headers, json, timeout):
-            captured["url"] = url
-            captured["headers"] = headers
-            captured["body"] = json
-            captured["timeout"] = timeout
-            return self._fake_response(
-                200,
-                {
-                    "model": TOKENROUTER_DEFAULT_MODEL,
-                    "choices": [{"message": {"content": "# Analysis"}}],
-                    "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
-                },
-            )
+        response_payload = self._FakeSDKObject(
+            {
+                "model": TOKENROUTER_DEFAULT_MODEL,
+                "choices": [{"message": {"content": "# Analysis"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            }
+        )
+        sdk_client, create_mock = self._fake_sdk_client(response_payload)
 
         client = TokenRouterClient(api_key="sk-test-key", base_url=TOKENROUTER_DEFAULT_BASE_URL, timeout_seconds=1.0)
-        with patch("tokenrouter_client.requests.post", side_effect=fake_post):
+        with patch.object(TokenRouterClient, "_openai_client", return_value=sdk_client):
             result = client.chat_completions(model=TOKENROUTER_DEFAULT_MODEL, messages=[{"role": "user", "content": "Hello"}])
 
         self.assertEqual(result.content, "# Analysis")
         self.assertEqual(result.model, TOKENROUTER_DEFAULT_MODEL)
-        self.assertEqual(captured["url"], f"{TOKENROUTER_DEFAULT_BASE_URL}/chat/completions")
-        self.assertIn("Authorization", captured["headers"])
-        self.assertEqual(str(captured["body"]).find("sk-test-key"), -1)
-        self.assertEqual(captured["timeout"], (TOKENROUTER_DEFAULT_CONNECT_TIMEOUT_SECONDS, 1.0))
-        self.assertEqual(captured["body"]["model"], TOKENROUTER_DEFAULT_MODEL)
+        called_kwargs = create_mock.call_args.kwargs
+        self.assertEqual(called_kwargs["model"], TOKENROUTER_DEFAULT_MODEL)
+        self.assertEqual(called_kwargs["messages"][0]["content"], "Hello")
+        self.assertFalse(called_kwargs["stream"])
 
     def test_chat_completions_parses_successful_response(self) -> None:
+        response_payload = self._FakeSDKObject(
+            {
+                "model": TOKENROUTER_DEFAULT_MODEL,
+                "choices": [{"message": {"content": "OK"}}],
+                "usage": {"prompt_tokens": 6, "completion_tokens": 28, "total_tokens": 34},
+            }
+        )
+        sdk_client, _ = self._fake_sdk_client(response_payload)
         client = TokenRouterClient(api_key="sk-test-key")
-        with patch(
-            "tokenrouter_client.requests.post",
-            return_value=self._fake_response(
-                200,
-                {
-                    "model": TOKENROUTER_DEFAULT_MODEL,
-                    "choices": [{"message": {"content": "OK"}}],
-                    "usage": {"prompt_tokens": 6, "completion_tokens": 28, "total_tokens": 34},
-                },
-            ),
-        ):
+        with patch.object(TokenRouterClient, "_openai_client", return_value=sdk_client):
             result = client.chat_completions(model=TOKENROUTER_DEFAULT_MODEL, messages=[{"role": "user", "content": "Hello"}])
 
         self.assertEqual(result.content, "OK")
@@ -288,49 +280,64 @@ class TokenRouterClientTests(unittest.TestCase):
             client.chat_completions(model="not-a-real-model", messages=[{"role": "user", "content": "Hello"}])
 
     def test_authentication_error_is_mapped(self) -> None:
+        class FakeAuthenticationError(Exception):
+            pass
+
+        sdk_client, _ = self._fake_sdk_client(FakeAuthenticationError("bad key"), side_effect=True)
         client = TokenRouterClient(api_key="sk-test-key")
 
-        with patch(
-            "tokenrouter_client.requests.post",
-            return_value=self._fake_response(401, {"error": {"message": "invalid key"}}),
-        ):
+        with patch("tokenrouter_client.AuthenticationError", FakeAuthenticationError), patch.object(TokenRouterClient, "_openai_client", return_value=sdk_client):
             with self.assertRaises(TokenRouterAuthenticationError):
                 client.chat_completions(model=TOKENROUTER_DEFAULT_MODEL, messages=[{"role": "user", "content": "Hello"}])
 
     def test_balance_error_is_mapped(self) -> None:
+        class FakeAPIStatusError(Exception):
+            def __init__(self, message: str) -> None:
+                super().__init__(message)
+                self.status_code = 402
+                self.response = SimpleNamespace(status_code=402, text='{"error":{"message":"insufficient credits"}}')
+
+        sdk_client, _ = self._fake_sdk_client(FakeAPIStatusError("payment required"), side_effect=True)
         client = TokenRouterClient(api_key="sk-test-key")
 
-        with patch(
-            "tokenrouter_client.requests.post",
-            return_value=self._fake_response(402, {"error": {"message": "insufficient credits"}}),
-        ):
+        with patch("tokenrouter_client.APIStatusError", FakeAPIStatusError), patch.object(TokenRouterClient, "_openai_client", return_value=sdk_client):
             with self.assertRaises(TokenRouterInsufficientBalanceError):
                 client.chat_completions(model=TOKENROUTER_DEFAULT_MODEL, messages=[{"role": "user", "content": "Hello"}])
 
     def test_rate_limit_error_is_mapped(self) -> None:
+        class FakeRateLimitError(Exception):
+            pass
+
+        sdk_client, _ = self._fake_sdk_client(FakeRateLimitError("slow down"), side_effect=True)
         client = TokenRouterClient(api_key="sk-test-key")
 
-        with patch(
-            "tokenrouter_client.requests.post",
-            return_value=self._fake_response(429, {"error": {"message": "slow down"}}),
-        ):
+        with patch("tokenrouter_client.RateLimitError", FakeRateLimitError), patch.object(TokenRouterClient, "_openai_client", return_value=sdk_client):
             with self.assertRaises(TokenRouterRateLimitError):
                 client.chat_completions(model=TOKENROUTER_DEFAULT_MODEL, messages=[{"role": "user", "content": "Hello"}])
 
     def test_timeout_and_connection_errors_are_mapped(self) -> None:
-        client = TokenRouterClient(api_key="sk-test-key")
+        class FakeAPITimeoutError(Exception):
+            pass
 
-        with patch("tokenrouter_client.requests.post", side_effect=requests.Timeout("timed out")):
+        class FakeAPIConnectionError(Exception):
+            pass
+
+        timeout_client, _ = self._fake_sdk_client(FakeAPITimeoutError("timed out"), side_effect=True)
+        connection_client, _ = self._fake_sdk_client(FakeAPIConnectionError("connection refused"), side_effect=True)
+
+        client = TokenRouterClient(api_key="sk-test-key")
+        with patch("tokenrouter_client.APITimeoutError", FakeAPITimeoutError), patch.object(TokenRouterClient, "_openai_client", return_value=timeout_client):
             with self.assertRaises(TokenRouterTimeoutError):
                 client.chat_completions(model=TOKENROUTER_DEFAULT_MODEL, messages=[{"role": "user", "content": "Hello"}])
 
-        with patch("tokenrouter_client.requests.post", side_effect=requests.ConnectionError("connection refused")):
+        with patch("tokenrouter_client.APIConnectionError", FakeAPIConnectionError), patch.object(TokenRouterClient, "_openai_client", return_value=connection_client):
             with self.assertRaises(TokenRouterConnectionError):
                 client.chat_completions(model=TOKENROUTER_DEFAULT_MODEL, messages=[{"role": "user", "content": "Hello"}])
 
     def test_malformed_json_is_rejected(self) -> None:
         client = TokenRouterClient(api_key="sk-test-key")
-        with patch("tokenrouter_client.requests.post", return_value=self._fake_response(200, "not-json")):
+        sdk_client, _ = self._fake_sdk_client(SimpleNamespace(model_dump=MagicMock(return_value=["not-a-dict"])))
+        with patch.object(TokenRouterClient, "_openai_client", return_value=sdk_client):
             with self.assertRaises(TokenRouterResponseError):
                 client.chat_completions(model=TOKENROUTER_DEFAULT_MODEL, messages=[{"role": "user", "content": "Hello"}])
 
@@ -341,7 +348,8 @@ class TokenRouterClientTests(unittest.TestCase):
             "choices": [{"message": {"role": "assistant", "content": "Final analysis text"}}],
             "usage": {"prompt_tokens": 100, "completion_tokens": 200, "total_tokens": 300},
         }
-        with patch("tokenrouter_client.requests.post", return_value=self._fake_response(200, payload)):
+        sdk_client, _ = self._fake_sdk_client(self._FakeSDKObject(payload))
+        with patch.object(TokenRouterClient, "_openai_client", return_value=sdk_client):
             result = client.chat_completions(model=TOKENROUTER_DEFAULT_MODEL, messages=[{"role": "user", "content": "Hello"}])
 
         self.assertEqual(result.content, "Final analysis text")
@@ -366,7 +374,8 @@ class TokenRouterClientTests(unittest.TestCase):
             ],
             "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
         }
-        with patch("tokenrouter_client.requests.post", return_value=self._fake_response(200, payload)):
+        sdk_client, _ = self._fake_sdk_client(self._FakeSDKObject(payload))
+        with patch.object(TokenRouterClient, "_openai_client", return_value=sdk_client):
             result = client.chat_completions(model=TOKENROUTER_DEFAULT_MODEL, messages=[{"role": "user", "content": "Hello"}])
 
         self.assertIn("First paragraph.", result.content)
@@ -389,7 +398,8 @@ class TokenRouterClientTests(unittest.TestCase):
             "usage": {"prompt_tokens": 55, "completion_tokens": 66, "total_tokens": 121},
             "cost": {"total": 0.0},
         }
-        with patch("tokenrouter_client.requests.post", return_value=self._fake_response(200, payload)):
+        sdk_client, _ = self._fake_sdk_client(self._FakeSDKObject(payload))
+        with patch.object(TokenRouterClient, "_openai_client", return_value=sdk_client):
             result = client.chat_completions(model=TOKENROUTER_DEFAULT_MODEL, messages=[{"role": "user", "content": "Hello"}])
 
         self.assertEqual(result.content, "Final answer from output_text")
@@ -402,7 +412,8 @@ class TokenRouterClientTests(unittest.TestCase):
             "choices": [{"message": {"role": "assistant", "content": ""}}],
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         }
-        with patch("tokenrouter_client.requests.post", return_value=self._fake_response(200, payload)):
+        sdk_client, _ = self._fake_sdk_client(self._FakeSDKObject(payload))
+        with patch.object(TokenRouterClient, "_openai_client", return_value=sdk_client):
             with self.assertRaises(TokenRouterResponseError) as ctx:
                 client.chat_completions(model=TOKENROUTER_DEFAULT_MODEL, messages=[{"role": "user", "content": "Hello"}])
 
@@ -410,6 +421,74 @@ class TokenRouterClientTests(unittest.TestCase):
         self.assertIn("http_status", diagnostic)
         self.assertIn("top_level_keys", diagnostic)
         self.assertIn("choices_count", diagnostic)
+
+    def test_streaming_chunks_are_joined_in_order(self) -> None:
+        client = TokenRouterClient(api_key="sk-test-key")
+        chunks = iter(
+            [
+                self._FakeSDKObject({"model": TOKENROUTER_DEFAULT_MODEL, "choices": [{"delta": {"content": "Part A "}, "finish_reason": None}]}),
+                self._FakeSDKObject({"model": TOKENROUTER_DEFAULT_MODEL, "choices": [{"delta": {"content": "Part B"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 12, "completion_tokens": 7, "total_tokens": 19}}),
+            ]
+        )
+        sdk_client, create_mock = self._fake_sdk_client(chunks)
+
+        with patch.object(TokenRouterClient, "_openai_client", return_value=sdk_client):
+            result = client.chat_completions(
+                model=TOKENROUTER_DEFAULT_MODEL,
+                messages=[{"role": "user", "content": "Hello"}],
+                stream=True,
+                stream_options={"include_usage": True},
+            )
+
+        self.assertEqual(result.content, "Part A Part B")
+        self.assertEqual(result.usage_metadata["total_tokens"], 19)
+        self.assertTrue(result.response_diagnostic["streaming"])
+        self.assertEqual(result.response_diagnostic["chunks_received"], 2)
+        called_kwargs = create_mock.call_args.kwargs
+        self.assertTrue(called_kwargs["stream"])
+        self.assertEqual(called_kwargs["stream_options"], {"include_usage": True})
+
+    def test_streaming_ignores_empty_chunks_and_handles_usage_only_final_chunk(self) -> None:
+        client = TokenRouterClient(api_key="sk-test-key")
+        chunks = iter(
+            [
+                self._FakeSDKObject({"model": TOKENROUTER_DEFAULT_MODEL, "choices": [{"delta": {"content": ""}, "finish_reason": None}]}),
+                self._FakeSDKObject({"model": TOKENROUTER_DEFAULT_MODEL, "choices": [{"delta": {"content": "Final"}, "finish_reason": "stop"}]}),
+                self._FakeSDKObject({"model": TOKENROUTER_DEFAULT_MODEL, "usage": {"prompt_tokens": 20, "completion_tokens": 4, "total_tokens": 24}}),
+            ]
+        )
+        sdk_client, _ = self._fake_sdk_client(chunks)
+
+        with patch.object(TokenRouterClient, "_openai_client", return_value=sdk_client):
+            result = client.chat_completions(
+                model=TOKENROUTER_DEFAULT_MODEL,
+                messages=[{"role": "user", "content": "Hello"}],
+                stream=True,
+                stream_options={"include_usage": True},
+            )
+
+        self.assertEqual(result.content, "Final")
+        self.assertEqual(result.usage_metadata["prompt_tokens"], 20)
+        self.assertEqual(result.response_diagnostic["content_chunk_count"], 1)
+
+    def test_empty_completed_stream_raises_useful_error(self) -> None:
+        client = TokenRouterClient(api_key="sk-test-key")
+        chunks = iter([self._FakeSDKObject({"model": TOKENROUTER_DEFAULT_MODEL, "choices": [{"delta": {"content": ""}, "finish_reason": "stop"}]})])
+        sdk_client, _ = self._fake_sdk_client(chunks)
+
+        with patch.object(TokenRouterClient, "_openai_client", return_value=sdk_client):
+            with self.assertRaises(TokenRouterResponseError) as ctx:
+                client.chat_completions(
+                    model=TOKENROUTER_DEFAULT_MODEL,
+                    messages=[{"role": "user", "content": "Hello"}],
+                    stream=True,
+                    stream_options={"include_usage": True},
+                )
+
+        diagnostic = getattr(ctx.exception, "diagnostic", {})
+        self.assertTrue(diagnostic.get("streaming"))
+        self.assertIn("chunks_received", diagnostic)
+        self.assertIn("final_content_chars", diagnostic)
 
 
 class AiAnalysisPromptTests(unittest.TestCase):

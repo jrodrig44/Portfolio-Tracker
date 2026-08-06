@@ -6160,6 +6160,26 @@ def _format_tokenrouter_response_diagnostic(diagnostic: object) -> str:
         return "No additional response-shape diagnostics were available."
 
     lines = ["Sanitized TokenRouter response diagnostic:"]
+    if "streaming" in diagnostic:
+        lines.append(f"- Streaming: {bool(diagnostic.get('streaming'))}")
+    if "chunks_received" in diagnostic:
+        lines.append(f"- Chunks received: {diagnostic.get('chunks_received')}")
+    if "content_chunk_count" in diagnostic:
+        lines.append(f"- Content-bearing chunks: {diagnostic.get('content_chunk_count')}")
+    if "final_content_chars" in diagnostic:
+        lines.append(f"- Final content characters: {diagnostic.get('final_content_chars')}")
+    if "finish_reason" in diagnostic and diagnostic.get("finish_reason"):
+        lines.append(f"- Finish reason: {diagnostic.get('finish_reason')}")
+    if isinstance(diagnostic.get("usage_totals"), dict):
+        usage_totals = diagnostic.get("usage_totals")
+        lines.append(
+            "- Usage totals: "
+            + f"prompt={int(usage_totals.get('prompt_tokens', 0))}, "
+            + f"completion={int(usage_totals.get('completion_tokens', 0))}, "
+            + f"total={int(usage_totals.get('total_tokens', 0))}"
+        )
+        if usage_totals.get("estimated_cost") is not None:
+            lines.append(f"- Estimated cost: ${float(usage_totals.get('estimated_cost', 0.0)):.6f}")
     if "http_status" in diagnostic:
         lines.append(f"- HTTP status: {diagnostic.get('http_status')}")
     if "top_level_keys" in diagnostic:
@@ -6281,6 +6301,8 @@ def _render_ai_analysis_tab(holdings: pd.DataFrame, metrics: pd.DataFrame, mobil
                     messages=messages,
                     max_tokens=1400,
                     temperature=0.2,
+                    stream=True,
+                    stream_options={"include_usage": True},
                 )
             analysis_text = str(getattr(result, "content", "") or "").strip()
             st.session_state["tokenrouter_analysis"] = analysis_text

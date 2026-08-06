@@ -5,7 +5,8 @@ from typing import Any
 import json
 import os
 
-import requests
+import httpx
+from openai import APIConnectionError, APIStatusError, APITimeoutError, AuthenticationError, OpenAI, RateLimitError
 
 TOKENROUTER_DEFAULT_BASE_URL = "https://api.tokenrouter.com/v1"
 TOKENROUTER_DEFAULT_MODEL = "moonshotai/kimi-k3-free"
@@ -98,6 +99,8 @@ class TokenRouterClient:
         max_tokens: int = 1200,
         temperature: float = 0.2,
         top_p: float | None = None,
+        stream: bool = False,
+        stream_options: dict[str, Any] | None = None,
     ) -> TokenRouterChatResult:
         model_id = str(model).strip()
         if not model_id:
@@ -117,8 +120,49 @@ class TokenRouterClient:
         }
         if top_p is not None:
             payload["top_p"] = float(top_p)
+        if stream and stream_options is not None:
+            payload["stream_options"] = stream_options
 
-        response = self._post_json("/chat/completions", payload)
+        if stream:
+            return self._chat_completions_streaming(model_id=model_id, payload=payload)
+        return self._chat_completions_non_streaming(model_id=model_id, payload=payload)
+
+    def _openai_client(self) -> OpenAI:
+        timeout = httpx.Timeout(
+            timeout=self.timeout_seconds,
+            connect=self.connect_timeout_seconds,
+            read=self.timeout_seconds,
+            write=self.timeout_seconds,
+        )
+        return OpenAI(
+            base_url=self.base_url,
+            api_key=self.api_key,
+            timeout=timeout,
+        )
+
+    def _chat_completions_non_streaming(self, *, model_id: str, payload: dict[str, Any]) -> TokenRouterChatResult:
+        client = self._openai_client()
+        try:
+            response_obj = client.chat.completions.create(**payload, stream=False)
+        except APITimeoutError as exc:
+            raise TokenRouterTimeoutError("TokenRouter request timed out.") from exc
+        except APIConnectionError as exc:
+            raise TokenRouterConnectionError(f"TokenRouter connection failed: {exc}") from exc
+        except AuthenticationError as exc:
+            raise TokenRouterAuthenticationError("TokenRouter rejected the API key.") from exc
+        except RateLimitError as exc:
+            raise TokenRouterRateLimitError("TokenRouter rate limited the request.") from exc
+        except APIStatusError as exc:
+            status_code = int(getattr(exc, "status_code", 0) or 0) or getattr(getattr(exc, "response", None), "status_code", None)
+            body = _api_status_error_body(exc)
+            raise _map_http_error(status_code, body) from exc
+        except Exception as exc:
+            raise TokenRouterError(f"TokenRouter request failed: {exc}") from exc
+
+        response = _coerce_to_dict(response_obj)
+        if not response:
+            raise TokenRouterResponseError("TokenRouter returned an empty response body.")
+
         content = _extract_chat_content(response)
         if not str(content or "").strip():
             raise TokenRouterResponseError(
@@ -132,48 +176,96 @@ class TokenRouterClient:
             raw_response=response,
             usage=response.get("usage") if isinstance(response.get("usage"), dict) else None,
             usage_metadata=_extract_usage_metadata(response),
-            response_diagnostic=_response_shape_diagnostic(response),
+            response_diagnostic={
+                "streaming": False,
+                **_response_shape_diagnostic(response),
+            },
         )
 
-    def _post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        url = _join_url(self.base_url, path)
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
+    def _chat_completions_streaming(self, *, model_id: str, payload: dict[str, Any]) -> TokenRouterChatResult:
+        client = self._openai_client()
+        content_parts: list[str] = []
+        chunks_received = 0
+        content_chunk_count = 0
+        finish_reason = ""
+        usage_dict: dict[str, Any] = {}
+        resolved_model = model_id
+
         try:
-            response = requests.post(
-                url,
-                headers=headers,
-                json=payload,
-                timeout=(self.connect_timeout_seconds, self.timeout_seconds),
-            )
-        except requests.Timeout as exc:
+            stream = client.chat.completions.create(**payload, stream=True)
+            for chunk in stream:
+                chunks_received += 1
+                chunk_dict = _coerce_to_dict(chunk)
+                if not isinstance(chunk_dict, dict):
+                    continue
+
+                chunk_model = str(chunk_dict.get("model", "") or "")
+                if chunk_model:
+                    resolved_model = chunk_model
+
+                chunk_usage = chunk_dict.get("usage")
+                if isinstance(chunk_usage, dict):
+                    usage_dict = chunk_usage
+
+                choices = chunk_dict.get("choices")
+                if not isinstance(choices, list) or not choices:
+                    continue
+                first_choice = choices[0] if isinstance(choices[0], dict) else {}
+                chunk_finish_reason = str(first_choice.get("finish_reason", "") or "")
+                if chunk_finish_reason:
+                    finish_reason = chunk_finish_reason
+
+                delta = first_choice.get("delta") if isinstance(first_choice.get("delta"), dict) else {}
+                delta_text = _extract_stream_text_value(delta.get("content"))
+                if delta_text.strip():
+                    content_parts.append(delta_text)
+                    content_chunk_count += 1
+        except APITimeoutError as exc:
             raise TokenRouterTimeoutError("TokenRouter request timed out.") from exc
-        except requests.ConnectionError as exc:
+        except APIConnectionError as exc:
             raise TokenRouterConnectionError(f"TokenRouter connection failed: {exc}") from exc
-        except requests.RequestException as exc:
+        except AuthenticationError as exc:
+            raise TokenRouterAuthenticationError("TokenRouter rejected the API key.") from exc
+        except RateLimitError as exc:
+            raise TokenRouterRateLimitError("TokenRouter rate limited the request.") from exc
+        except APIStatusError as exc:
+            status_code = int(getattr(exc, "status_code", 0) or 0) or getattr(getattr(exc, "response", None), "status_code", None)
+            body = _api_status_error_body(exc)
+            raise _map_http_error(status_code, body) from exc
+        except Exception as exc:
             raise TokenRouterError(f"TokenRouter request failed: {exc}") from exc
 
-        if response.status_code >= 400:
-            raise _map_http_error(response.status_code, response.text)
+        full_content = "".join(content_parts).strip()
+        usage_metadata = _extract_usage_metadata({"usage": usage_dict, "model": resolved_model})
+        stream_diagnostic = {
+            "streaming": True,
+            "chunks_received": chunks_received,
+            "content_chunk_count": content_chunk_count,
+            "final_content_chars": len(full_content),
+            "finish_reason": finish_reason,
+            "usage_totals": {
+                "prompt_tokens": int(usage_metadata.get("prompt_tokens", 0)) if isinstance(usage_metadata, dict) else 0,
+                "completion_tokens": int(usage_metadata.get("completion_tokens", 0)) if isinstance(usage_metadata, dict) else 0,
+                "total_tokens": int(usage_metadata.get("total_tokens", 0)) if isinstance(usage_metadata, dict) else 0,
+                "estimated_cost": usage_metadata.get("estimated_cost") if isinstance(usage_metadata, dict) else None,
+            },
+        }
+        if not full_content:
+            raise TokenRouterResponseError(
+                "TokenRouter stream completed without any assistant content.",
+                diagnostic=stream_diagnostic,
+            )
 
-        response_bytes = response.content
-
-        if not response_bytes:
-            raise TokenRouterResponseError("TokenRouter returned an empty response body.")
-
-        try:
-            response_json = json.loads(response_bytes.decode("utf-8"))
-        except Exception as exc:
-            raise TokenRouterResponseError("TokenRouter returned malformed JSON.") from exc
-
-        if not isinstance(response_json, dict):
-            raise TokenRouterResponseError("TokenRouter returned an unexpected response shape.")
-
-        response_json.setdefault("_http_status", response.status_code)
-        return response_json
+        return TokenRouterChatResult(
+            content=full_content,
+            model=resolved_model,
+            raw_response={
+                "streaming": True,
+            },
+            usage=usage_dict if usage_dict else None,
+            usage_metadata=usage_metadata,
+            response_diagnostic=stream_diagnostic,
+        )
 
 
 def _normalize_base_url(base_url: str) -> str:
@@ -183,6 +275,31 @@ def _normalize_base_url(base_url: str) -> str:
 
 def _join_url(base_url: str, path: str) -> str:
     return f"{_normalize_base_url(base_url)}{path}"
+
+
+def _coerce_to_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if hasattr(value, "model_dump"):
+        try:
+            dumped = value.model_dump()
+            return dumped if isinstance(dumped, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _api_status_error_body(exc: APIStatusError) -> str:
+    response = getattr(exc, "response", None)
+    if response is None:
+        return str(exc)
+    try:
+        text = getattr(response, "text", "")
+        if text:
+            return str(text)
+    except Exception:
+        pass
+    return str(exc)
 
 
 def _extract_chat_content(response: dict[str, Any]) -> str:
@@ -260,6 +377,28 @@ def _extract_text_value(value: Any) -> str:
                     return text
         return ""
     return str(value).strip()
+
+
+def _extract_stream_text_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            text = _extract_stream_text_value(item)
+            if text:
+                parts.append(text)
+        return "".join(parts)
+    if isinstance(value, dict):
+        for key in ("text", "content", "output_text", "value"):
+            if key in value:
+                text = _extract_stream_text_value(value.get(key))
+                if text:
+                    return text
+        return ""
+    return str(value)
 
 
 def _extract_usage_metadata(response: dict[str, Any]) -> dict[str, Any] | None:
