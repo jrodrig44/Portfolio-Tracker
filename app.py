@@ -22,8 +22,10 @@ from health_engine import compute_portfolio_health as compute_portfolio_health_e
 from portfolio_intelligence import compute_portfolio_intelligence
 from stash_history import build_statement_history_reconciliation, import_stash_statement_history
 from tokenrouter_client import (
+    TOKENROUTER_DEFAULT_CONNECT_TIMEOUT_SECONDS,
     TOKENROUTER_DEFAULT_BASE_URL,
     TOKENROUTER_DEFAULT_MODEL,
+    TOKENROUTER_TIMEOUT_SECONDS,
     TOKENROUTER_MODEL_IDS,
     TOKENROUTER_MODEL_LABELS,
     TokenRouterAuthenticationError,
@@ -5681,8 +5683,442 @@ def _analysis_type_index(default_analysis_type: str) -> int:
         return 0
 
 
-def _build_ai_analysis_request_payload(holdings: pd.DataFrame, metrics: pd.DataFrame) -> dict[str, object]:
-    return _build_ai_export_payload(
+def _tokenrouter_timeout_seconds() -> float:
+    raw_value = os.environ.get("TOKENROUTER_TIMEOUT_SECONDS")
+    if raw_value is None:
+        return float(TOKENROUTER_TIMEOUT_SECONDS)
+    try:
+        parsed = float(raw_value)
+    except (TypeError, ValueError):
+        return float(TOKENROUTER_TIMEOUT_SECONDS)
+    if parsed <= 0:
+        return float(TOKENROUTER_TIMEOUT_SECONDS)
+    return parsed
+
+
+def _estimated_tokens_from_chars(char_count: int) -> int:
+    return int(math.ceil(max(char_count, 0) / 4.0))
+
+
+def _is_empty_context_value(value: object) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, (list, dict)):
+        return len(value) == 0
+    return False
+
+
+def _strip_empty_context_values(value: object) -> object:
+    if isinstance(value, dict):
+        cleaned: dict[str, object] = {}
+        for key, nested in value.items():
+            normalized = _strip_empty_context_values(nested)
+            if not _is_empty_context_value(normalized):
+                cleaned[str(key)] = normalized
+        return cleaned
+    if isinstance(value, list):
+        cleaned_list = [_strip_empty_context_values(item) for item in value]
+        return [item for item in cleaned_list if not _is_empty_context_value(item)]
+    return value
+
+
+def _compact_records(
+    records: object,
+    fields: list[str],
+    limit: int,
+    sort_by: str | None = None,
+) -> list[dict[str, object]]:
+    if not isinstance(records, list) or limit <= 0:
+        return []
+
+    normalized_records = [item for item in records if isinstance(item, dict)]
+    if sort_by:
+        normalized_records = sorted(
+            normalized_records,
+            key=lambda row: _safe_float(row.get(sort_by), 0.0),
+            reverse=True,
+        )
+
+    compacted: list[dict[str, object]] = []
+    for row in normalized_records[:limit]:
+        trimmed = {field: row.get(field) for field in fields if field in row}
+        cleaned = _strip_empty_context_values(trimmed)
+        if isinstance(cleaned, dict) and cleaned:
+            compacted.append(cleaned)
+    return compacted
+
+
+def _pick_non_empty_fields(source: object, fields: list[str]) -> dict[str, object]:
+    if not isinstance(source, dict):
+        return {}
+    out: dict[str, object] = {}
+    for field in fields:
+        value = source.get(field)
+        if not _is_empty_context_value(value):
+            out[field] = value
+    return out
+
+
+def _extract_data_quality_warnings(full_payload: dict[str, object]) -> list[str]:
+    warnings: list[str] = []
+
+    warnings_payload = full_payload.get("warnings")
+    if isinstance(warnings_payload, dict):
+        for key in ("snapshot_validation_errors", "missing_export_fields"):
+            values = warnings_payload.get(key)
+            if isinstance(values, list):
+                for value in values:
+                    text = str(value).strip()
+                    if text:
+                        warnings.append(text)
+
+    for issue in full_payload.get("data_quality_issues", []) if isinstance(full_payload.get("data_quality_issues"), list) else []:
+        text = str(issue).strip()
+        if text:
+            warnings.append(text)
+
+    data_completeness = full_payload.get("data_completeness")
+    if isinstance(data_completeness, dict):
+        direct_cov = _safe_float(data_completeness.get("direct_sector_classification_coverage_pct"), 0.0)
+        lookthrough_cov = _safe_float(data_completeness.get("fund_lookthrough_coverage_pct"), 0.0)
+        total_cov = _safe_float(data_completeness.get("overall_resolved_exposure_coverage_pct"), 0.0)
+        if direct_cov < 90:
+            warnings.append(f"Direct sector classification coverage is low ({direct_cov:.1f}%).")
+        if lookthrough_cov < 90:
+            warnings.append(f"Fund look-through coverage is low ({lookthrough_cov:.1f}%).")
+        if total_cov < 90:
+            warnings.append(f"Overall resolved exposure coverage is low ({total_cov:.1f}%).")
+
+    unresolved_exposure = full_payload.get("unresolved_exposure")
+    if isinstance(unresolved_exposure, dict):
+        unresolved_value = _safe_float(unresolved_exposure.get("unresolved_fund_exposure"), 0.0)
+        if unresolved_value > 0:
+            warnings.append(
+                f"Unresolved fund look-through exposure remains in portfolio totals (${unresolved_value:,.2f})."
+            )
+
+    deduped = []
+    seen: set[str] = set()
+    for warning in warnings:
+        if warning not in seen:
+            deduped.append(warning)
+            seen.add(warning)
+    return deduped
+
+
+def _summarize_supplemental_yahoo_data(
+    records: object,
+    priority_tickers: list[str],
+    limit: int,
+) -> list[dict[str, object]]:
+    if not isinstance(records, list) or limit <= 0:
+        return []
+
+    by_ticker: dict[str, dict[str, object]] = {}
+    for row in records:
+        if not isinstance(row, dict):
+            continue
+        ticker = str(row.get("ticker", "")).strip().upper()
+        if not ticker:
+            continue
+        by_ticker[ticker] = row
+
+    ordered_tickers = []
+    for ticker in priority_tickers:
+        upper = str(ticker).strip().upper()
+        if upper and upper in by_ticker and upper not in ordered_tickers:
+            ordered_tickers.append(upper)
+    for ticker in by_ticker:
+        if ticker not in ordered_tickers:
+            ordered_tickers.append(ticker)
+
+    summarized: list[dict[str, object]] = []
+    for ticker in ordered_tickers[:limit]:
+        source = by_ticker.get(ticker, {})
+        fundamentals = _pick_non_empty_fields(
+            source.get("fundamental_metrics", {}),
+            [
+                "dividend_yield",
+                "dividend_rate",
+                "payout_ratio",
+                "trailing_pe",
+                "forward_pe",
+                "beta",
+                "debt_to_equity",
+                "interest_coverage",
+            ],
+        )
+        growth = _pick_non_empty_fields(
+            source.get("earnings_and_estimates", {}),
+            ["earnings_growth", "revenue_growth", "eps_current_year", "eps_next_year", "next_earnings_date"],
+        )
+        analyst = _pick_non_empty_fields(
+            source.get("analyst_targets", {}),
+            ["recommendation_key", "target_mean_price", "target_high_price", "target_low_price"],
+        )
+        fund_data = source.get("fund_data", {})
+        fund_sector_weights = []
+        if isinstance(fund_data, dict):
+            sector_weights = fund_data.get("sector_weight_summary")
+            fund_sector_weights = _compact_records(
+                sector_weights,
+                ["sector", "weight_pct"],
+                limit=4,
+                sort_by="weight_pct",
+            )
+
+        entry = {
+            "ticker": ticker,
+            "fundamentals": fundamentals,
+            "growth_and_estimates": growth,
+            "analyst_signal": analyst,
+            "fund_sector_weights": fund_sector_weights,
+            "data_source": source.get("data_source", "Yahoo Finance"),
+        }
+        cleaned = _strip_empty_context_values(entry)
+        if isinstance(cleaned, dict) and cleaned:
+            summarized.append(cleaned)
+    return summarized
+
+
+def _compact_analysis_context(
+    full_payload: dict[str, object],
+    analysis_type: str,
+    custom_question: str,
+) -> dict[str, object]:
+    selected_type = str(analysis_type or AI_ANALYSIS_TYPES[0]).strip()
+    if selected_type not in AI_ANALYSIS_TYPES:
+        selected_type = AI_ANALYSIS_TYPES[0]
+
+    custom_lower = str(custom_question or "").lower()
+    profile = {
+        "holdings_limit": 18,
+        "income_limit": 10,
+        "exposure_limit": 8,
+        "historical_limit": 6,
+        "supplemental_limit": 6,
+    }
+    if selected_type == "Comprehensive Portfolio Review":
+        profile = {"holdings_limit": 24, "income_limit": 14, "exposure_limit": 12, "historical_limit": 8, "supplemental_limit": 8}
+    elif selected_type == "Income and Dividend Analysis":
+        profile = {"holdings_limit": 16, "income_limit": 16, "exposure_limit": 5, "historical_limit": 6, "supplemental_limit": 8}
+    elif selected_type == "Diversification and Concentration":
+        profile = {"holdings_limit": 18, "income_limit": 8, "exposure_limit": 14, "historical_limit": 4, "supplemental_limit": 5}
+    elif selected_type == "Risk Analysis":
+        profile = {"holdings_limit": 18, "income_limit": 10, "exposure_limit": 12, "historical_limit": 6, "supplemental_limit": 6}
+    elif selected_type == "Contribution Allocation Review":
+        profile = {"holdings_limit": 14, "income_limit": 10, "exposure_limit": 6, "historical_limit": 4, "supplemental_limit": 4}
+    elif selected_type == "Long-Term Outlook":
+        profile = {"holdings_limit": 16, "income_limit": 10, "exposure_limit": 8, "historical_limit": 8, "supplemental_limit": 6}
+    elif selected_type == "Custom Question":
+        profile = {"holdings_limit": 18, "income_limit": 10, "exposure_limit": 8, "historical_limit": 6, "supplemental_limit": 5}
+        if any(keyword in custom_lower for keyword in ["income", "dividend", "yield", "payout"]):
+            profile["income_limit"] = 16
+            profile["supplemental_limit"] = 8
+        if any(keyword in custom_lower for keyword in ["divers", "sector", "allocation", "concentration", "weight"]):
+            profile["exposure_limit"] = 14
+        if any(keyword in custom_lower for keyword in ["risk", "drawdown", "volatility"]):
+            profile["historical_limit"] = 8
+        if any(keyword in custom_lower for keyword in ["contribution", "espp", "biweekly", "outlook", "projection"]):
+            profile["holdings_limit"] = 20
+
+    snapshot = full_payload.get("portfolio_snapshot", {}) if isinstance(full_payload.get("portfolio_snapshot", {}), dict) else {}
+    investor_profile = full_payload.get("investor_profile", {}) if isinstance(full_payload.get("investor_profile", {}), dict) else {}
+    portfolio_health = full_payload.get("portfolio_health", {}) if isinstance(full_payload.get("portfolio_health", {}), dict) else {}
+    context_summary = portfolio_health.get("context_summary", {}) if isinstance(portfolio_health, dict) else {}
+    contribution_context = full_payload.get("contribution_context", {}) if isinstance(full_payload.get("contribution_context", {}), dict) else {}
+    contribution_summary = contribution_context.get("summary", {}) if isinstance(contribution_context.get("summary", {}), dict) else {}
+
+    holdings = _compact_records(
+        full_payload.get("calculated_metrics", []),
+        [
+            "ticker",
+            "shares",
+            "current_price",
+            "market_value",
+            "portfolio_weight_pct",
+            "cost_basis",
+            "unrealized_gain",
+            "annual_income",
+            "portfolio_yield_pct",
+            "dividend_yield_pct",
+            "regular_biweekly_contribution",
+            "espp_biweekly_contribution",
+            "special_contribution",
+            "total_contribution",
+            "sector",
+            "asset_type",
+            "employer_stock",
+            "espp_enabled",
+        ],
+        limit=profile["holdings_limit"],
+        sort_by="market_value",
+    )
+
+    income_by_holding = _compact_records(
+        full_payload.get("income_allocation_by_holding", []),
+        ["ticker", "annual_income", "market_value", "income_allocation_pct"],
+        limit=profile["income_limit"],
+        sort_by="annual_income",
+    )
+
+    asset_allocation = _compact_records(
+        full_payload.get("asset_allocation", []),
+        ["asset_type", "market_value", "annual_income", "portfolio_weight_pct"],
+        limit=profile["exposure_limit"],
+        sort_by="market_value",
+    )
+    direct_sector = _compact_records(
+        full_payload.get("direct_sector_exposure", []),
+        ["sector", "market_value", "annual_income", "portfolio_weight_pct"],
+        limit=profile["exposure_limit"],
+        sort_by="market_value",
+    )
+    lookthrough_sector = _compact_records(
+        full_payload.get("look_through_sector_exposure", []),
+        ["sector", "source_holdings", "market_value", "portfolio_weight_pct"],
+        limit=max(4, profile["exposure_limit"] // 2),
+        sort_by="market_value",
+    )
+
+    top_holding_tickers = [str(row.get("ticker", "")).strip().upper() for row in holdings if isinstance(row, dict)]
+    supplemental_intelligence = _summarize_supplemental_yahoo_data(
+        full_payload.get("supplemental_yahoo_financial_data", []),
+        priority_tickers=top_holding_tickers,
+        limit=profile["supplemental_limit"],
+    )
+
+    historical_context = _compact_records(
+        full_payload.get("historical_context", []),
+        ["ticker", "return_pct", "drawdown", "volatility", "history_summary", "52w_high", "52w_low"],
+        limit=profile["historical_limit"],
+    )
+
+    compact_payload: dict[str, object] = {
+        "analysis_type": selected_type,
+        "portfolio_snapshot": _pick_non_empty_fields(
+            snapshot,
+            [
+                "portfolio_value",
+                "cost_basis",
+                "unrealized_gain",
+                "annual_income",
+                "weighted_yield_pct",
+                "holdings_count",
+                "top_holding",
+                "top_holding_weight_pct",
+                "projection_contribution_note",
+                "projected_10y_value",
+                "projected_20y_value",
+            ],
+        ),
+        "investor_profile": _pick_non_empty_fields(
+            investor_profile,
+            [
+                "portfolio_strategy",
+                "primary_goal",
+                "risk_tolerance",
+                "investment_horizon_years",
+                "contribution_frequency",
+                "contribution_amount",
+            ],
+        ),
+        "calculated_metrics": holdings,
+        "income_allocation_by_holding": income_by_holding,
+        "asset_allocation": asset_allocation,
+        "direct_sector_exposure": direct_sector,
+        "look_through_sector_exposure": lookthrough_sector,
+        "concentration_context": _pick_non_empty_fields(
+            full_payload.get("concentration_context", {}),
+            [
+                "largest_holding_by_value",
+                "largest_holding_value_weight_pct",
+                "largest_holding_income_weight_pct",
+                "largest_income_contributor",
+                "largest_income_weight_pct",
+                "guidance",
+            ],
+        ),
+        "portfolio_health": {
+            "health_score_breakdown": _pick_non_empty_fields(
+                portfolio_health.get("health_score_breakdown", {}),
+                [
+                    "diversification",
+                    "concentration",
+                    "income_stability",
+                    "dividend_growth_potential",
+                    "total_return_potential",
+                    "risk",
+                    "data_quality",
+                ],
+            ),
+            "context_summary": _pick_non_empty_fields(
+                context_summary,
+                ["score", "score_label", "strongest_areas", "weakest_areas", "primary_alert"],
+            ),
+        },
+        "tracker_health_score_metadata": _pick_non_empty_fields(
+            full_payload.get("tracker_health_score_metadata", {}),
+            ["income_stability_explanation", "data_quality_explanation", "risk_explanation"],
+        ),
+        "health_methodology_warning": "Tracker health components and labels are methodology-based portfolio heuristics, not objective third-party ratings.",
+        "contribution_context": {
+            "summary": {
+                "total_regular_biweekly_contribution": contribution_summary.get("total_regular_biweekly_contribution"),
+                "total_espp_biweekly_contributions": contribution_summary.get("total_espp_biweekly_contributions"),
+                "estimated_combined_annual_contributions": contribution_summary.get("estimated_combined_annual_contributions"),
+                "hd_espp_contribution_per_paycheck": contribution_summary.get("hd_espp_contribution_per_paycheck", ESPP_CONTRIB_BIWEEKLY),
+                "hd_espp_purchase_frequency": contribution_summary.get("hd_espp_purchase_frequency", ESPP_PURCHASE_FREQUENCY),
+                "hd_espp_discount_pct": contribution_summary.get("hd_espp_discount_pct", ESPP_DISCOUNT * 100.0),
+            },
+            "employer_stock_concentration_context": _pick_non_empty_fields(
+                contribution_context.get("employer_stock_concentration_context", {}),
+                [
+                    "primary_employer_ticker",
+                    "primary_employer_capital_concentration_pct",
+                    "primary_employer_income_concentration_pct",
+                    "is_concentration_alert",
+                ],
+            ),
+            "hd_espp_facts": {
+                "biweekly_contribution_usd": 100,
+                "discount_pct": 15,
+                "purchase_cadence": "approximately every six months",
+                "historical_holding_pattern": "shares historically retained for approximately 2-3 years",
+                "employer_income_concentration_relationship": "Evaluate employer-stock concentration together with employment-income concentration.",
+            },
+        },
+        "data_completeness": _pick_non_empty_fields(
+            full_payload.get("data_completeness", {}),
+            [
+                "direct_sector_classification_coverage_pct",
+                "fund_lookthrough_coverage_pct",
+                "overall_resolved_exposure_coverage_pct",
+            ],
+        ),
+        "unresolved_exposure": _pick_non_empty_fields(
+            full_payload.get("unresolved_exposure", {}),
+            ["unresolved_fund_exposure", "resolved_lookthrough_value", "fund_total_value"],
+        ),
+        "supplemental_yahoo_financial_data": supplemental_intelligence,
+        "historical_context": historical_context,
+        "warnings": {
+            "important": _extract_data_quality_warnings(full_payload),
+        },
+    }
+
+    return _strip_empty_context_values(compact_payload) if isinstance(_strip_empty_context_values(compact_payload), dict) else compact_payload
+
+
+def _build_ai_analysis_payload_with_diagnostics(
+    holdings: pd.DataFrame,
+    metrics: pd.DataFrame,
+    analysis_type: str,
+    custom_question: str,
+) -> tuple[dict[str, object], dict[str, object]]:
+    full_payload = _build_ai_export_payload(
         holdings,
         metrics,
         biweekly_contribution=float(st.session_state.get("analysis_biweekly_contribution", DEFAULT_PROJECTION_BIWEEKLY_CONTRIB)),
@@ -5691,6 +6127,32 @@ def _build_ai_analysis_request_payload(holdings: pd.DataFrame, metrics: pd.DataF
         espp_purchase_frequency=str(st.session_state.get("analysis_espp_purchase_frequency", ESPP_PURCHASE_FREQUENCY)),
         espp_discount=float(st.session_state.get("analysis_espp_discount", ESPP_DISCOUNT)),
     )
+
+    compact_payload = _compact_analysis_context(full_payload, analysis_type, custom_question)
+
+    before_text = json.dumps(_sanitize_export_value(full_payload), default=str, separators=(",", ":"), allow_nan=False)
+    after_text = json.dumps(_sanitize_export_value(compact_payload), default=str, separators=(",", ":"), allow_nan=False)
+    before_chars = len(before_text)
+    after_chars = len(after_text)
+    reduction_pct = ((before_chars - after_chars) / before_chars * 100.0) if before_chars > 0 else 0.0
+    diagnostics = {
+        "before_chars": before_chars,
+        "before_tokens": _estimated_tokens_from_chars(before_chars),
+        "after_chars": after_chars,
+        "after_tokens": _estimated_tokens_from_chars(after_chars),
+        "reduction_pct": round(reduction_pct, 1),
+    }
+    return compact_payload, diagnostics
+
+
+def _build_ai_analysis_request_payload(
+    holdings: pd.DataFrame,
+    metrics: pd.DataFrame,
+    analysis_type: str,
+    custom_question: str,
+) -> dict[str, object]:
+    payload, _ = _build_ai_analysis_payload_with_diagnostics(holdings, metrics, analysis_type, custom_question)
+    return payload
 
 
 def _render_ai_analysis_tab(holdings: pd.DataFrame, metrics: pd.DataFrame, mobile_mode: bool = False) -> None:
@@ -5729,6 +6191,16 @@ def _render_ai_analysis_tab(holdings: pd.DataFrame, metrics: pd.DataFrame, mobil
     analyze_clicked = action_col.button("Analyze Portfolio", type="primary", disabled=analyze_disabled)
     clear_clicked = clear_col.button("Clear Displayed Analysis")
 
+    existing_context_stats = st.session_state.get("ai_analysis_context_diagnostics")
+    if isinstance(existing_context_stats, dict):
+        st.caption(
+            "AI context size: "
+            + f"{int(existing_context_stats.get('after_chars', 0)):,} chars (~{int(existing_context_stats.get('after_tokens', 0)):,} tokens) "
+            + f"after compaction, from {int(existing_context_stats.get('before_chars', 0)):,} chars "
+            + f"(~{int(existing_context_stats.get('before_tokens', 0)):,} tokens), "
+            + f"{float(existing_context_stats.get('reduction_pct', 0.0)):.1f}% smaller."
+        )
+
     if clear_clicked:
         st.session_state.pop("ai_analysis_result_markdown", None)
         st.session_state.pop("ai_analysis_result_model", None)
@@ -5736,6 +6208,7 @@ def _render_ai_analysis_tab(holdings: pd.DataFrame, metrics: pd.DataFrame, mobil
         st.session_state.pop("ai_analysis_error_message", None)
         st.session_state.pop("ai_analysis_error_detail", None)
         st.session_state.pop("ai_analysis_generated_at", None)
+        st.session_state.pop("ai_analysis_context_diagnostics", None)
         st.rerun()
 
     if analyze_clicked:
@@ -5745,11 +6218,18 @@ def _render_ai_analysis_tab(holdings: pd.DataFrame, metrics: pd.DataFrame, mobil
         client = TokenRouterClient(
             api_key=os.environ.get("TOKENROUTER_API_KEY"),
             base_url=_tokenrouter_base_url(),
-            timeout_seconds=30.0,
+            timeout_seconds=_tokenrouter_timeout_seconds(),
+            connect_timeout_seconds=TOKENROUTER_DEFAULT_CONNECT_TIMEOUT_SECONDS,
         )
         st.session_state["ai_analysis_busy"] = True
         try:
-            analysis_payload = _build_ai_analysis_request_payload(holdings, metrics)
+            analysis_payload, context_stats = _build_ai_analysis_payload_with_diagnostics(
+                holdings,
+                metrics,
+                selected_type,
+                custom_question,
+            )
+            st.session_state["ai_analysis_context_diagnostics"] = context_stats
             messages = build_ai_analysis_messages(analysis_payload, selected_type, custom_question)
             with st.spinner("Analyzing portfolio through TokenRouter..."):
                 result = client.chat_completions(

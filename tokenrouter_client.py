@@ -4,12 +4,14 @@ from dataclasses import dataclass
 from typing import Any
 import json
 import os
-import socket
-from urllib import error, parse, request
+
+import requests
 
 TOKENROUTER_DEFAULT_BASE_URL = "https://api.tokenrouter.com/v1"
 TOKENROUTER_DEFAULT_MODEL = "moonshotai/kimi-k3-free"
-TOKENROUTER_TIMEOUT_SECONDS = 30.0
+TOKENROUTER_DEFAULT_CONNECT_TIMEOUT_SECONDS = 15.0
+TOKENROUTER_DEFAULT_READ_TIMEOUT_SECONDS = 180.0
+TOKENROUTER_TIMEOUT_SECONDS = TOKENROUTER_DEFAULT_READ_TIMEOUT_SECONDS
 
 TOKENROUTER_MODEL_LABELS: dict[str, str] = {
     "moonshotai/kimi-k3-free": "Kimi K3 Free",
@@ -66,11 +68,17 @@ class TokenRouterClient:
     api_key: str | None = None
     base_url: str = TOKENROUTER_DEFAULT_BASE_URL
     timeout_seconds: float = TOKENROUTER_TIMEOUT_SECONDS
+    connect_timeout_seconds: float = TOKENROUTER_DEFAULT_CONNECT_TIMEOUT_SECONDS
 
     def __post_init__(self) -> None:
         self.base_url = _normalize_base_url(self.base_url or TOKENROUTER_DEFAULT_BASE_URL)
         if self.api_key is None:
             self.api_key = os.environ.get("TOKENROUTER_API_KEY")
+        self.timeout_seconds = _sanitize_timeout_seconds(self.timeout_seconds, TOKENROUTER_DEFAULT_READ_TIMEOUT_SECONDS)
+        self.connect_timeout_seconds = _sanitize_timeout_seconds(
+            self.connect_timeout_seconds,
+            TOKENROUTER_DEFAULT_CONNECT_TIMEOUT_SECONDS,
+        )
 
     @property
     def has_api_key(self) -> bool:
@@ -118,22 +126,29 @@ class TokenRouterClient:
 
     def _post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         url = _join_url(self.base_url, path)
-        body = json.dumps(payload).encode("utf-8")
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
-        req = request.Request(url, data=body, headers=headers, method="POST")
         try:
-            with request.urlopen(req, timeout=self.timeout_seconds) as response:
-                response_bytes = response.read()
-        except error.HTTPError as exc:
-            raise _map_http_error(exc) from exc
-        except error.URLError as exc:
-            raise _map_url_error(exc) from exc
-        except TimeoutError as exc:
+            response = requests.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=(self.connect_timeout_seconds, self.timeout_seconds),
+            )
+        except requests.Timeout as exc:
             raise TokenRouterTimeoutError("TokenRouter request timed out.") from exc
+        except requests.ConnectionError as exc:
+            raise TokenRouterConnectionError(f"TokenRouter connection failed: {exc}") from exc
+        except requests.RequestException as exc:
+            raise TokenRouterError(f"TokenRouter request failed: {exc}") from exc
+
+        if response.status_code >= 400:
+            raise _map_http_error(response.status_code, response.text)
+
+        response_bytes = response.content
 
         if not response_bytes:
             raise TokenRouterResponseError("TokenRouter returned an empty response body.")
@@ -177,9 +192,7 @@ def _extract_chat_content(response: dict[str, Any]) -> str:
     return str(content or "")
 
 
-def _map_http_error(exc: error.HTTPError) -> TokenRouterError:
-    status = getattr(exc, "code", None)
-    body = _read_error_body(exc)
+def _map_http_error(status: int | None, body: str) -> TokenRouterError:
     detail = _extract_error_detail(body) or body or f"HTTP {status}"
 
     if status in (401, 403):
@@ -199,28 +212,14 @@ def _map_http_error(exc: error.HTTPError) -> TokenRouterError:
     return TokenRouterError(f"TokenRouter request failed: {detail}")
 
 
-def _map_url_error(exc: error.URLError) -> TokenRouterError:
-    reason = getattr(exc, "reason", None)
-    if isinstance(reason, socket.timeout):
-        return TokenRouterTimeoutError("TokenRouter request timed out.")
-    if isinstance(reason, TimeoutError):
-        return TokenRouterTimeoutError("TokenRouter request timed out.")
-    if isinstance(reason, OSError):
-        return TokenRouterConnectionError(f"TokenRouter connection failed: {reason}")
-    return TokenRouterConnectionError(f"TokenRouter connection failed: {reason or exc}")
-
-
-def _read_error_body(exc: error.HTTPError) -> str:
+def _sanitize_timeout_seconds(value: object, fallback: float) -> float:
     try:
-        raw = exc.read()
-    except Exception:
-        raw = b""
-    if not raw:
-        return ""
-    try:
-        return raw.decode("utf-8", errors="replace")
-    except Exception:
-        return str(raw)
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    if numeric <= 0:
+        return fallback
+    return numeric
 
 
 def _extract_error_detail(body: str) -> str:

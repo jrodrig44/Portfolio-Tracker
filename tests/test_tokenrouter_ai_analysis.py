@@ -3,20 +3,22 @@ import importlib
 import io
 import json
 import os
-import socket
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
-from urllib import error
+
+import requests
 
 import pandas as pd
 
 import app
 from ai_analysis_prompt import AI_ANALYSIS_TYPES, build_ai_analysis_markdown, build_ai_analysis_messages
 from tokenrouter_client import (
+    TOKENROUTER_DEFAULT_CONNECT_TIMEOUT_SECONDS,
     TOKENROUTER_DEFAULT_BASE_URL,
     TOKENROUTER_DEFAULT_MODEL,
+    TOKENROUTER_TIMEOUT_SECONDS,
     TOKENROUTER_MODEL_IDS,
     TokenRouterAuthenticationError,
     TokenRouterClient,
@@ -30,70 +32,244 @@ from tokenrouter_client import (
 )
 
 
+def _sample_full_ai_payload() -> dict[str, object]:
+    return {
+        "portfolio_snapshot": {
+            "portfolio_value": 25000.0,
+            "cost_basis": 20000.0,
+            "unrealized_gain": 5000.0,
+            "annual_income": 900.0,
+            "weighted_yield_pct": 3.6,
+            "holdings_count": 3,
+            "top_holding": "HD",
+            "top_holding_weight_pct": 35.0,
+            "projection_contribution_note": "Uses regular and ESPP contributions.",
+            "projected_10y_value": 150000.0,
+            "projected_20y_value": 450000.0,
+        },
+        "investor_profile": {
+            "portfolio_strategy": "Dividend growth and income",
+            "primary_goal": "Long-term compounding",
+            "risk_tolerance": "Moderate",
+            "investment_horizon_years": 20,
+            "contribution_frequency": "Biweekly",
+            "contribution_amount": 280.0,
+        },
+        "portfolio_health": {
+            "health_score_breakdown": {
+                "diversification": 75,
+                "concentration": 61,
+                "income_stability": 70,
+                "dividend_growth_potential": 74,
+                "total_return_potential": 72,
+                "risk": 59,
+                "data_quality": 88,
+            },
+            "context_summary": {
+                "score": 72,
+                "score_label": "Tracker-generated score",
+                "strongest_areas": [{"area": "Data Quality", "score": 88}],
+                "weakest_areas": [{"area": "Concentration", "score": 61}],
+                "primary_alert": "Concentration alert",
+            },
+        },
+        "concentration_context": {
+            "largest_holding_by_value": "HD",
+            "largest_holding_value_weight_pct": 35.0,
+            "largest_holding_income_weight_pct": 18.0,
+            "largest_income_contributor": "JEPI",
+            "largest_income_weight_pct": 30.0,
+            "guidance": "Evaluate capital and income concentration separately.",
+        },
+        "contribution_context": {
+            "summary": {
+                "total_regular_biweekly_contribution": 280.0,
+                "total_espp_biweekly_contributions": 100.0,
+                "estimated_combined_annual_contributions": 9880.0,
+                "hd_espp_contribution_per_paycheck": 100.0,
+                "hd_espp_purchase_frequency": "6_months",
+                "hd_espp_discount_pct": 15.0,
+            },
+            "employer_stock_concentration_context": {
+                "primary_employer_ticker": "HD",
+                "primary_employer_capital_concentration_pct": 35.0,
+                "primary_employer_income_concentration_pct": 18.0,
+                "is_concentration_alert": True,
+            },
+        },
+        "calculated_metrics": [
+            {
+                "ticker": "HD",
+                "shares": 20,
+                "market_value": 8750.0,
+                "portfolio_weight_pct": 35.0,
+                "cost_basis": 6800.0,
+                "unrealized_gain": 1950.0,
+                "annual_income": 160.0,
+                "portfolio_yield_pct": 1.8,
+                "dividend_yield_pct": 2.0,
+                "regular_biweekly_contribution": 0.0,
+                "espp_biweekly_contribution": 100.0,
+                "total_contribution": 100.0,
+                "sector": "Consumer Cyclical",
+                "asset_type": "Stock",
+                "employer_stock": True,
+                "espp_enabled": True,
+                "internal_display_only": "x",
+            },
+            {
+                "ticker": "JEPI",
+                "shares": 120,
+                "market_value": 7000.0,
+                "portfolio_weight_pct": 28.0,
+                "cost_basis": 6200.0,
+                "unrealized_gain": 800.0,
+                "annual_income": 450.0,
+                "portfolio_yield_pct": 6.4,
+                "dividend_yield_pct": 7.0,
+                "regular_biweekly_contribution": 140.0,
+                "espp_biweekly_contribution": 0.0,
+                "total_contribution": 140.0,
+                "sector": "ETF",
+                "asset_type": "ETF",
+                "employer_stock": False,
+                "espp_enabled": False,
+            },
+            {
+                "ticker": "SCHD",
+                "shares": 60,
+                "market_value": 5000.0,
+                "portfolio_weight_pct": 20.0,
+                "cost_basis": 4800.0,
+                "unrealized_gain": 200.0,
+                "annual_income": 290.0,
+                "portfolio_yield_pct": 5.8,
+                "dividend_yield_pct": 3.5,
+                "regular_biweekly_contribution": 140.0,
+                "espp_biweekly_contribution": 0.0,
+                "total_contribution": 140.0,
+                "sector": "ETF",
+                "asset_type": "ETF",
+                "employer_stock": False,
+                "espp_enabled": False,
+            },
+        ],
+        "income_allocation_by_holding": [
+            {"ticker": "JEPI", "annual_income": 450.0, "market_value": 7000.0, "income_allocation_pct": 50.0},
+            {"ticker": "SCHD", "annual_income": 290.0, "market_value": 5000.0, "income_allocation_pct": 32.2},
+            {"ticker": "HD", "annual_income": 160.0, "market_value": 8750.0, "income_allocation_pct": 17.8},
+        ],
+        "asset_allocation": [
+            {"asset_type": "Stock", "market_value": 8750.0, "annual_income": 160.0, "portfolio_weight_pct": 35.0},
+            {"asset_type": "ETF", "market_value": 12000.0, "annual_income": 740.0, "portfolio_weight_pct": 48.0},
+        ],
+        "direct_sector_exposure": [
+            {"sector": "Consumer Cyclical", "market_value": 8750.0, "annual_income": 160.0, "portfolio_weight_pct": 35.0},
+            {"sector": "Financial Services", "market_value": 7000.0, "annual_income": 450.0, "portfolio_weight_pct": 28.0},
+        ],
+        "look_through_sector_exposure": [
+            {"sector": "Financial Services", "source_holdings": "JEPI", "market_value": 2200.0, "portfolio_weight_pct": 8.8},
+            {"sector": "Technology", "source_holdings": "SCHD", "market_value": 1800.0, "portfolio_weight_pct": 7.2},
+        ],
+        "supplemental_yahoo_financial_data": [
+            {
+                "ticker": "HD",
+                "fundamental_metrics": {"dividend_yield": 0.020, "payout_ratio": 0.55, "trailing_pe": 25.1, "raw_api": {"too": "large"}},
+                "earnings_and_estimates": {"earnings_growth": 0.08, "revenue_growth": 0.05},
+                "analyst_targets": {"recommendation_key": "buy", "target_mean_price": 430.0},
+                "fund_data": {"sector_weight_summary": [{"sector": "Consumer", "weight_pct": 100.0}], "metadata": {"raw": "value"}},
+                "data_source": "Yahoo Finance",
+            }
+        ],
+        "historical_context": [
+            {"ticker": "HD", "return_pct": 20.5, "drawdown": -11.2, "volatility": 19.0, "history_summary": "Recovered after pullback."},
+        ],
+        "data_completeness": {
+            "direct_sector_classification_coverage_pct": 95.0,
+            "fund_lookthrough_coverage_pct": 82.0,
+            "overall_resolved_exposure_coverage_pct": 88.0,
+        },
+        "unresolved_exposure": {
+            "unresolved_fund_exposure": 1250.0,
+            "resolved_lookthrough_value": 10750.0,
+            "fund_total_value": 12000.0,
+        },
+        "tracker_health_score_metadata": {
+            "income_stability_explanation": "Income quality framework note.",
+            "data_quality_explanation": "Data quality framework note.",
+            "risk_explanation": "Risk framework note.",
+        },
+        "warnings": {
+            "snapshot_validation_errors": ["test validation warning"],
+            "missing_export_fields": ["field_a"],
+        },
+        "data_quality_issues": ["missing sector on one ETF"],
+        "unified_snapshot": {"raw": "X" * 20000},
+        "statement_history": {"raw": "Y" * 12000},
+        "supplemental_yahoo_historical_price_data": [{"raw": "Z" * 15000}],
+        "holdings": [{"raw": "display-only duplicate"}],
+    }
+
+
 class TokenRouterClientTests(unittest.TestCase):
+    def _fake_response(self, status_code: int, payload: object):
+        if isinstance(payload, (dict, list)):
+            text = json.dumps(payload)
+            content = text.encode("utf-8")
+        else:
+            text = str(payload)
+            content = text.encode("utf-8")
+        return SimpleNamespace(status_code=status_code, text=text, content=content)
+
     def test_default_base_url_points_to_tokenrouter_com(self) -> None:
         self.assertEqual(TOKENROUTER_DEFAULT_BASE_URL, "https://api.tokenrouter.com/v1")
+
+    def test_default_timeout_is_180_seconds(self) -> None:
+        client = TokenRouterClient(api_key="sk-test-key")
+        self.assertEqual(client.timeout_seconds, 180.0)
 
     def test_chat_completions_sends_bearer_header_and_keeps_key_out_of_payload(self) -> None:
         captured: dict[str, object] = {}
 
-        class FakeResponse:
-            def __init__(self, body: bytes) -> None:
-                self._body = body
-
-            def read(self) -> bytes:
-                return self._body
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                return False
-
-        def fake_urlopen(request_obj, timeout):
-            captured["url"] = request_obj.full_url
-            captured["headers"] = dict(request_obj.header_items())
-            captured["body"] = request_obj.data.decode("utf-8") if request_obj.data else ""
-            return FakeResponse(
-                json.dumps(
-                    {
-                        "model": TOKENROUTER_DEFAULT_MODEL,
-                        "choices": [{"message": {"content": "# Analysis"}}],
-                        "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
-                    }
-                ).encode("utf-8")
+        def fake_post(url, headers, json, timeout):
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["body"] = json
+            captured["timeout"] = timeout
+            return self._fake_response(
+                200,
+                {
+                    "model": TOKENROUTER_DEFAULT_MODEL,
+                    "choices": [{"message": {"content": "# Analysis"}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+                },
             )
 
         client = TokenRouterClient(api_key="sk-test-key", base_url=TOKENROUTER_DEFAULT_BASE_URL, timeout_seconds=1.0)
-        with patch("tokenrouter_client.request.urlopen", side_effect=fake_urlopen):
+        with patch("tokenrouter_client.requests.post", side_effect=fake_post):
             result = client.chat_completions(model=TOKENROUTER_DEFAULT_MODEL, messages=[{"role": "user", "content": "Hello"}])
 
         self.assertEqual(result.content, "# Analysis")
         self.assertEqual(result.model, TOKENROUTER_DEFAULT_MODEL)
         self.assertEqual(captured["url"], f"{TOKENROUTER_DEFAULT_BASE_URL}/chat/completions")
         self.assertIn("Authorization", captured["headers"])
-        self.assertEqual(captured["body"].find("sk-test-key"), -1)
-        self.assertIn(f'"model": "{TOKENROUTER_DEFAULT_MODEL}"', str(captured["body"]))
+        self.assertEqual(str(captured["body"]).find("sk-test-key"), -1)
+        self.assertEqual(captured["timeout"], (TOKENROUTER_DEFAULT_CONNECT_TIMEOUT_SECONDS, 1.0))
+        self.assertEqual(captured["body"]["model"], TOKENROUTER_DEFAULT_MODEL)
 
     def test_chat_completions_parses_successful_response(self) -> None:
-        class FakeResponse:
-            def read(self) -> bytes:
-                return json.dumps(
-                    {
-                        "model": TOKENROUTER_DEFAULT_MODEL,
-                        "choices": [{"message": {"content": "OK"}}],
-                        "usage": {"prompt_tokens": 6, "completion_tokens": 28, "total_tokens": 34},
-                    }
-                ).encode("utf-8")
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                return False
-
         client = TokenRouterClient(api_key="sk-test-key")
-        with patch("tokenrouter_client.request.urlopen", return_value=FakeResponse()):
+        with patch(
+            "tokenrouter_client.requests.post",
+            return_value=self._fake_response(
+                200,
+                {
+                    "model": TOKENROUTER_DEFAULT_MODEL,
+                    "choices": [{"message": {"content": "OK"}}],
+                    "usage": {"prompt_tokens": 6, "completion_tokens": 28, "total_tokens": 34},
+                },
+            ),
+        ):
             result = client.chat_completions(model=TOKENROUTER_DEFAULT_MODEL, messages=[{"role": "user", "content": "Hello"}])
 
         self.assertEqual(result.content, "OK")
@@ -112,77 +288,49 @@ class TokenRouterClientTests(unittest.TestCase):
             client.chat_completions(model="not-a-real-model", messages=[{"role": "user", "content": "Hello"}])
 
     def test_authentication_error_is_mapped(self) -> None:
-        http_error = error.HTTPError(
-            url=f"{TOKENROUTER_DEFAULT_BASE_URL}/chat/completions",
-            code=401,
-            msg="Unauthorized",
-            hdrs=None,
-            fp=io.BytesIO(b'{"error":{"message":"invalid key"}}'),
-        )
         client = TokenRouterClient(api_key="sk-test-key")
 
-        with patch("tokenrouter_client.request.urlopen", side_effect=http_error):
+        with patch(
+            "tokenrouter_client.requests.post",
+            return_value=self._fake_response(401, {"error": {"message": "invalid key"}}),
+        ):
             with self.assertRaises(TokenRouterAuthenticationError):
                 client.chat_completions(model=TOKENROUTER_DEFAULT_MODEL, messages=[{"role": "user", "content": "Hello"}])
 
     def test_balance_error_is_mapped(self) -> None:
-        http_error = error.HTTPError(
-            url=f"{TOKENROUTER_DEFAULT_BASE_URL}/chat/completions",
-            code=402,
-            msg="Payment Required",
-            hdrs=None,
-            fp=io.BytesIO(b'{"error":{"message":"insufficient credits"}}'),
-        )
         client = TokenRouterClient(api_key="sk-test-key")
 
-        with patch("tokenrouter_client.request.urlopen", side_effect=http_error):
+        with patch(
+            "tokenrouter_client.requests.post",
+            return_value=self._fake_response(402, {"error": {"message": "insufficient credits"}}),
+        ):
             with self.assertRaises(TokenRouterInsufficientBalanceError):
                 client.chat_completions(model=TOKENROUTER_DEFAULT_MODEL, messages=[{"role": "user", "content": "Hello"}])
 
     def test_rate_limit_error_is_mapped(self) -> None:
-        http_error = error.HTTPError(
-            url=f"{TOKENROUTER_DEFAULT_BASE_URL}/chat/completions",
-            code=429,
-            msg="Too Many Requests",
-            hdrs=None,
-            fp=io.BytesIO(b'{"error":{"message":"slow down"}}'),
-        )
         client = TokenRouterClient(api_key="sk-test-key")
 
-        with patch("tokenrouter_client.request.urlopen", side_effect=http_error):
+        with patch(
+            "tokenrouter_client.requests.post",
+            return_value=self._fake_response(429, {"error": {"message": "slow down"}}),
+        ):
             with self.assertRaises(TokenRouterRateLimitError):
                 client.chat_completions(model=TOKENROUTER_DEFAULT_MODEL, messages=[{"role": "user", "content": "Hello"}])
 
     def test_timeout_and_connection_errors_are_mapped(self) -> None:
         client = TokenRouterClient(api_key="sk-test-key")
 
-        with patch(
-            "tokenrouter_client.request.urlopen",
-            side_effect=error.URLError(socket.timeout("timed out")),
-        ):
+        with patch("tokenrouter_client.requests.post", side_effect=requests.Timeout("timed out")):
             with self.assertRaises(TokenRouterTimeoutError):
                 client.chat_completions(model=TOKENROUTER_DEFAULT_MODEL, messages=[{"role": "user", "content": "Hello"}])
 
-        with patch(
-            "tokenrouter_client.request.urlopen",
-            side_effect=error.URLError(OSError("connection refused")),
-        ):
+        with patch("tokenrouter_client.requests.post", side_effect=requests.ConnectionError("connection refused")):
             with self.assertRaises(TokenRouterConnectionError):
                 client.chat_completions(model=TOKENROUTER_DEFAULT_MODEL, messages=[{"role": "user", "content": "Hello"}])
 
     def test_malformed_json_is_rejected(self) -> None:
-        class FakeResponse:
-            def read(self) -> bytes:
-                return b"not-json"
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                return False
-
         client = TokenRouterClient(api_key="sk-test-key")
-        with patch("tokenrouter_client.request.urlopen", return_value=FakeResponse()):
+        with patch("tokenrouter_client.requests.post", return_value=self._fake_response(200, "not-json")):
             with self.assertRaises(TokenRouterResponseError):
                 client.chat_completions(model=TOKENROUTER_DEFAULT_MODEL, messages=[{"role": "user", "content": "Hello"}])
 
@@ -307,7 +455,7 @@ class AiAnalysisTabTests(unittest.TestCase):
         metrics = pd.DataFrame([{"ticker": "AAPL", "market_value": 100.0, "annual_income": 1.0}])
 
         with patch.dict(app.st.session_state, {}, clear=True), \
-            patch.object(app, "_build_ai_analysis_request_payload") as payload_mock, \
+            patch.object(app, "_build_ai_analysis_payload_with_diagnostics") as payload_mock, \
             patch.object(app, "build_ai_analysis_messages") as messages_mock, \
             patch.object(app.TokenRouterClient, "chat_completions") as client_mock, \
             patch.object(app.st, "subheader"), \
@@ -335,7 +483,7 @@ class AiAnalysisTabTests(unittest.TestCase):
 
         with patch.dict(app.st.session_state, {}, clear=True), \
             patch.dict(app.os.environ, {"TOKENROUTER_API_KEY": "sk-test-key"}, clear=False), \
-            patch.object(app, "_build_ai_analysis_request_payload", return_value={"portfolio_snapshot": {}}) as payload_mock, \
+            patch.object(app, "_build_ai_analysis_payload_with_diagnostics", return_value=({"portfolio_snapshot": {}}, {"after_chars": 100, "after_tokens": 25, "before_chars": 200, "before_tokens": 50, "reduction_pct": 50.0})) as payload_mock, \
             patch.object(app, "build_ai_analysis_messages", return_value=[{"role": "system", "content": "sys"}, {"role": "user", "content": "user"}]) as messages_mock, \
             patch.object(app.TokenRouterClient, "chat_completions", return_value=fake_result) as client_mock, \
             patch.object(app.st, "markdown") as markdown_mock, \
@@ -365,7 +513,7 @@ class AiAnalysisTabTests(unittest.TestCase):
         clear_button = SimpleNamespace(button=MagicMock(return_value=False))
         with patch.dict(app.st.session_state, {}, clear=True), \
             patch.dict("os.environ", {"TOKENROUTER_API_KEY": ""}, clear=False), \
-            patch.object(app, "_build_ai_analysis_request_payload") as payload_mock, \
+            patch.object(app, "_build_ai_analysis_payload_with_diagnostics") as payload_mock, \
             patch.object(app.TokenRouterClient, "chat_completions") as client_mock, \
             patch.object(app.st, "subheader"), \
             patch.object(app.st, "caption"), \
@@ -386,6 +534,116 @@ class AiAnalysisTabTests(unittest.TestCase):
         payload_mock.assert_not_called()
         client_mock.assert_not_called()
 
+    def test_timeout_override_is_passed_to_client(self) -> None:
+        holdings = pd.DataFrame([{"ticker": "AAPL", "shares": 1, "amount_invested": 100.0}])
+        metrics = pd.DataFrame([{"ticker": "AAPL", "market_value": 100.0, "annual_income": 1.0}])
+        fake_result = SimpleNamespace(content="# Analysis", model=TOKENROUTER_DEFAULT_MODEL, raw_response={}, usage={})
+
+        with patch.dict(app.st.session_state, {}, clear=True), \
+            patch.dict(app.os.environ, {"TOKENROUTER_API_KEY": "sk-test-key", "TOKENROUTER_TIMEOUT_SECONDS": "222"}, clear=False), \
+            patch.object(app, "_build_ai_analysis_payload_with_diagnostics", return_value=({"portfolio_snapshot": {}}, {"after_chars": 100, "after_tokens": 25, "before_chars": 200, "before_tokens": 50, "reduction_pct": 50.0})), \
+            patch.object(app, "build_ai_analysis_messages", return_value=[{"role": "system", "content": "sys"}, {"role": "user", "content": "user"}]), \
+            patch.object(app, "TokenRouterClient") as client_ctor, \
+            patch.object(app.st, "subheader"), \
+            patch.object(app.st, "caption"), \
+            patch.object(app.st, "info"), \
+            patch.object(app.st, "error"), \
+            patch.object(app.st, "markdown"), \
+            patch.object(app.st, "download_button"), \
+            patch.object(app.st, "selectbox", side_effect=[TOKENROUTER_DEFAULT_MODEL, AI_ANALYSIS_TYPES[0]]), \
+            patch.object(app.st, "text_area", return_value=""), \
+            patch.object(app.st, "columns", return_value=[SimpleNamespace(button=MagicMock(return_value=True)), SimpleNamespace(button=MagicMock(return_value=False))]), \
+            patch.object(app.st, "expander", return_value=contextlib.nullcontext()), \
+            patch.object(app.st, "spinner", return_value=contextlib.nullcontext()):
+            client_instance = MagicMock()
+            client_instance.chat_completions.return_value = fake_result
+            client_ctor.return_value = client_instance
+            app._render_ai_analysis_tab(holdings, metrics)
+
+        client_ctor.assert_called_once()
+        self.assertEqual(client_ctor.call_args.kwargs["timeout_seconds"], 222.0)
+        self.assertEqual(client_ctor.call_args.kwargs["connect_timeout_seconds"], TOKENROUTER_DEFAULT_CONNECT_TIMEOUT_SECONDS)
+
+    def test_timeout_error_surfaces_clear_message(self) -> None:
+        holdings = pd.DataFrame([{"ticker": "AAPL", "shares": 1, "amount_invested": 100.0}])
+        metrics = pd.DataFrame([{"ticker": "AAPL", "market_value": 100.0, "annual_income": 1.0}])
+        st_error = MagicMock()
+
+        with patch.dict(app.st.session_state, {}, clear=True), \
+            patch.dict(app.os.environ, {"TOKENROUTER_API_KEY": "sk-test-key"}, clear=False), \
+            patch.object(app, "_build_ai_analysis_payload_with_diagnostics", return_value=({"portfolio_snapshot": {}}, {"after_chars": 100, "after_tokens": 25, "before_chars": 200, "before_tokens": 50, "reduction_pct": 50.0})), \
+            patch.object(app, "build_ai_analysis_messages", return_value=[{"role": "system", "content": "sys"}, {"role": "user", "content": "user"}]), \
+            patch.object(app.TokenRouterClient, "chat_completions", side_effect=TokenRouterTimeoutError("TokenRouter request timed out.")), \
+            patch.object(app.st, "subheader"), \
+            patch.object(app.st, "caption"), \
+            patch.object(app.st, "info"), \
+            patch.object(app.st, "error", st_error), \
+            patch.object(app.st, "markdown"), \
+            patch.object(app.st, "download_button"), \
+            patch.object(app.st, "selectbox", side_effect=[TOKENROUTER_DEFAULT_MODEL, AI_ANALYSIS_TYPES[0]]), \
+            patch.object(app.st, "text_area", return_value=""), \
+            patch.object(app.st, "columns", return_value=[SimpleNamespace(button=MagicMock(return_value=True)), SimpleNamespace(button=MagicMock(return_value=False))]), \
+            patch.object(app.st, "expander", return_value=contextlib.nullcontext()), \
+            patch.object(app.st, "spinner", return_value=contextlib.nullcontext()):
+            app._render_ai_analysis_tab(holdings, metrics)
+
+        error_messages = " ".join(str(call.args[0]) for call in st_error.call_args_list if call.args)
+        self.assertIn("TokenRouter request timed out", error_messages)
+
+
+class AiAnalysisContextCompactionTests(unittest.TestCase):
+    def test_compact_context_excludes_redundant_and_raw_fields(self) -> None:
+        full_payload = _sample_full_ai_payload()
+        compact = app._compact_analysis_context(full_payload, "Comprehensive Portfolio Review", "")
+
+        self.assertNotIn("unified_snapshot", compact)
+        self.assertNotIn("statement_history", compact)
+        self.assertNotIn("supplemental_yahoo_historical_price_data", compact)
+        self.assertNotIn("holdings", compact)
+        self.assertIn("supplemental_yahoo_financial_data", compact)
+
+    def test_compact_context_preserves_critical_hd_espp_facts(self) -> None:
+        full_payload = _sample_full_ai_payload()
+        compact = app._compact_analysis_context(full_payload, "Comprehensive Portfolio Review", "")
+        facts = compact["contribution_context"]["hd_espp_facts"]
+
+        self.assertEqual(facts["biweekly_contribution_usd"], 100)
+        self.assertEqual(facts["discount_pct"], 15)
+        self.assertIn("every six months", facts["purchase_cadence"])
+        self.assertIn("2-3 years", facts["historical_holding_pattern"])
+        self.assertIn("employment-income", facts["employer_income_concentration_relationship"])
+
+    def test_analysis_type_specific_context_prioritizes_expected_sections(self) -> None:
+        full_payload = _sample_full_ai_payload()
+        income_payload = app._compact_analysis_context(full_payload, "Income and Dividend Analysis", "")
+        diversification_payload = app._compact_analysis_context(full_payload, "Diversification and Concentration", "")
+
+        self.assertGreaterEqual(
+            len(income_payload.get("income_allocation_by_holding", [])),
+            len(diversification_payload.get("income_allocation_by_holding", [])),
+        )
+        self.assertGreaterEqual(
+            len(diversification_payload.get("direct_sector_exposure", [])),
+            len(income_payload.get("direct_sector_exposure", [])),
+        )
+
+    def test_compaction_diagnostics_show_smaller_context(self) -> None:
+        holdings = pd.DataFrame([{"ticker": "HD", "shares": 1, "amount_invested": 100.0}])
+        metrics = pd.DataFrame([{"ticker": "HD", "market_value": 100.0, "annual_income": 2.0}])
+
+        with patch.object(app, "_build_ai_export_payload", return_value=_sample_full_ai_payload()):
+            compact_payload, diagnostics = app._build_ai_analysis_payload_with_diagnostics(
+                holdings,
+                metrics,
+                "Comprehensive Portfolio Review",
+                "",
+            )
+
+        self.assertIsInstance(compact_payload, dict)
+        self.assertGreater(diagnostics["before_chars"], diagnostics["after_chars"])
+        self.assertGreater(diagnostics["before_tokens"], diagnostics["after_tokens"])
+        self.assertGreater(diagnostics["reduction_pct"], 0.0)
+
 
 class DotenvLoadingTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -397,6 +655,7 @@ class DotenvLoadingTests(unittest.TestCase):
             "TOKENROUTER_API_KEY": os.environ.get("TOKENROUTER_API_KEY"),
             "TOKENROUTER_MODEL": os.environ.get("TOKENROUTER_MODEL"),
             "TOKENROUTER_BASE_URL": os.environ.get("TOKENROUTER_BASE_URL"),
+            "TOKENROUTER_TIMEOUT_SECONDS": os.environ.get("TOKENROUTER_TIMEOUT_SECONDS"),
         }
 
     def tearDown(self) -> None:
@@ -442,7 +701,7 @@ class DotenvLoadingTests(unittest.TestCase):
         clear_button = SimpleNamespace(button=MagicMock(return_value=False))
 
         with patch.dict(reloaded_app.st.session_state, {}, clear=True), \
-            patch.object(reloaded_app, "_build_ai_analysis_request_payload") as payload_mock, \
+            patch.object(reloaded_app, "_build_ai_analysis_payload_with_diagnostics") as payload_mock, \
             patch.object(reloaded_app, "build_ai_analysis_messages") as messages_mock, \
             patch.object(reloaded_app.TokenRouterClient, "chat_completions") as client_mock, \
             patch.object(reloaded_app.st, "subheader"), \
