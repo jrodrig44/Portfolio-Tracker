@@ -7,24 +7,30 @@ import os
 import socket
 from urllib import error, parse, request
 
-TOKENROUTER_DEFAULT_BASE_URL = "https://tokenrouter.me/v1"
-TOKENROUTER_DEFAULT_MODEL = "kimi-k2p6"
+TOKENROUTER_DEFAULT_BASE_URL = "https://api.tokenrouter.com/v1"
+TOKENROUTER_DEFAULT_MODEL = "anthropic/claude-sonnet-5"
 TOKENROUTER_TIMEOUT_SECONDS = 30.0
 
 TOKENROUTER_MODEL_LABELS: dict[str, str] = {
-    "kimi-k2p7-code": "Kimi 2.7 Code",
-    "kimi-k2p7-code-fast": "Kimi K2.7 Code Fast",
-    "kimi-k2p6": "Kimi K2.6",
-    "kimi-k2p5": "Kimi K2.5",
-    "deepseek-v4-pro": "DeepSeek V4 Pro",
-    "deepseek-v4-flash": "DeepSeek V4 Flash",
-    "qwen3p7-plus": "Qwen 3.7 Plus",
-    "qwen3p6-plus": "Qwen 3.6 Plus",
-    "glm-5p1": "GLM 5.1",
-    "glm-5p1-fast": "GLM 5.1 Fast",
-    "gpt-oss-120b": "GPT-OSS 120B",
-    "minimax-m3": "MiniMax M3",
-    "minimax-m2p7": "MiniMax M2.7",
+    "anthropic/claude-fable-5": "Claude Fable 5",
+    "anthropic/claude-opus-5-fast": "Claude Opus 5 Fast",
+    "anthropic/claude-opus-5": "Claude Opus 5",
+    "anthropic/claude-sonnet-5": "Claude Sonnet 5",
+    "deepseek/deepseek-v4-flash-0731": "DeepSeek V4 Flash 0731",
+    "google/gemini-3.5-flash-lite": "Gemini 3.5 Flash Lite",
+    "google/gemini-3.6-flash": "Gemini 3.6 Flash",
+    "moonshotai/kimi-k2.7-code": "Kimi K2.7 Code",
+    "moonshotai/kimi-k3": "Kimi K3",
+    "moonshotai/kimi-k3-free": "Kimi K3 Free",
+    "openai/gpt-5.5-pro": "GPT-5.5 Pro",
+    "openai/gpt-5.6-luna": "GPT-5.6 Luna",
+    "openai/gpt-5.6-sol": "GPT-5.6 Sol",
+    "openai/gpt-5.6-terra": "GPT-5.6 Terra",
+    "qwen/qwen3.8-max": "Qwen 3.8 Max",
+    "sakana/fugu-ultra": "Fugu Ultra",
+    "x-ai/grok-4.5": "Grok 4.5",
+    "x-ai/grok-build-0.1": "Grok Build 0.1",
+    "z-ai/glm-5.2": "GLM 5.2",
 }
 TOKENROUTER_MODEL_IDS = list(TOKENROUTER_MODEL_LABELS.keys())
 

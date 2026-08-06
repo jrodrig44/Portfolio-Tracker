@@ -28,6 +28,9 @@ from tokenrouter_client import (
 
 
 class TokenRouterClientTests(unittest.TestCase):
+    def test_default_base_url_points_to_tokenrouter_com(self) -> None:
+        self.assertEqual(TOKENROUTER_DEFAULT_BASE_URL, "https://api.tokenrouter.com/v1")
+
     def test_chat_completions_sends_bearer_header_and_keeps_key_out_of_payload(self) -> None:
         captured: dict[str, object] = {}
 
@@ -51,7 +54,7 @@ class TokenRouterClientTests(unittest.TestCase):
             return FakeResponse(
                 json.dumps(
                     {
-                        "model": "kimi-k2p6",
+                        "model": TOKENROUTER_DEFAULT_MODEL,
                         "choices": [{"message": {"content": "# Analysis"}}],
                         "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
                     }
@@ -63,18 +66,18 @@ class TokenRouterClientTests(unittest.TestCase):
             result = client.chat_completions(model=TOKENROUTER_DEFAULT_MODEL, messages=[{"role": "user", "content": "Hello"}])
 
         self.assertEqual(result.content, "# Analysis")
-        self.assertEqual(result.model, "kimi-k2p6")
+        self.assertEqual(result.model, TOKENROUTER_DEFAULT_MODEL)
         self.assertEqual(captured["url"], f"{TOKENROUTER_DEFAULT_BASE_URL}/chat/completions")
         self.assertIn("Authorization", captured["headers"])
         self.assertEqual(captured["body"].find("sk-test-key"), -1)
-        self.assertIn('"model": "kimi-k2p6"', str(captured["body"]))
+        self.assertIn(f'"model": "{TOKENROUTER_DEFAULT_MODEL}"', str(captured["body"]))
 
     def test_chat_completions_parses_successful_response(self) -> None:
         class FakeResponse:
             def read(self) -> bytes:
                 return json.dumps(
                     {
-                        "model": "kimi-k2p6",
+                        "model": TOKENROUTER_DEFAULT_MODEL,
                         "choices": [{"message": {"content": "OK"}}],
                         "usage": {"prompt_tokens": 6, "completion_tokens": 28, "total_tokens": 34},
                     }
