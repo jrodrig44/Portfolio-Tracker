@@ -79,6 +79,7 @@ class ExportMarkdownTests(unittest.TestCase):
         self.assertIn("## Dividend Data Metadata", content)
         self.assertIn("## Data Completeness", content)
         self.assertNotIn("## Dividend Calendar Metadata", content)
+        self.assertNotIn("TokenRouter", content)
         self.assertIn("## Top 5 Holdings", content)
         self.assertIn("## Top 5 Income Contributors", content)
         self.assertIn("## Holdings Data (CSV)", content)

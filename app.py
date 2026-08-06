@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 import json
 import logging
 import math
+import os
 from pathlib import Path
 import re
 import sqlite3
@@ -15,9 +16,26 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 import yfinance as yf
 
+from ai_analysis_prompt import AI_ANALYSIS_TYPES, build_ai_analysis_markdown, build_ai_analysis_messages
 from health_engine import compute_portfolio_health as compute_portfolio_health_engine
 from portfolio_intelligence import compute_portfolio_intelligence
 from stash_history import build_statement_history_reconciliation, import_stash_statement_history
+from tokenrouter_client import (
+    TOKENROUTER_DEFAULT_BASE_URL,
+    TOKENROUTER_DEFAULT_MODEL,
+    TOKENROUTER_MODEL_IDS,
+    TOKENROUTER_MODEL_LABELS,
+    TokenRouterAuthenticationError,
+    TokenRouterClient,
+    TokenRouterConfigError,
+    TokenRouterConnectionError,
+    TokenRouterError,
+    TokenRouterInsufficientBalanceError,
+    TokenRouterRateLimitError,
+    TokenRouterResponseError,
+    TokenRouterTimeoutError,
+    TokenRouterUnsupportedModelError,
+)
 
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
@@ -5630,6 +5648,185 @@ def _render_analysis_tab(metrics: pd.DataFrame, mobile_mode: bool = False) -> No
     st.dataframe(pd.DataFrame(next_rows), width="stretch", hide_index=True)
 
 
+def _tokenrouter_base_url() -> str:
+    override = str(os.environ.get("TOKENROUTER_BASE_URL", "")).strip()
+    return override or TOKENROUTER_DEFAULT_BASE_URL
+
+
+def _tokenrouter_default_model() -> str:
+    configured = str(os.environ.get("TOKENROUTER_MODEL", "")).strip()
+    if configured in TOKENROUTER_MODEL_IDS:
+        return configured
+    return TOKENROUTER_DEFAULT_MODEL
+
+
+def _tokenrouter_has_api_key() -> bool:
+    return bool(str(os.environ.get("TOKENROUTER_API_KEY", "")).strip())
+
+
+def _tokenrouter_model_index(default_model: str) -> int:
+    try:
+        return TOKENROUTER_MODEL_IDS.index(default_model)
+    except ValueError:
+        return TOKENROUTER_MODEL_IDS.index(TOKENROUTER_DEFAULT_MODEL)
+
+
+def _analysis_type_index(default_analysis_type: str) -> int:
+    try:
+        return AI_ANALYSIS_TYPES.index(default_analysis_type)
+    except ValueError:
+        return 0
+
+
+def _build_ai_analysis_request_payload(holdings: pd.DataFrame, metrics: pd.DataFrame) -> dict[str, object]:
+    return _build_ai_export_payload(
+        holdings,
+        metrics,
+        biweekly_contribution=float(st.session_state.get("analysis_biweekly_contribution", DEFAULT_PROJECTION_BIWEEKLY_CONTRIB)),
+        projection_return_pct=float(st.session_state.get("analysis_projection_return", 8.0)),
+        espp_contrib_biweekly=float(st.session_state.get("analysis_espp_contrib_biweekly", ESPP_CONTRIB_BIWEEKLY)),
+        espp_purchase_frequency=str(st.session_state.get("analysis_espp_purchase_frequency", ESPP_PURCHASE_FREQUENCY)),
+        espp_discount=float(st.session_state.get("analysis_espp_discount", ESPP_DISCOUNT)),
+    )
+
+
+def _render_ai_analysis_tab(holdings: pd.DataFrame, metrics: pd.DataFrame, mobile_mode: bool = False) -> None:
+    st.subheader("AI Analysis")
+    st.caption("This analysis is generated through TokenRouter from the portfolio data already loaded in memory. No export file is required.")
+
+    if not _tokenrouter_has_api_key():
+        st.info("Set TOKENROUTER_API_KEY in your environment to enable AI Analysis.")
+
+    default_model = _tokenrouter_default_model()
+    default_analysis_type = str(st.session_state.get("ai_analysis_type", AI_ANALYSIS_TYPES[0]))
+
+    st.selectbox(
+        "Model",
+        options=TOKENROUTER_MODEL_IDS,
+        index=_tokenrouter_model_index(default_model),
+        format_func=lambda model_id: f"{model_id} - {TOKENROUTER_MODEL_LABELS.get(model_id, model_id)}",
+        key="ai_analysis_model",
+    )
+    st.selectbox(
+        "Analysis Type",
+        options=AI_ANALYSIS_TYPES,
+        index=_analysis_type_index(default_analysis_type),
+        key="ai_analysis_type",
+    )
+    st.text_area(
+        "Custom Question or Additional Instructions",
+        value=str(st.session_state.get("ai_analysis_custom_question", "")),
+        height=120,
+        key="ai_analysis_custom_question",
+        placeholder="Optional: add a custom question or any extra guidance for the model.",
+    )
+
+    action_col, clear_col = st.columns(2)
+    analyze_disabled = not _tokenrouter_has_api_key() or bool(st.session_state.get("ai_analysis_busy", False))
+    analyze_clicked = action_col.button("Analyze Portfolio", type="primary", disabled=analyze_disabled)
+    clear_clicked = clear_col.button("Clear Displayed Analysis")
+
+    if clear_clicked:
+        st.session_state.pop("ai_analysis_result_markdown", None)
+        st.session_state.pop("ai_analysis_result_model", None)
+        st.session_state.pop("ai_analysis_result_type", None)
+        st.session_state.pop("ai_analysis_error_message", None)
+        st.session_state.pop("ai_analysis_error_detail", None)
+        st.session_state.pop("ai_analysis_generated_at", None)
+        st.rerun()
+
+    if analyze_clicked:
+        selected_model = str(st.session_state.get("ai_analysis_model", default_model))
+        selected_type = str(st.session_state.get("ai_analysis_type", AI_ANALYSIS_TYPES[0]))
+        custom_question = str(st.session_state.get("ai_analysis_custom_question", ""))
+        client = TokenRouterClient(
+            api_key=os.environ.get("TOKENROUTER_API_KEY"),
+            base_url=_tokenrouter_base_url(),
+            timeout_seconds=30.0,
+        )
+        st.session_state["ai_analysis_busy"] = True
+        try:
+            analysis_payload = _build_ai_analysis_request_payload(holdings, metrics)
+            messages = build_ai_analysis_messages(analysis_payload, selected_type, custom_question)
+            with st.spinner("Analyzing portfolio through TokenRouter..."):
+                result = client.chat_completions(
+                    model=selected_model,
+                    messages=messages,
+                    max_tokens=1400,
+                    temperature=0.2,
+                )
+            st.session_state["ai_analysis_result_markdown"] = result.content.strip()
+            st.session_state["ai_analysis_result_model"] = result.model
+            st.session_state["ai_analysis_result_type"] = selected_type
+            st.session_state["ai_analysis_generated_at"] = datetime.now().isoformat(timespec="seconds")
+            st.session_state.pop("ai_analysis_error_message", None)
+            st.session_state.pop("ai_analysis_error_detail", None)
+        except TokenRouterConfigError as exc:
+            st.session_state["ai_analysis_error_message"] = "Set TOKENROUTER_API_KEY in your environment to run AI Analysis."
+            st.session_state["ai_analysis_error_detail"] = str(exc)
+        except TokenRouterAuthenticationError as exc:
+            st.session_state["ai_analysis_error_message"] = "TokenRouter rejected the API key. Check TOKENROUTER_API_KEY and try again."
+            st.session_state["ai_analysis_error_detail"] = str(exc)
+        except TokenRouterInsufficientBalanceError as exc:
+            st.session_state["ai_analysis_error_message"] = "TokenRouter reports insufficient balance or credits."
+            st.session_state["ai_analysis_error_detail"] = str(exc)
+        except TokenRouterRateLimitError as exc:
+            st.session_state["ai_analysis_error_message"] = "TokenRouter rate limited the request. Try again later."
+            st.session_state["ai_analysis_error_detail"] = str(exc)
+        except TokenRouterUnsupportedModelError as exc:
+            st.session_state["ai_analysis_error_message"] = "The selected TokenRouter model is not supported. Choose another model."
+            st.session_state["ai_analysis_error_detail"] = str(exc)
+        except TokenRouterTimeoutError as exc:
+            st.session_state["ai_analysis_error_message"] = "The TokenRouter request timed out. Try again or reduce the analysis context."
+            st.session_state["ai_analysis_error_detail"] = str(exc)
+        except TokenRouterConnectionError as exc:
+            st.session_state["ai_analysis_error_message"] = "Could not reach TokenRouter. Check your connection or base URL."
+            st.session_state["ai_analysis_error_detail"] = str(exc)
+        except TokenRouterResponseError as exc:
+            st.session_state["ai_analysis_error_message"] = "TokenRouter returned an invalid or empty response."
+            st.session_state["ai_analysis_error_detail"] = str(exc)
+        except TokenRouterError as exc:
+            st.session_state["ai_analysis_error_message"] = "TokenRouter request failed."
+            st.session_state["ai_analysis_error_detail"] = str(exc)
+        except Exception as exc:
+            st.session_state["ai_analysis_error_message"] = "Unexpected error while running AI Analysis."
+            st.session_state["ai_analysis_error_detail"] = str(exc)
+        finally:
+            st.session_state["ai_analysis_busy"] = False
+
+    error_message = st.session_state.get("ai_analysis_error_message")
+    error_detail = st.session_state.get("ai_analysis_error_detail")
+    if error_message:
+        st.error(error_message)
+        if error_detail:
+            with st.expander("Details", expanded=False):
+                st.caption(str(error_detail))
+
+    result_markdown = st.session_state.get("ai_analysis_result_markdown")
+    if result_markdown:
+        st.markdown("#### Latest Analysis")
+        st.markdown(result_markdown)
+        download_model = str(st.session_state.get("ai_analysis_result_model", default_model))
+        download_type = str(st.session_state.get("ai_analysis_result_type", AI_ANALYSIS_TYPES[0]))
+        generated_at = str(st.session_state.get("ai_analysis_generated_at", datetime.now().isoformat(timespec="seconds")))
+        download_markdown = "\n".join(
+            [
+                "# TokenRouter AI Analysis",
+                f"- Generated: {generated_at}",
+                f"- Model: {download_model}",
+                f"- Analysis Type: {download_type}",
+                "",
+                result_markdown,
+            ]
+        )
+        st.download_button(
+            label="Download Analysis as Markdown",
+            data=download_markdown.encode("utf-8"),
+            file_name="ai_analysis.md",
+            mime="text/markdown",
+        )
+
+
 def _render_health_tab(metrics: pd.DataFrame, mobile_mode: bool = False) -> None:
     st.subheader("Portfolio Health")
     st.caption("Minimal dashboard for health, alerts, goals, and quick filtered views.")
@@ -6222,9 +6419,11 @@ def _normalize_active_tab(active_tab: object) -> str:
 
     if isinstance(active_tab, str):
         cleaned = active_tab.strip()
-        if cleaned in {"Holdings", "Portfolio Analysis", "Portfolio Insights", "Portfolio Health"}:
+        if cleaned in {"Holdings", "Portfolio Analysis", "AI Analysis", "Portfolio Insights", "Portfolio Health"}:
             return cleaned
-        if cleaned.lower() in {"holdings", "portfolio analysis", "portfolio insights", "portfolio health"}:
+        if cleaned.lower() in {"holdings", "portfolio analysis", "ai analysis", "portfolio insights", "portfolio health"}:
+            if cleaned.lower() == "ai analysis":
+                return "AI Analysis"
             return cleaned.title()
 
     return "Portfolio Analysis"
@@ -6401,8 +6600,8 @@ def main() -> None:
     active_tab = _normalize_active_tab(st.session_state.get("active_tab"))
     st.session_state["active_tab"] = active_tab
 
-    tab_holdings, tab_analysis, tab_insights, tab_health = st.tabs(
-        ["Holdings", "Portfolio Analysis", "Portfolio Insights", "Portfolio Health"]
+    tab_holdings, tab_analysis, tab_ai_analysis, tab_insights, tab_health = st.tabs(
+        ["Holdings", "Portfolio Analysis", "AI Analysis", "Portfolio Insights", "Portfolio Health"]
     )
 
     with tab_holdings:
@@ -6413,6 +6612,8 @@ def main() -> None:
     if holdings.empty:
         with tab_analysis:
             st.info("Add at least one holding to calculate analysis.")
+        with tab_ai_analysis:
+            st.info("Add at least one holding to run AI Analysis.")
         with tab_insights:
             st.info("Add at least one holding to generate insights.")
         return
@@ -6449,6 +6650,9 @@ def main() -> None:
 
     with tab_analysis:
         _render_analysis_tab(metrics, mobile_mode=mobile_mode)
+
+    with tab_ai_analysis:
+        _render_ai_analysis_tab(holdings, metrics, mobile_mode=mobile_mode)
 
     with tab_insights:
         _render_insights_tab(metrics, mobile_mode=mobile_mode)
