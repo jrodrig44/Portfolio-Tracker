@@ -54,6 +54,10 @@ class TokenRouterTimeoutError(TokenRouterError):
 class TokenRouterResponseError(TokenRouterError):
     """Raised when TokenRouter returns an invalid or empty response."""
 
+    def __init__(self, message: str, diagnostic: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.diagnostic = diagnostic or {}
+
 
 @dataclass(slots=True)
 class TokenRouterChatResult:
@@ -61,6 +65,8 @@ class TokenRouterChatResult:
     model: str
     raw_response: dict[str, Any]
     usage: dict[str, Any] | None = None
+    usage_metadata: dict[str, Any] | None = None
+    response_diagnostic: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -115,13 +121,18 @@ class TokenRouterClient:
         response = self._post_json("/chat/completions", payload)
         content = _extract_chat_content(response)
         if not str(content or "").strip():
-            raise TokenRouterResponseError("TokenRouter returned an empty analysis response.")
+            raise TokenRouterResponseError(
+                "TokenRouter returned an empty analysis response.",
+                diagnostic=_response_shape_diagnostic(response),
+            )
 
         return TokenRouterChatResult(
             content=str(content),
             model=str(response.get("model", model_id)),
             raw_response=response,
             usage=response.get("usage") if isinstance(response.get("usage"), dict) else None,
+            usage_metadata=_extract_usage_metadata(response),
+            response_diagnostic=_response_shape_diagnostic(response),
         )
 
     def _post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -161,6 +172,7 @@ class TokenRouterClient:
         if not isinstance(response_json, dict):
             raise TokenRouterResponseError("TokenRouter returned an unexpected response shape.")
 
+        response_json.setdefault("_http_status", response.status_code)
         return response_json
 
 
@@ -176,20 +188,173 @@ def _join_url(base_url: str, path: str) -> str:
 def _extract_chat_content(response: dict[str, Any]) -> str:
     choices = response.get("choices")
     if not isinstance(choices, list) or not choices:
-        raise TokenRouterResponseError("TokenRouter returned no choices.")
+        top_level_fallback = _extract_text_value(response.get("output_text")) or _extract_text_value(response.get("content"))
+        if top_level_fallback:
+            return top_level_fallback
+        raise TokenRouterResponseError(
+            "TokenRouter returned no choices.",
+            diagnostic=_response_shape_diagnostic(response),
+        )
 
     first_choice = choices[0]
     if not isinstance(first_choice, dict):
-        raise TokenRouterResponseError("TokenRouter returned an invalid choice entry.")
+        raise TokenRouterResponseError(
+            "TokenRouter returned an invalid choice entry.",
+            diagnostic=_response_shape_diagnostic(response),
+        )
+
+    message = first_choice.get("message")
+    message_dict = message if isinstance(message, dict) else {}
+
+    final_candidates = [
+        message_dict.get("content"),
+        message_dict.get("output_text"),
+        message_dict.get("text"),
+        first_choice.get("content"),
+        first_choice.get("text"),
+        first_choice.get("output_text"),
+        response.get("output_text"),
+        response.get("content"),
+    ]
+    for candidate in final_candidates:
+        text = _extract_text_value(candidate)
+        if text:
+            return text
+
+    reasoning_candidates = [
+        message_dict.get("reasoning_content"),
+        message_dict.get("reasoning"),
+        first_choice.get("reasoning_content"),
+        first_choice.get("reasoning"),
+        response.get("reasoning_content"),
+        response.get("reasoning"),
+    ]
+    for candidate in reasoning_candidates:
+        text = _extract_text_value(candidate)
+        if text:
+            return text
+
+    raise TokenRouterResponseError(
+        "TokenRouter returned no extractable assistant content.",
+        diagnostic=_response_shape_diagnostic(response),
+    )
+
+
+def _extract_text_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            text = _extract_text_value(item)
+            if text:
+                parts.append(text)
+        return "\n".join(parts).strip()
+    if isinstance(value, dict):
+        for key in ("text", "content", "output_text", "value"):
+            if key in value:
+                text = _extract_text_value(value.get(key))
+                if text:
+                    return text
+        return ""
+    return str(value).strip()
+
+
+def _extract_usage_metadata(response: dict[str, Any]) -> dict[str, Any] | None:
+    usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
+    prompt_tokens = int(float(usage.get("prompt_tokens", 0) or 0))
+    completion_tokens = int(float(usage.get("completion_tokens", 0) or 0))
+    total_tokens = int(float(usage.get("total_tokens", prompt_tokens + completion_tokens) or (prompt_tokens + completion_tokens)))
+
+    cost_fields = (
+        usage.get("estimated_cost"),
+        usage.get("cost"),
+        response.get("estimated_cost"),
+        response.get("cost"),
+    )
+    estimated_cost: float | None = None
+    for field in cost_fields:
+        if isinstance(field, (int, float)):
+            estimated_cost = float(field)
+            break
+        if isinstance(field, str):
+            try:
+                estimated_cost = float(field)
+                break
+            except ValueError:
+                continue
+        if isinstance(field, dict):
+            for key in ("total", "total_cost", "usd", "amount"):
+                raw_value = field.get(key)
+                if isinstance(raw_value, (int, float)):
+                    estimated_cost = float(raw_value)
+                    break
+                if isinstance(raw_value, str):
+                    try:
+                        estimated_cost = float(raw_value)
+                        break
+                    except ValueError:
+                        continue
+            if estimated_cost is not None:
+                break
+
+    metadata = {
+        "model": str(response.get("model", "") or ""),
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+    }
+    if estimated_cost is not None:
+        metadata["estimated_cost"] = estimated_cost
+    return metadata
+
+
+def _response_shape_diagnostic(response: dict[str, Any]) -> dict[str, Any]:
+    diagnostic: dict[str, Any] = {
+        "http_status": response.get("_http_status"),
+        "top_level_keys": sorted(str(key) for key in response.keys()),
+    }
+    choices = response.get("choices")
+    diagnostic["choices_count"] = len(choices) if isinstance(choices, list) else 0
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return diagnostic
+
+    first_choice = choices[0]
+    diagnostic["choice_keys"] = sorted(str(key) for key in first_choice.keys())
 
     message = first_choice.get("message")
     if not isinstance(message, dict):
-        raise TokenRouterResponseError("TokenRouter returned an invalid message entry.")
+        diagnostic["message_type"] = type(message).__name__
+        return diagnostic
 
+    diagnostic["message_keys"] = sorted(str(key) for key in message.keys())
     content = message.get("content")
-    if isinstance(content, list):
-        content = "".join(str(item) for item in content if item is not None)
-    return str(content or "")
+    diagnostic["content_type"] = type(content).__name__
+    if isinstance(content, str):
+        diagnostic["content_length"] = len(content)
+    elif isinstance(content, list):
+        diagnostic["content_items"] = len(content)
+
+    output_text = message.get("output_text")
+    diagnostic["output_text_type"] = type(output_text).__name__
+    if isinstance(output_text, str):
+        diagnostic["output_text_length"] = len(output_text)
+
+    reasoning = message.get("reasoning")
+    diagnostic["reasoning_type"] = type(reasoning).__name__
+    if isinstance(reasoning, str):
+        diagnostic["reasoning_length"] = len(reasoning)
+
+    reasoning_content = message.get("reasoning_content")
+    diagnostic["reasoning_content_type"] = type(reasoning_content).__name__
+    if isinstance(reasoning_content, str):
+        diagnostic["reasoning_content_length"] = len(reasoning_content)
+    elif isinstance(reasoning_content, list):
+        diagnostic["reasoning_content_items"] = len(reasoning_content)
+
+    return diagnostic
 
 
 def _map_http_error(status: int | None, body: str) -> TokenRouterError:

@@ -6155,6 +6155,47 @@ def _build_ai_analysis_request_payload(
     return payload
 
 
+def _format_tokenrouter_response_diagnostic(diagnostic: object) -> str:
+    if not isinstance(diagnostic, dict) or not diagnostic:
+        return "No additional response-shape diagnostics were available."
+
+    lines = ["Sanitized TokenRouter response diagnostic:"]
+    if "http_status" in diagnostic:
+        lines.append(f"- HTTP status: {diagnostic.get('http_status')}")
+    if "top_level_keys" in diagnostic:
+        lines.append(f"- Top-level keys: {diagnostic.get('top_level_keys')}")
+    if "choices_count" in diagnostic:
+        lines.append(f"- Number of choices: {diagnostic.get('choices_count')}")
+    if "message_keys" in diagnostic:
+        lines.append(f"- Message keys: {diagnostic.get('message_keys')}")
+    if "content_type" in diagnostic:
+        lines.append(
+            "- Content field: "
+            + f"type={diagnostic.get('content_type')}, "
+            + f"length={diagnostic.get('content_length', diagnostic.get('content_items', 0))}"
+        )
+    if "output_text_type" in diagnostic:
+        lines.append(
+            "- Output text field: "
+            + f"type={diagnostic.get('output_text_type')}, "
+            + f"length={diagnostic.get('output_text_length', 0)}"
+        )
+    if "reasoning_type" in diagnostic:
+        lines.append(
+            "- Reasoning field: "
+            + f"type={diagnostic.get('reasoning_type')}, "
+            + f"length={diagnostic.get('reasoning_length', 0)}"
+        )
+    if "reasoning_content_type" in diagnostic:
+        lines.append(
+            "- Reasoning content field: "
+            + f"type={diagnostic.get('reasoning_content_type')}, "
+            + f"length={diagnostic.get('reasoning_content_length', diagnostic.get('reasoning_content_items', 0))}"
+        )
+
+    return "\n".join(lines)
+
+
 def _render_ai_analysis_tab(holdings: pd.DataFrame, metrics: pd.DataFrame, mobile_mode: bool = False) -> None:
     st.subheader("AI Analysis")
     st.caption("This analysis is generated through TokenRouter from the portfolio data already loaded in memory. No export file is required.")
@@ -6203,8 +6244,11 @@ def _render_ai_analysis_tab(holdings: pd.DataFrame, metrics: pd.DataFrame, mobil
 
     if clear_clicked:
         st.session_state.pop("ai_analysis_result_markdown", None)
+        st.session_state.pop("tokenrouter_analysis", None)
+        st.session_state.pop("tokenrouter_response_diagnostic", None)
         st.session_state.pop("ai_analysis_result_model", None)
         st.session_state.pop("ai_analysis_result_type", None)
+        st.session_state.pop("ai_analysis_usage_metadata", None)
         st.session_state.pop("ai_analysis_error_message", None)
         st.session_state.pop("ai_analysis_error_detail", None)
         st.session_state.pop("ai_analysis_generated_at", None)
@@ -6238,9 +6282,15 @@ def _render_ai_analysis_tab(holdings: pd.DataFrame, metrics: pd.DataFrame, mobil
                     max_tokens=1400,
                     temperature=0.2,
                 )
-            st.session_state["ai_analysis_result_markdown"] = result.content.strip()
-            st.session_state["ai_analysis_result_model"] = result.model
+            analysis_text = str(getattr(result, "content", "") or "").strip()
+            st.session_state["tokenrouter_analysis"] = analysis_text
+            st.session_state["ai_analysis_result_markdown"] = analysis_text
+            response_diagnostic = getattr(result, "response_diagnostic", {})
+            st.session_state["tokenrouter_response_diagnostic"] = response_diagnostic if isinstance(response_diagnostic, dict) else {}
+            st.session_state["ai_analysis_result_model"] = str(getattr(result, "model", selected_model) or selected_model)
             st.session_state["ai_analysis_result_type"] = selected_type
+            usage_metadata = getattr(result, "usage_metadata", {})
+            st.session_state["ai_analysis_usage_metadata"] = usage_metadata if isinstance(usage_metadata, dict) else {}
             st.session_state["ai_analysis_generated_at"] = datetime.now().isoformat(timespec="seconds")
             st.session_state.pop("ai_analysis_error_message", None)
             st.session_state.pop("ai_analysis_error_detail", None)
@@ -6267,7 +6317,9 @@ def _render_ai_analysis_tab(holdings: pd.DataFrame, metrics: pd.DataFrame, mobil
             st.session_state["ai_analysis_error_detail"] = str(exc)
         except TokenRouterResponseError as exc:
             st.session_state["ai_analysis_error_message"] = "TokenRouter returned an invalid or empty response."
-            st.session_state["ai_analysis_error_detail"] = str(exc)
+            diagnostic = getattr(exc, "diagnostic", {})
+            diagnostic_text = _format_tokenrouter_response_diagnostic(diagnostic)
+            st.session_state["ai_analysis_error_detail"] = f"{str(exc)}\n\n{diagnostic_text}" if diagnostic_text else str(exc)
         except TokenRouterError as exc:
             st.session_state["ai_analysis_error_message"] = "TokenRouter request failed."
             st.session_state["ai_analysis_error_detail"] = str(exc)
@@ -6285,13 +6337,28 @@ def _render_ai_analysis_tab(holdings: pd.DataFrame, metrics: pd.DataFrame, mobil
             with st.expander("Details", expanded=False):
                 st.caption(str(error_detail))
 
-    result_markdown = st.session_state.get("ai_analysis_result_markdown")
+    result_markdown = st.session_state.get("tokenrouter_analysis", st.session_state.get("ai_analysis_result_markdown"))
     if result_markdown:
         st.markdown("#### Latest Analysis")
         st.markdown(result_markdown)
         download_model = str(st.session_state.get("ai_analysis_result_model", default_model))
         download_type = str(st.session_state.get("ai_analysis_result_type", AI_ANALYSIS_TYPES[0]))
         generated_at = str(st.session_state.get("ai_analysis_generated_at", datetime.now().isoformat(timespec="seconds")))
+        usage_metadata = st.session_state.get("ai_analysis_usage_metadata", {})
+        if isinstance(usage_metadata, dict) and usage_metadata:
+            usage_line = (
+                f"Model: {usage_metadata.get('model', download_model)} | "
+                f"Prompt tokens: {int(usage_metadata.get('prompt_tokens', 0)):,} | "
+                f"Completion tokens: {int(usage_metadata.get('completion_tokens', 0)):,} | "
+                f"Total tokens: {int(usage_metadata.get('total_tokens', 0)):,}"
+            )
+            if "estimated_cost" in usage_metadata:
+                usage_line += f" | Estimated cost: ${float(usage_metadata.get('estimated_cost', 0.0)):.6f}"
+            st.caption(usage_line)
+        response_diag = st.session_state.get("tokenrouter_response_diagnostic", {})
+        if isinstance(response_diag, dict) and response_diag:
+            with st.expander("Response Shape Diagnostics (Sanitized)", expanded=False):
+                st.caption(_format_tokenrouter_response_diagnostic(response_diag))
         download_markdown = "\n".join(
             [
                 "# TokenRouter AI Analysis",

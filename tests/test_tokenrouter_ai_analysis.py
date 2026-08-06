@@ -334,6 +334,83 @@ class TokenRouterClientTests(unittest.TestCase):
             with self.assertRaises(TokenRouterResponseError):
                 client.chat_completions(model=TOKENROUTER_DEFAULT_MODEL, messages=[{"role": "user", "content": "Hello"}])
 
+    def test_extracts_message_content_as_string(self) -> None:
+        client = TokenRouterClient(api_key="sk-test-key")
+        payload = {
+            "model": TOKENROUTER_DEFAULT_MODEL,
+            "choices": [{"message": {"role": "assistant", "content": "Final analysis text"}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 200, "total_tokens": 300},
+        }
+        with patch("tokenrouter_client.requests.post", return_value=self._fake_response(200, payload)):
+            result = client.chat_completions(model=TOKENROUTER_DEFAULT_MODEL, messages=[{"role": "user", "content": "Hello"}])
+
+        self.assertEqual(result.content, "Final analysis text")
+        self.assertEqual(result.usage_metadata["prompt_tokens"], 100)
+        self.assertEqual(result.usage_metadata["completion_tokens"], 200)
+        self.assertEqual(result.usage_metadata["total_tokens"], 300)
+
+    def test_extracts_message_content_as_content_blocks(self) -> None:
+        client = TokenRouterClient(api_key="sk-test-key")
+        payload = {
+            "model": TOKENROUTER_DEFAULT_MODEL,
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": "First paragraph."},
+                            {"type": "text", "text": "Second paragraph."},
+                        ],
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
+        }
+        with patch("tokenrouter_client.requests.post", return_value=self._fake_response(200, payload)):
+            result = client.chat_completions(model=TOKENROUTER_DEFAULT_MODEL, messages=[{"role": "user", "content": "Hello"}])
+
+        self.assertIn("First paragraph.", result.content)
+        self.assertIn("Second paragraph.", result.content)
+
+    def test_extracts_output_text_when_reasoning_and_final_are_split(self) -> None:
+        client = TokenRouterClient(api_key="sk-test-key")
+        payload = {
+            "model": TOKENROUTER_DEFAULT_MODEL,
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "reasoning_content": "Reasoning summary",
+                        "content": None,
+                        "output_text": "Final answer from output_text",
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 55, "completion_tokens": 66, "total_tokens": 121},
+            "cost": {"total": 0.0},
+        }
+        with patch("tokenrouter_client.requests.post", return_value=self._fake_response(200, payload)):
+            result = client.chat_completions(model=TOKENROUTER_DEFAULT_MODEL, messages=[{"role": "user", "content": "Hello"}])
+
+        self.assertEqual(result.content, "Final answer from output_text")
+        self.assertEqual(result.usage_metadata["estimated_cost"], 0.0)
+
+    def test_empty_message_content_includes_sanitized_diagnostic(self) -> None:
+        client = TokenRouterClient(api_key="sk-test-key")
+        payload = {
+            "model": TOKENROUTER_DEFAULT_MODEL,
+            "choices": [{"message": {"role": "assistant", "content": ""}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+        with patch("tokenrouter_client.requests.post", return_value=self._fake_response(200, payload)):
+            with self.assertRaises(TokenRouterResponseError) as ctx:
+                client.chat_completions(model=TOKENROUTER_DEFAULT_MODEL, messages=[{"role": "user", "content": "Hello"}])
+
+        diagnostic = getattr(ctx.exception, "diagnostic", {})
+        self.assertIn("http_status", diagnostic)
+        self.assertIn("top_level_keys", diagnostic)
+        self.assertIn("choices_count", diagnostic)
+
 
 class AiAnalysisPromptTests(unittest.TestCase):
     def test_prompt_includes_investor_profile_and_hd_espp_context(self) -> None:
@@ -480,8 +557,9 @@ class AiAnalysisTabTests(unittest.TestCase):
         metrics = pd.DataFrame([{"ticker": "AAPL", "market_value": 100.0, "annual_income": 1.0}])
 
         fake_result = SimpleNamespace(content="# Analysis\n\n- OK", model=TOKENROUTER_DEFAULT_MODEL, raw_response={}, usage={})
+        fake_session_state: dict[str, object] = {}
 
-        with patch.dict(app.st.session_state, {}, clear=True), \
+        with patch.object(app.st, "session_state", fake_session_state), \
             patch.dict(app.os.environ, {"TOKENROUTER_API_KEY": "sk-test-key"}, clear=False), \
             patch.object(app, "_build_ai_analysis_payload_with_diagnostics", return_value=({"portfolio_snapshot": {}}, {"after_chars": 100, "after_tokens": 25, "before_chars": 200, "before_tokens": 50, "reduction_pct": 50.0})) as payload_mock, \
             patch.object(app, "build_ai_analysis_messages", return_value=[{"role": "system", "content": "sys"}, {"role": "user", "content": "user"}]) as messages_mock, \
@@ -503,6 +581,84 @@ class AiAnalysisTabTests(unittest.TestCase):
         messages_mock.assert_called_once()
         client_mock.assert_called_once()
         markdown_mock.assert_any_call("# Analysis\n\n- OK")
+        self.assertEqual(fake_session_state.get("tokenrouter_analysis"), "# Analysis\n\n- OK")
+
+    def test_saved_analysis_remains_visible_after_rerun_without_new_request(self) -> None:
+        holdings = pd.DataFrame([{"ticker": "AAPL", "shares": 1, "amount_invested": 100.0}])
+        metrics = pd.DataFrame([{"ticker": "AAPL", "market_value": 100.0, "annual_income": 1.0}])
+        fake_result = SimpleNamespace(
+            content="# Persistent Analysis",
+            model=TOKENROUTER_DEFAULT_MODEL,
+            raw_response={},
+            usage={},
+            usage_metadata={"model": TOKENROUTER_DEFAULT_MODEL, "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        )
+        fake_session_state: dict[str, object] = {}
+
+        with patch.object(app.st, "session_state", fake_session_state), \
+            patch.dict(app.os.environ, {"TOKENROUTER_API_KEY": "sk-test-key"}, clear=False), \
+            patch.object(app, "_build_ai_analysis_payload_with_diagnostics", return_value=({"portfolio_snapshot": {}}, {"after_chars": 100, "after_tokens": 25, "before_chars": 200, "before_tokens": 50, "reduction_pct": 50.0})), \
+            patch.object(app, "build_ai_analysis_messages", return_value=[{"role": "system", "content": "sys"}, {"role": "user", "content": "user"}]), \
+            patch.object(app.TokenRouterClient, "chat_completions", return_value=fake_result), \
+            patch.object(app.st, "subheader"), \
+            patch.object(app.st, "caption"), \
+            patch.object(app.st, "info"), \
+            patch.object(app.st, "error"), \
+            patch.object(app.st, "download_button"), \
+            patch.object(app.st, "selectbox", side_effect=[TOKENROUTER_DEFAULT_MODEL, AI_ANALYSIS_TYPES[0], TOKENROUTER_DEFAULT_MODEL, AI_ANALYSIS_TYPES[1]]), \
+            patch.object(app.st, "text_area", return_value=""), \
+            patch.object(app.st, "columns", side_effect=[
+                [SimpleNamespace(button=MagicMock(return_value=True)), SimpleNamespace(button=MagicMock(return_value=False))],
+                [SimpleNamespace(button=MagicMock(return_value=False)), SimpleNamespace(button=MagicMock(return_value=False))],
+            ]), \
+            patch.object(app.st, "expander", return_value=contextlib.nullcontext()), \
+            patch.object(app.st, "spinner", return_value=contextlib.nullcontext()), \
+            patch.object(app.st, "markdown") as markdown_mock:
+            app._render_ai_analysis_tab(holdings, metrics)
+            app._render_ai_analysis_tab(holdings, metrics)
+
+        self.assertEqual(fake_session_state.get("tokenrouter_analysis"), "# Persistent Analysis")
+        self.assertGreaterEqual(markdown_mock.call_count, 2)
+
+    def test_malformed_response_shows_sanitized_error_detail(self) -> None:
+        holdings = pd.DataFrame([{"ticker": "AAPL", "shares": 1, "amount_invested": 100.0}])
+        metrics = pd.DataFrame([{"ticker": "AAPL", "market_value": 100.0, "annual_income": 1.0}])
+
+        malformed_error = TokenRouterResponseError(
+            "TokenRouter returned no extractable assistant content.",
+            diagnostic={
+                "http_status": 200,
+                "top_level_keys": ["choices", "model", "usage"],
+                "choices_count": 1,
+                "message_keys": ["content", "reasoning_content"],
+                "content_type": "list",
+                "content_items": 0,
+            },
+        )
+        fake_session_state: dict[str, object] = {}
+
+        with patch.object(app.st, "session_state", fake_session_state), \
+            patch.dict(app.os.environ, {"TOKENROUTER_API_KEY": "sk-test-key"}, clear=False), \
+            patch.object(app, "_build_ai_analysis_payload_with_diagnostics", return_value=({"portfolio_snapshot": {}}, {"after_chars": 100, "after_tokens": 25, "before_chars": 200, "before_tokens": 50, "reduction_pct": 50.0})), \
+            patch.object(app, "build_ai_analysis_messages", return_value=[{"role": "system", "content": "sys"}, {"role": "user", "content": "user"}]), \
+            patch.object(app.TokenRouterClient, "chat_completions", side_effect=malformed_error), \
+            patch.object(app.st, "subheader"), \
+            patch.object(app.st, "caption"), \
+            patch.object(app.st, "info"), \
+            patch.object(app.st, "error"), \
+            patch.object(app.st, "markdown"), \
+            patch.object(app.st, "download_button"), \
+            patch.object(app.st, "selectbox", side_effect=[TOKENROUTER_DEFAULT_MODEL, AI_ANALYSIS_TYPES[0]]), \
+            patch.object(app.st, "text_area", return_value=""), \
+            patch.object(app.st, "columns", return_value=[SimpleNamespace(button=MagicMock(return_value=True)), SimpleNamespace(button=MagicMock(return_value=False))]), \
+            patch.object(app.st, "expander", return_value=contextlib.nullcontext()), \
+            patch.object(app.st, "spinner", return_value=contextlib.nullcontext()):
+            app._render_ai_analysis_tab(holdings, metrics)
+
+        detail = str(fake_session_state.get("ai_analysis_error_detail", ""))
+        self.assertIn("HTTP status", detail)
+        self.assertIn("Top-level keys", detail)
+        self.assertIn("Number of choices", detail)
 
     def test_missing_api_key_shows_setup_message(self) -> None:
         holdings = pd.DataFrame([{"ticker": "AAPL", "shares": 1, "amount_invested": 100.0}])
