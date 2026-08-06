@@ -105,6 +105,7 @@ class DividendIncomeSeasonalityTests(unittest.TestCase):
         self.assertEqual(_normalize_active_tab("Dividend Calendar"), "Portfolio Analysis")
         self.assertEqual(_normalize_active_tab(None), "Portfolio Analysis")
         self.assertEqual(_normalize_active_tab("Portfolio Analysis"), "Portfolio Analysis")
+        self.assertEqual(_normalize_active_tab("AI Analysis"), "Portfolio Analysis")
 
     def test_seasonality_preparation_does_not_mutate_hd_values(self) -> None:
         metrics = pd.DataFrame(

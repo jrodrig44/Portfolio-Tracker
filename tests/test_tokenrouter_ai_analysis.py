@@ -587,7 +587,135 @@ class AiAnalysisPromptTests(unittest.TestCase):
         self.assertIn("Focus on concentration", messages[1]["content"])
 
 
+class AiAnalysisFeatureFlagTests(unittest.TestCase):
+    def _sample_holdings_metrics(self) -> tuple[pd.DataFrame, pd.DataFrame]:
+        holdings = pd.DataFrame([{"ticker": "AAPL", "shares": 1, "amount_invested": 100.0}])
+        metrics = pd.DataFrame([{"ticker": "AAPL", "market_value": 100.0, "annual_income": 1.0}])
+        return holdings, metrics
+
+    def test_ai_controls_unavailable_when_disabled_and_no_client_invoked(self) -> None:
+        holdings, metrics = self._sample_holdings_metrics()
+
+        with patch.object(app, "ENABLE_AI_ANALYSIS", False), \
+            patch.dict(app.st.session_state, {}, clear=True), \
+            patch.object(app.st, "subheader") as subheader_mock, \
+            patch.object(app.st, "caption") as caption_mock, \
+            patch.object(app.st, "selectbox") as selectbox_mock, \
+            patch.object(app.st, "text_area") as text_area_mock, \
+            patch.object(app.st, "columns") as columns_mock, \
+            patch.object(app.TokenRouterClient, "chat_completions") as client_mock:
+            app._render_ai_analysis_tab(holdings, metrics)
+
+        subheader_mock.assert_not_called()
+        caption_mock.assert_not_called()
+        selectbox_mock.assert_not_called()
+        text_area_mock.assert_not_called()
+        columns_mock.assert_not_called()
+        client_mock.assert_not_called()
+
+    def test_main_starts_without_api_key_when_ai_disabled(self) -> None:
+        def _fake_columns(spec: object):
+            count = spec if isinstance(spec, int) else len(spec)
+            return [contextlib.nullcontext() for _ in range(count)]
+
+        def _fake_tabs(labels: list[str]):
+            return [contextlib.nullcontext() for _ in labels]
+
+        empty_holdings = pd.DataFrame(columns=["ticker", "shares", "amount_invested"])
+        session_state: dict[str, object] = {}
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(app, "ENABLE_AI_ANALYSIS", False))
+            stack.enter_context(patch.object(app.st, "session_state", session_state))
+            stack.enter_context(patch.dict(app.os.environ, {"TOKENROUTER_API_KEY": ""}, clear=False))
+            stack.enter_context(patch.object(app, "_maybe_log_access"))
+            stack.enter_context(patch.object(app, "_enable_periodic_refresh"))
+            stack.enter_context(patch.object(app, "_initialize_export_state"))
+            stack.enter_context(patch.object(app, "_reset_export_missing_field_warnings"))
+            stack.enter_context(patch.object(app, "_detect_mobile_client", return_value=False))
+            stack.enter_context(patch.object(app, "_render_last_updated_indicator"))
+            stack.enter_context(patch.object(app, "_load_recent_access_logs", return_value=pd.DataFrame()))
+            stack.enter_context(patch.object(app, "_load_saved_holdings", return_value=empty_holdings))
+            stack.enter_context(patch.object(app, "_render_holdings_tab", return_value=empty_holdings))
+            render_ai_mock = stack.enter_context(patch.object(app, "_render_ai_analysis_tab"))
+            tokenrouter_ctor_mock = stack.enter_context(patch.object(app, "TokenRouterClient"))
+            stack.enter_context(patch.object(app.st, "set_page_config"))
+            stack.enter_context(patch.object(app.st, "title"))
+            stack.enter_context(patch.object(app.st, "caption"))
+            stack.enter_context(patch.object(app.st, "subheader"))
+            stack.enter_context(patch.object(app.st, "write"))
+            stack.enter_context(patch.object(app.st, "toggle", return_value=False))
+            stack.enter_context(patch.object(app.st, "button", return_value=False))
+            stack.enter_context(patch.object(app.st, "warning"))
+            stack.enter_context(patch.object(app.st, "success"))
+            stack.enter_context(patch.object(app.st, "info"))
+            stack.enter_context(patch.object(app.st, "error"))
+            stack.enter_context(patch.object(app.st, "metric"))
+            stack.enter_context(patch.object(app.st, "dataframe"))
+            stack.enter_context(patch.object(app.st, "columns", side_effect=_fake_columns))
+            stack.enter_context(patch.object(app.st, "expander", return_value=contextlib.nullcontext()))
+            tabs_mock = stack.enter_context(patch.object(app.st, "tabs", side_effect=_fake_tabs))
+            stack.enter_context(patch.object(app.st, "sidebar", contextlib.nullcontext()))
+            app.main()
+
+        tabs_mock.assert_called_once()
+        tab_labels = tabs_mock.call_args.args[0]
+        self.assertNotIn("AI Analysis", tab_labels)
+        tokenrouter_ctor_mock.assert_not_called()
+        render_ai_mock.assert_not_called()
+
+    def test_manual_exports_work_when_ai_disabled(self) -> None:
+        holdings = pd.DataFrame(
+            [
+                {
+                    "ticker": "AAPL",
+                    "shares": 10,
+                    "amount_invested": 1000.0,
+                    "annual_div_per_share": 0.96,
+                    "sector": "Technology",
+                    "asset_type": "Stock",
+                }
+            ]
+        )
+        metrics = pd.DataFrame(
+            [
+                {
+                    "ticker": "AAPL",
+                    "current_price": 200.0,
+                    "market_value": 2000.0,
+                    "annual_income": 9.6,
+                    "portfolio_yield_pct": 0.48,
+                    "cost_basis": 1000.0,
+                    "unrealized_gain": 1000.0,
+                    "sector": "Technology",
+                    "asset_type": "Stock",
+                }
+            ]
+        )
+
+        with patch.object(app, "ENABLE_AI_ANALYSIS", False), patch.dict(app.os.environ, {"TOKENROUTER_API_KEY": ""}, clear=False):
+            markdown_export = app._build_export_markdown(holdings, metrics)
+            json_export = app._build_ai_export_json(holdings, metrics)
+
+        payload = json.loads(json_export)
+        self.assertIn("# Dividend Portfolio Tracker Export", markdown_export)
+        self.assertIn("portfolio_snapshot", payload)
+        self.assertIn("asset_allocation", payload)
+
+    def test_enabling_flag_restores_ai_tab_and_active_tab_mapping(self) -> None:
+        with patch.object(app, "ENABLE_AI_ANALYSIS", True):
+            self.assertIn("AI Analysis", app._primary_tab_labels())
+            self.assertEqual(app._normalize_active_tab("AI Analysis"), "AI Analysis")
+
+
 class AiAnalysisTabTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._ai_flag_patcher = patch.object(app, "ENABLE_AI_ANALYSIS", True)
+        self._ai_flag_patcher.start()
+
+    def tearDown(self) -> None:
+        self._ai_flag_patcher.stop()
+
     def _patch_ai_tab_widgets(self, analyze_clicked: bool, clear_clicked: bool = False):
         action_button = SimpleNamespace(button=MagicMock(return_value=analyze_clicked))
         clear_button = SimpleNamespace(button=MagicMock(return_value=clear_clicked))
@@ -935,7 +1063,8 @@ class DotenvLoadingTests(unittest.TestCase):
         action_button = SimpleNamespace(button=MagicMock(return_value=False))
         clear_button = SimpleNamespace(button=MagicMock(return_value=False))
 
-        with patch.dict(reloaded_app.st.session_state, {}, clear=True), \
+        with patch.object(reloaded_app, "ENABLE_AI_ANALYSIS", True), \
+            patch.dict(reloaded_app.st.session_state, {}, clear=True), \
             patch.object(reloaded_app, "_build_ai_analysis_payload_with_diagnostics") as payload_mock, \
             patch.object(reloaded_app, "build_ai_analysis_messages") as messages_mock, \
             patch.object(reloaded_app.TokenRouterClient, "chat_completions") as client_mock, \

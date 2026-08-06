@@ -56,6 +56,7 @@ ESPP_PURCHASE_FREQUENCY = "6_months"
 DEFAULT_EXPECTED_RETURN = 0.08
 DEFAULT_PROJECTION_BIWEEKLY_CONTRIB = 280.0
 EXPORT_VERSION = "2026.08"
+ENABLE_AI_ANALYSIS = False
 
 OPTION_INCOME_ETF_TICKERS = {"JEPI", "JEPQ", "QYLD", "RYLD", "XYLD"}
 SECTOR_LABEL_ALIASES = {
@@ -6217,6 +6218,9 @@ def _format_tokenrouter_response_diagnostic(diagnostic: object) -> str:
 
 
 def _render_ai_analysis_tab(holdings: pd.DataFrame, metrics: pd.DataFrame, mobile_mode: bool = False) -> None:
+    if not _ai_analysis_enabled():
+        return
+
     st.subheader("AI Analysis")
     st.caption("This analysis is generated through TokenRouter from the portfolio data already loaded in memory. No export file is required.")
 
@@ -6985,18 +6989,32 @@ def _render_insights_tab(metrics: pd.DataFrame, mobile_mode: bool = False) -> No
         st.write(f"- {item}")
 
 
+def _ai_analysis_enabled() -> bool:
+    return bool(ENABLE_AI_ANALYSIS)
+
+
+def _primary_tab_labels() -> list[str]:
+    labels = ["Holdings", "Portfolio Analysis"]
+    if _ai_analysis_enabled():
+        labels.append("AI Analysis")
+    labels.extend(["Portfolio Insights", "Portfolio Health"])
+    return labels
+
+
 def _normalize_active_tab(active_tab: object) -> str:
     if active_tab in {None, "", "Dividend Calendar", "dividend calendar", "dividend-calendar"}:
         return "Portfolio Analysis"
 
     if isinstance(active_tab, str):
         cleaned = active_tab.strip()
-        if cleaned in {"Holdings", "Portfolio Analysis", "AI Analysis", "Portfolio Insights", "Portfolio Health"}:
+        enabled_tabs = _primary_tab_labels()
+        if cleaned in enabled_tabs:
             return cleaned
-        if cleaned.lower() in {"holdings", "portfolio analysis", "ai analysis", "portfolio insights", "portfolio health"}:
-            if cleaned.lower() == "ai analysis":
-                return "AI Analysis"
-            return cleaned.title()
+
+        normalized_tabs = {label.lower(): label for label in enabled_tabs}
+        normalized_value = normalized_tabs.get(cleaned.lower())
+        if normalized_value:
+            return normalized_value
 
     return "Portfolio Analysis"
 
@@ -7172,9 +7190,15 @@ def main() -> None:
     active_tab = _normalize_active_tab(st.session_state.get("active_tab"))
     st.session_state["active_tab"] = active_tab
 
-    tab_holdings, tab_analysis, tab_ai_analysis, tab_insights, tab_health = st.tabs(
-        ["Holdings", "Portfolio Analysis", "AI Analysis", "Portfolio Insights", "Portfolio Health"]
-    )
+    tab_labels = _primary_tab_labels()
+    tab_entries = st.tabs(tab_labels)
+    tabs_by_name = dict(zip(tab_labels, tab_entries))
+
+    tab_holdings = tabs_by_name["Holdings"]
+    tab_analysis = tabs_by_name["Portfolio Analysis"]
+    tab_ai_analysis = tabs_by_name.get("AI Analysis")
+    tab_insights = tabs_by_name["Portfolio Insights"]
+    tab_health = tabs_by_name["Portfolio Health"]
 
     with tab_holdings:
         holdings = _render_holdings_tab(st.session_state["holdings"], mobile_mode=mobile_mode)
@@ -7184,8 +7208,9 @@ def main() -> None:
     if holdings.empty:
         with tab_analysis:
             st.info("Add at least one holding to calculate analysis.")
-        with tab_ai_analysis:
-            st.info("Add at least one holding to run AI Analysis.")
+        if tab_ai_analysis is not None:
+            with tab_ai_analysis:
+                st.info("Add at least one holding to run AI Analysis.")
         with tab_insights:
             st.info("Add at least one holding to generate insights.")
         return
@@ -7223,8 +7248,9 @@ def main() -> None:
     with tab_analysis:
         _render_analysis_tab(metrics, mobile_mode=mobile_mode)
 
-    with tab_ai_analysis:
-        _render_ai_analysis_tab(holdings, metrics, mobile_mode=mobile_mode)
+    if tab_ai_analysis is not None:
+        with tab_ai_analysis:
+            _render_ai_analysis_tab(holdings, metrics, mobile_mode=mobile_mode)
 
     with tab_insights:
         _render_insights_tab(metrics, mobile_mode=mobile_mode)
