@@ -8,29 +8,11 @@ import socket
 from urllib import error, parse, request
 
 TOKENROUTER_DEFAULT_BASE_URL = "https://api.tokenrouter.com/v1"
-TOKENROUTER_DEFAULT_MODEL = "anthropic/claude-sonnet-5"
+TOKENROUTER_DEFAULT_MODEL = "moonshotai/kimi-k3-free"
 TOKENROUTER_TIMEOUT_SECONDS = 30.0
 
 TOKENROUTER_MODEL_LABELS: dict[str, str] = {
-    "anthropic/claude-fable-5": "Claude Fable 5",
-    "anthropic/claude-opus-5-fast": "Claude Opus 5 Fast",
-    "anthropic/claude-opus-5": "Claude Opus 5",
-    "anthropic/claude-sonnet-5": "Claude Sonnet 5",
-    "deepseek/deepseek-v4-flash-0731": "DeepSeek V4 Flash 0731",
-    "google/gemini-3.5-flash-lite": "Gemini 3.5 Flash Lite",
-    "google/gemini-3.6-flash": "Gemini 3.6 Flash",
-    "moonshotai/kimi-k2.7-code": "Kimi K2.7 Code",
-    "moonshotai/kimi-k3": "Kimi K3",
     "moonshotai/kimi-k3-free": "Kimi K3 Free",
-    "openai/gpt-5.5-pro": "GPT-5.5 Pro",
-    "openai/gpt-5.6-luna": "GPT-5.6 Luna",
-    "openai/gpt-5.6-sol": "GPT-5.6 Sol",
-    "openai/gpt-5.6-terra": "GPT-5.6 Terra",
-    "qwen/qwen3.8-max": "Qwen 3.8 Max",
-    "sakana/fugu-ultra": "Fugu Ultra",
-    "x-ai/grok-4.5": "Grok 4.5",
-    "x-ai/grok-build-0.1": "Grok Build 0.1",
-    "z-ai/glm-5.2": "GLM 5.2",
 }
 TOKENROUTER_MODEL_IDS = list(TOKENROUTER_MODEL_LABELS.keys())
 
