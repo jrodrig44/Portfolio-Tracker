@@ -1,8 +1,11 @@
 import contextlib
+import importlib
 import io
 import json
+import os
 import socket
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from urllib import error
@@ -358,6 +361,8 @@ class AiAnalysisTabTests(unittest.TestCase):
         metrics = pd.DataFrame([{"ticker": "AAPL", "market_value": 100.0, "annual_income": 1.0}])
 
         info_mock = MagicMock()
+        action_button = SimpleNamespace(button=MagicMock(return_value=False))
+        clear_button = SimpleNamespace(button=MagicMock(return_value=False))
         with patch.dict(app.st.session_state, {}, clear=True), \
             patch.dict("os.environ", {"TOKENROUTER_API_KEY": ""}, clear=False), \
             patch.object(app, "_build_ai_analysis_request_payload") as payload_mock, \
@@ -370,14 +375,92 @@ class AiAnalysisTabTests(unittest.TestCase):
             patch.object(app.st, "download_button"), \
             patch.object(app.st, "selectbox", side_effect=[TOKENROUTER_DEFAULT_MODEL, AI_ANALYSIS_TYPES[0]]), \
             patch.object(app.st, "text_area", return_value=""), \
-            patch.object(app.st, "columns", return_value=[SimpleNamespace(button=MagicMock(return_value=False)), SimpleNamespace(button=MagicMock(return_value=False))]), \
+            patch.object(app.st, "columns", return_value=[action_button, clear_button]), \
             patch.object(app.st, "expander", return_value=contextlib.nullcontext()), \
             patch.object(app.st, "spinner", return_value=contextlib.nullcontext()):
             app._render_ai_analysis_tab(holdings, metrics)
 
         info_messages = " ".join(str(call.args[0]) for call in info_mock.call_args_list if call.args)
         self.assertIn("Set TOKENROUTER_API_KEY", info_messages)
+        self.assertTrue(action_button.button.call_args.kwargs["disabled"])
         payload_mock.assert_not_called()
+        client_mock.assert_not_called()
+
+
+class DotenvLoadingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.project_root = Path(app.__file__).resolve().parent
+        self.env_path = self.project_root / ".env"
+        self.original_exists = self.env_path.exists()
+        self.original_content = self.env_path.read_text(encoding="utf-8") if self.original_exists else ""
+        self.original_env = {
+            "TOKENROUTER_API_KEY": os.environ.get("TOKENROUTER_API_KEY"),
+            "TOKENROUTER_MODEL": os.environ.get("TOKENROUTER_MODEL"),
+            "TOKENROUTER_BASE_URL": os.environ.get("TOKENROUTER_BASE_URL"),
+        }
+
+    def tearDown(self) -> None:
+        if self.original_exists:
+            self.env_path.write_text(self.original_content, encoding="utf-8")
+        elif self.env_path.exists():
+            self.env_path.unlink()
+
+        for key, value in self.original_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+        importlib.reload(app)
+
+    def test_tokenrouter_api_key_loads_from_project_env(self) -> None:
+        os.environ.pop("TOKENROUTER_API_KEY", None)
+        self.env_path.write_text("TOKENROUTER_API_KEY=sk-from-dotenv\n", encoding="utf-8")
+
+        reloaded_app = importlib.reload(app)
+
+        self.assertEqual(os.environ.get("TOKENROUTER_API_KEY"), "sk-from-dotenv")
+        self.assertTrue(reloaded_app._tokenrouter_has_api_key())
+
+    def test_os_environment_variable_takes_priority_over_env_file(self) -> None:
+        os.environ["TOKENROUTER_API_KEY"] = "sk-from-os"
+        self.env_path.write_text("TOKENROUTER_API_KEY=sk-from-dotenv\n", encoding="utf-8")
+
+        reloaded_app = importlib.reload(app)
+
+        self.assertEqual(os.environ.get("TOKENROUTER_API_KEY"), "sk-from-os")
+        self.assertTrue(reloaded_app._tokenrouter_has_api_key())
+
+    def test_analyze_button_enabled_when_key_loaded_from_env_file(self) -> None:
+        os.environ.pop("TOKENROUTER_API_KEY", None)
+        self.env_path.write_text("TOKENROUTER_API_KEY=sk-from-dotenv\n", encoding="utf-8")
+        reloaded_app = importlib.reload(app)
+
+        holdings = pd.DataFrame([{"ticker": "AAPL", "shares": 1, "amount_invested": 100.0}])
+        metrics = pd.DataFrame([{"ticker": "AAPL", "market_value": 100.0, "annual_income": 1.0}])
+        action_button = SimpleNamespace(button=MagicMock(return_value=False))
+        clear_button = SimpleNamespace(button=MagicMock(return_value=False))
+
+        with patch.dict(reloaded_app.st.session_state, {}, clear=True), \
+            patch.object(reloaded_app, "_build_ai_analysis_request_payload") as payload_mock, \
+            patch.object(reloaded_app, "build_ai_analysis_messages") as messages_mock, \
+            patch.object(reloaded_app.TokenRouterClient, "chat_completions") as client_mock, \
+            patch.object(reloaded_app.st, "subheader"), \
+            patch.object(reloaded_app.st, "caption"), \
+            patch.object(reloaded_app.st, "info"), \
+            patch.object(reloaded_app.st, "error"), \
+            patch.object(reloaded_app.st, "markdown"), \
+            patch.object(reloaded_app.st, "download_button"), \
+            patch.object(reloaded_app.st, "selectbox", side_effect=[TOKENROUTER_DEFAULT_MODEL, AI_ANALYSIS_TYPES[0]]), \
+            patch.object(reloaded_app.st, "text_area", return_value=""), \
+            patch.object(reloaded_app.st, "columns", return_value=[action_button, clear_button]), \
+            patch.object(reloaded_app.st, "expander", return_value=contextlib.nullcontext()), \
+            patch.object(reloaded_app.st, "spinner", return_value=contextlib.nullcontext()):
+            reloaded_app._render_ai_analysis_tab(holdings, metrics)
+
+        self.assertFalse(action_button.button.call_args.kwargs["disabled"])
+        payload_mock.assert_not_called()
+        messages_mock.assert_not_called()
         client_mock.assert_not_called()
 
 

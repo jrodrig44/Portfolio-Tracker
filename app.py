@@ -10,6 +10,7 @@ import re
 import sqlite3
 from typing import Any, Iterable
 
+from dotenv import load_dotenv
 import pandas as pd
 import datetime as dt
 import streamlit as st
@@ -36,6 +37,8 @@ from tokenrouter_client import (
     TokenRouterTimeoutError,
     TokenRouterUnsupportedModelError,
 )
+
+load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
 
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
