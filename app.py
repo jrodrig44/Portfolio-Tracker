@@ -7085,7 +7085,6 @@ def main() -> None:
             st.session_state["holdings"] = _load_saved_holdings()
             st.rerun()
 
-        st.subheader("Troubleshooting")
 
     if "holdings" not in st.session_state:
         st.session_state["holdings"] = _load_saved_holdings()
