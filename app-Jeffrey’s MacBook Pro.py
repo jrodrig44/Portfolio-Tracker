@@ -22,7 +22,6 @@ DATA_DIR.mkdir(exist_ok=True)
 DEFAULT_DB_PATH = DATA_DIR / "portfolio.db"
 LEGACY_CSV_PATH = DATA_DIR / "holdings.csv"
 HOLDINGS_TABLE = "holdings"
-ACCESS_LOG_PATH = DATA_DIR / "app_access_log.jsonl"
 EXPORT_JSON_PATH = DATA_DIR / "portfolio_export.json"
 
 ESPP_DISCOUNT = 0.15
@@ -355,70 +354,6 @@ def _resolve_client_ip(headers: dict[str, str]) -> str:
         return cf_ip
 
     return ""
-
-
-def _append_access_log(event: str = "page_view") -> None:
-    headers = _get_context_headers()
-    user_agent = headers.get("user-agent", "")
-    session_id = str(getattr(getattr(st, "context", None), "session_id", ""))
-
-    record = {
-        "timestamp": datetime.now().isoformat(timespec="seconds"),
-        "event": event,
-        "session_id": session_id,
-        "client_ip": _resolve_client_ip(headers),
-        "device_type": _infer_device_type(user_agent),
-        "user_agent": user_agent,
-    }
-
-    try:
-        with ACCESS_LOG_PATH.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record) + "\n")
-    except Exception:
-        # Logging should never break the app experience.
-        pass
-
-
-def _maybe_log_access() -> None:
-    now = datetime.now()
-    last_logged_raw = st.session_state.get("_last_access_log_at", "")
-
-    try:
-        if last_logged_raw:
-            last_logged_at = datetime.fromisoformat(str(last_logged_raw))
-            if (now - last_logged_at).total_seconds() < 20:
-                return
-    except Exception:
-        pass
-
-    _append_access_log()
-    st.session_state["_last_access_log_at"] = now.isoformat()
-
-
-def _load_recent_access_logs(limit: int = 200) -> pd.DataFrame:
-    if not ACCESS_LOG_PATH.exists():
-        return pd.DataFrame(columns=["timestamp", "event", "session_id", "client_ip", "device_type", "user_agent"])
-
-    try:
-        with ACCESS_LOG_PATH.open("r", encoding="utf-8") as f:
-            lines = f.readlines()
-    except Exception:
-        return pd.DataFrame(columns=["timestamp", "event", "session_id", "client_ip", "device_type", "user_agent"])
-
-    rows: list[dict] = []
-    for line in lines[-limit:]:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rows.append(json.loads(line))
-        except Exception:
-            continue
-
-    if not rows:
-        return pd.DataFrame(columns=["timestamp", "event", "session_id", "client_ip", "device_type", "user_agent"])
-
-    return pd.DataFrame(rows)
 
 
 def _canonical_asset_type(value: str) -> str:
@@ -5786,7 +5721,6 @@ def _render_last_updated_indicator() -> None:
 
 def main() -> None:
     st.set_page_config(page_title="Dividend Portfolio Tracker", page_icon="📈", layout="wide")
-    _maybe_log_access()
     _enable_periodic_refresh(180000)
     _initialize_export_state()
     st.session_state["last_market_data_update"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -5835,37 +5769,6 @@ def main() -> None:
             st.rerun()
 
         st.subheader("Troubleshooting")
-        with st.expander("Live app access logs", expanded=False):
-            st.caption("Shows recent app hits with timestamp, device type, IP (if available), and user-agent.")
-            c1, c2 = st.columns(2)
-            with c1:
-                refresh_logs = st.button("Refresh logs")
-            with c2:
-                clear_logs = st.button("Clear logs")
-
-            if clear_logs:
-                try:
-                    ACCESS_LOG_PATH.unlink(missing_ok=True)
-                    st.success("Access logs cleared.")
-                except Exception:
-                    st.error("Unable to clear logs right now.")
-
-            if refresh_logs:
-                st.rerun()
-
-            log_df = _load_recent_access_logs(limit=250)
-            if log_df.empty:
-                st.info("No access logs yet.")
-            else:
-                unique_sessions = int(log_df["session_id"].fillna("").astype(str).replace("", pd.NA).dropna().nunique())
-                unique_ips = int(log_df["client_ip"].fillna("").astype(str).replace("", pd.NA).dropna().nunique())
-                m1, m2, m3 = st.columns(3)
-                m1.metric("Recent Hits", f"{len(log_df):,}")
-                m2.metric("Unique Sessions", f"{unique_sessions:,}")
-                m3.metric("Unique IPs", f"{unique_ips:,}")
-
-                show_cols = ["timestamp", "device_type", "client_ip", "session_id", "user_agent"]
-                st.dataframe(log_df[show_cols].sort_values("timestamp", ascending=False), width="stretch", hide_index=True)
 
     if "holdings" not in st.session_state:
         st.session_state["holdings"] = _load_saved_holdings()

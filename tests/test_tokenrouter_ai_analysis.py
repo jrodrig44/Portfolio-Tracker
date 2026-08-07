@@ -613,6 +613,52 @@ class AiAnalysisFeatureFlagTests(unittest.TestCase):
         columns_mock.assert_not_called()
         client_mock.assert_not_called()
 
+    def test_main_does_not_render_access_log_expander(self) -> None:
+        def _fake_columns(spec: object):
+            count = spec if isinstance(spec, int) else len(spec)
+            return [contextlib.nullcontext() for _ in range(count)]
+
+        def _fake_tabs(labels: list[str]):
+            return [contextlib.nullcontext() for _ in labels]
+
+        empty_holdings = pd.DataFrame(columns=["ticker", "shares", "amount_invested"])
+        expander_labels: list[str] = []
+
+        def _fake_expander(label: str, *args: object, **kwargs: object):
+            expander_labels.append(label)
+            return contextlib.nullcontext()
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(app, "ENABLE_AI_ANALYSIS", False))
+            stack.enter_context(patch.object(app, "_enable_periodic_refresh"))
+            stack.enter_context(patch.object(app, "_initialize_export_state"))
+            stack.enter_context(patch.object(app, "_reset_export_missing_field_warnings"))
+            stack.enter_context(patch.object(app, "_detect_mobile_client", return_value=False))
+            stack.enter_context(patch.object(app, "_render_last_updated_indicator"))
+            stack.enter_context(patch.object(app, "_load_saved_holdings", return_value=empty_holdings))
+            stack.enter_context(patch.object(app, "_render_holdings_tab", return_value=empty_holdings))
+            stack.enter_context(patch.object(app, "_render_ai_analysis_tab"))
+            stack.enter_context(patch.object(app.st, "set_page_config"))
+            stack.enter_context(patch.object(app.st, "title"))
+            stack.enter_context(patch.object(app.st, "caption"))
+            stack.enter_context(patch.object(app.st, "subheader"))
+            stack.enter_context(patch.object(app.st, "write"))
+            stack.enter_context(patch.object(app.st, "toggle", return_value=False))
+            stack.enter_context(patch.object(app.st, "button", return_value=False))
+            stack.enter_context(patch.object(app.st, "warning"))
+            stack.enter_context(patch.object(app.st, "success"))
+            stack.enter_context(patch.object(app.st, "info"))
+            stack.enter_context(patch.object(app.st, "error"))
+            stack.enter_context(patch.object(app.st, "metric"))
+            stack.enter_context(patch.object(app.st, "dataframe"))
+            stack.enter_context(patch.object(app.st, "columns", side_effect=_fake_columns))
+            stack.enter_context(patch.object(app.st, "expander", side_effect=_fake_expander))
+            stack.enter_context(patch.object(app.st, "tabs", side_effect=_fake_tabs))
+            stack.enter_context(patch.object(app.st, "sidebar", contextlib.nullcontext()))
+            app.main()
+
+        self.assertNotIn("Live app access logs", expander_labels)
+
     def test_main_starts_without_api_key_when_ai_disabled(self) -> None:
         def _fake_columns(spec: object):
             count = spec if isinstance(spec, int) else len(spec)
@@ -628,13 +674,11 @@ class AiAnalysisFeatureFlagTests(unittest.TestCase):
             stack.enter_context(patch.object(app, "ENABLE_AI_ANALYSIS", False))
             stack.enter_context(patch.object(app.st, "session_state", session_state))
             stack.enter_context(patch.dict(app.os.environ, {"TOKENROUTER_API_KEY": ""}, clear=False))
-            stack.enter_context(patch.object(app, "_maybe_log_access"))
             stack.enter_context(patch.object(app, "_enable_periodic_refresh"))
             stack.enter_context(patch.object(app, "_initialize_export_state"))
             stack.enter_context(patch.object(app, "_reset_export_missing_field_warnings"))
             stack.enter_context(patch.object(app, "_detect_mobile_client", return_value=False))
             stack.enter_context(patch.object(app, "_render_last_updated_indicator"))
-            stack.enter_context(patch.object(app, "_load_recent_access_logs", return_value=pd.DataFrame()))
             stack.enter_context(patch.object(app, "_load_saved_holdings", return_value=empty_holdings))
             stack.enter_context(patch.object(app, "_render_holdings_tab", return_value=empty_holdings))
             render_ai_mock = stack.enter_context(patch.object(app, "_render_ai_analysis_tab"))
