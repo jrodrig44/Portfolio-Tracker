@@ -21,23 +21,22 @@ from ai_analysis_prompt import AI_ANALYSIS_TYPES, build_ai_analysis_markdown, bu
 from health_engine import compute_portfolio_health as compute_portfolio_health_engine
 from portfolio_intelligence import compute_portfolio_intelligence
 from stash_history import build_statement_history_reconciliation, import_stash_statement_history
-from tokenrouter_client import (
-    TOKENROUTER_DEFAULT_CONNECT_TIMEOUT_SECONDS,
-    TOKENROUTER_DEFAULT_BASE_URL,
-    TOKENROUTER_DEFAULT_MODEL,
-    TOKENROUTER_TIMEOUT_SECONDS,
-    TOKENROUTER_MODEL_IDS,
-    TOKENROUTER_MODEL_LABELS,
-    TokenRouterAuthenticationError,
-    TokenRouterClient,
-    TokenRouterConfigError,
-    TokenRouterConnectionError,
-    TokenRouterError,
-    TokenRouterInsufficientBalanceError,
-    TokenRouterRateLimitError,
-    TokenRouterResponseError,
-    TokenRouterTimeoutError,
-    TokenRouterUnsupportedModelError,
+from onemin_ai_client import (
+    ONEMIN_AI_DEFAULT_BASE_URL,
+    ONEMIN_AI_DEFAULT_CONNECT_TIMEOUT_SECONDS,
+    ONEMIN_AI_DEFAULT_MODEL,
+    ONEMIN_AI_TIMEOUT_SECONDS,
+    OneMinAIAuthenticationError,
+    OneMinAIClient,
+    OneMinAIConfigError,
+    OneMinAIConnectionError,
+    OneMinAIError,
+    OneMinAIInsufficientCreditsError,
+    OneMinAIRateLimitError,
+    OneMinAIResponseError,
+    OneMinAITimeoutError,
+    OneMinAIUnsupportedModelError,
+    messages_to_prompt,
 )
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
@@ -55,7 +54,12 @@ ESPP_PURCHASE_FREQUENCY = "6_months"
 DEFAULT_EXPECTED_RETURN = 0.08
 DEFAULT_PROJECTION_BIWEEKLY_CONTRIB = 280.0
 EXPORT_VERSION = "2026.08"
-ENABLE_AI_ANALYSIS = False
+ENABLE_AI_ANALYSIS = True
+ONEMIN_AI_RECOMMENDED_MODELS = [
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+]
 
 OPTION_INCOME_ETF_TICKERS = {"JEPI", "JEPQ", "QYLD", "RYLD", "XYLD"}
 SECTOR_LABEL_ALIASES = {
@@ -5589,27 +5593,30 @@ def _render_analysis_tab(metrics: pd.DataFrame, mobile_mode: bool = False) -> No
     st.dataframe(pd.DataFrame(next_rows), width="stretch", hide_index=True)
 
 
-def _tokenrouter_base_url() -> str:
-    override = str(os.environ.get("TOKENROUTER_BASE_URL", "")).strip()
-    return override or TOKENROUTER_DEFAULT_BASE_URL
+def _onemin_ai_base_url() -> str:
+    override = str(os.environ.get("ONEMIN_AI_BASE_URL", "")).strip().rstrip("/")
+    return override or ONEMIN_AI_DEFAULT_BASE_URL
 
 
-def _tokenrouter_default_model() -> str:
-    configured = str(os.environ.get("TOKENROUTER_MODEL", "")).strip()
-    if configured in TOKENROUTER_MODEL_IDS:
-        return configured
-    return TOKENROUTER_DEFAULT_MODEL
+def _onemin_ai_default_model() -> str:
+    return str(os.environ.get("ONEMIN_AI_MODEL", "")).strip() or ONEMIN_AI_DEFAULT_MODEL
 
 
-def _tokenrouter_has_api_key() -> bool:
-    return bool(str(os.environ.get("TOKENROUTER_API_KEY", "")).strip())
+def _onemin_ai_has_api_key() -> bool:
+    return bool(str(os.environ.get("ONEMIN_AI_API_KEY", "")).strip())
 
 
-def _tokenrouter_model_index(default_model: str) -> int:
+def _onemin_ai_model_options(default_model: str) -> list[str]:
+    configured_model = str(default_model or "").strip() or ONEMIN_AI_DEFAULT_MODEL
+    return list(dict.fromkeys([configured_model, *ONEMIN_AI_RECOMMENDED_MODELS]))
+
+
+def _onemin_ai_model_index(default_model: str) -> int:
+    options = _onemin_ai_model_options(default_model)
     try:
-        return TOKENROUTER_MODEL_IDS.index(default_model)
+        return options.index(str(default_model or "").strip())
     except ValueError:
-        return TOKENROUTER_MODEL_IDS.index(TOKENROUTER_DEFAULT_MODEL)
+        return 0
 
 
 def _analysis_type_index(default_analysis_type: str) -> int:
@@ -5619,16 +5626,16 @@ def _analysis_type_index(default_analysis_type: str) -> int:
         return 0
 
 
-def _tokenrouter_timeout_seconds() -> float:
-    raw_value = os.environ.get("TOKENROUTER_TIMEOUT_SECONDS")
+def _onemin_ai_timeout_seconds() -> float:
+    raw_value = os.environ.get("ONEMIN_AI_TIMEOUT_SECONDS")
     if raw_value is None:
-        return float(TOKENROUTER_TIMEOUT_SECONDS)
+        return float(ONEMIN_AI_TIMEOUT_SECONDS)
     try:
         parsed = float(raw_value)
     except (TypeError, ValueError):
-        return float(TOKENROUTER_TIMEOUT_SECONDS)
-    if parsed <= 0:
-        return float(TOKENROUTER_TIMEOUT_SECONDS)
+        return float(ONEMIN_AI_TIMEOUT_SECONDS)
+    if not math.isfinite(parsed) or parsed <= 0:
+        return float(ONEMIN_AI_TIMEOUT_SECONDS)
     return parsed
 
 
@@ -6091,63 +6098,31 @@ def _build_ai_analysis_request_payload(
     return payload
 
 
-def _format_tokenrouter_response_diagnostic(diagnostic: object) -> str:
+def _format_onemin_ai_response_diagnostic(diagnostic: object) -> str:
     if not isinstance(diagnostic, dict) or not diagnostic:
         return "No additional response-shape diagnostics were available."
 
-    lines = ["Sanitized TokenRouter response diagnostic:"]
-    if "streaming" in diagnostic:
-        lines.append(f"- Streaming: {bool(diagnostic.get('streaming'))}")
-    if "chunks_received" in diagnostic:
-        lines.append(f"- Chunks received: {diagnostic.get('chunks_received')}")
-    if "content_chunk_count" in diagnostic:
-        lines.append(f"- Content-bearing chunks: {diagnostic.get('content_chunk_count')}")
-    if "final_content_chars" in diagnostic:
-        lines.append(f"- Final content characters: {diagnostic.get('final_content_chars')}")
-    if "finish_reason" in diagnostic and diagnostic.get("finish_reason"):
-        lines.append(f"- Finish reason: {diagnostic.get('finish_reason')}")
-    if isinstance(diagnostic.get("usage_totals"), dict):
-        usage_totals = diagnostic.get("usage_totals")
-        lines.append(
-            "- Usage totals: "
-            + f"prompt={int(usage_totals.get('prompt_tokens', 0))}, "
-            + f"completion={int(usage_totals.get('completion_tokens', 0))}, "
-            + f"total={int(usage_totals.get('total_tokens', 0))}"
-        )
-        if usage_totals.get("estimated_cost") is not None:
-            lines.append(f"- Estimated cost: ${float(usage_totals.get('estimated_cost', 0.0)):.6f}")
+    lines = ["Sanitized 1min.AI response diagnostic:"]
     if "http_status" in diagnostic:
         lines.append(f"- HTTP status: {diagnostic.get('http_status')}")
+    if "record_status" in diagnostic:
+        lines.append(f"- API record status: {diagnostic.get('record_status')}")
+    if diagnostic.get("record_id"):
+        lines.append(f"- Record ID: {diagnostic.get('record_id')}")
+    if diagnostic.get("requested_model"):
+        lines.append(f"- Requested model: {diagnostic.get('requested_model')}")
+    if diagnostic.get("resolved_model"):
+        lines.append(f"- Resolved model: {diagnostic.get('resolved_model')}")
     if "top_level_keys" in diagnostic:
         lines.append(f"- Top-level keys: {diagnostic.get('top_level_keys')}")
-    if "choices_count" in diagnostic:
-        lines.append(f"- Number of choices: {diagnostic.get('choices_count')}")
-    if "message_keys" in diagnostic:
-        lines.append(f"- Message keys: {diagnostic.get('message_keys')}")
-    if "content_type" in diagnostic:
-        lines.append(
-            "- Content field: "
-            + f"type={diagnostic.get('content_type')}, "
-            + f"length={diagnostic.get('content_length', diagnostic.get('content_items', 0))}"
-        )
-    if "output_text_type" in diagnostic:
-        lines.append(
-            "- Output text field: "
-            + f"type={diagnostic.get('output_text_type')}, "
-            + f"length={diagnostic.get('output_text_length', 0)}"
-        )
-    if "reasoning_type" in diagnostic:
-        lines.append(
-            "- Reasoning field: "
-            + f"type={diagnostic.get('reasoning_type')}, "
-            + f"length={diagnostic.get('reasoning_length', 0)}"
-        )
-    if "reasoning_content_type" in diagnostic:
-        lines.append(
-            "- Reasoning content field: "
-            + f"type={diagnostic.get('reasoning_content_type')}, "
-            + f"length={diagnostic.get('reasoning_content_length', diagnostic.get('reasoning_content_items', 0))}"
-        )
+    if "ai_record_present" in diagnostic:
+        lines.append(f"- aiRecord present: {bool(diagnostic.get('ai_record_present'))}")
+    if "ai_record_detail_present" in diagnostic:
+        lines.append(f"- aiRecordDetail present: {bool(diagnostic.get('ai_record_detail_present'))}")
+    if "result_items" in diagnostic:
+        lines.append(f"- Result items: {diagnostic.get('result_items')}")
+    if "result_characters" in diagnostic:
+        lines.append(f"- Final result characters: {diagnostic.get('result_characters')}")
 
     return "\n".join(lines)
 
@@ -6157,19 +6132,19 @@ def _render_ai_analysis_tab(holdings: pd.DataFrame, metrics: pd.DataFrame, mobil
         return
 
     st.subheader("AI Analysis")
-    st.caption("This analysis is generated through TokenRouter from the portfolio data already loaded in memory. No export file is required.")
+    st.caption("This analysis is generated through 1min.AI from portfolio data already loaded in memory. No export file is required.")
 
-    if not _tokenrouter_has_api_key():
-        st.info("Set TOKENROUTER_API_KEY in your environment to enable AI Analysis.")
+    if not _onemin_ai_has_api_key():
+        st.info("Set ONEMIN_AI_API_KEY in your local environment to enable AI Analysis.")
 
-    default_model = _tokenrouter_default_model()
+    default_model = _onemin_ai_default_model()
     default_analysis_type = str(st.session_state.get("ai_analysis_type", AI_ANALYSIS_TYPES[0]))
 
+    model_options = _onemin_ai_model_options(default_model)
     st.selectbox(
         "Model",
-        options=TOKENROUTER_MODEL_IDS,
-        index=_tokenrouter_model_index(default_model),
-        format_func=lambda model_id: f"{model_id} - {TOKENROUTER_MODEL_LABELS.get(model_id, model_id)}",
+        options=model_options,
+        index=_onemin_ai_model_index(str(st.session_state.get("ai_analysis_model", default_model))),
         key="ai_analysis_model",
     )
     st.selectbox(
@@ -6187,7 +6162,7 @@ def _render_ai_analysis_tab(holdings: pd.DataFrame, metrics: pd.DataFrame, mobil
     )
 
     action_col, clear_col = st.columns(2)
-    analyze_disabled = not _tokenrouter_has_api_key() or bool(st.session_state.get("ai_analysis_busy", False))
+    analyze_disabled = not _onemin_ai_has_api_key() or bool(st.session_state.get("ai_analysis_busy", False))
     analyze_clicked = action_col.button("Analyze Portfolio", type="primary", disabled=analyze_disabled)
     clear_clicked = clear_col.button("Clear Displayed Analysis")
 
@@ -6203,11 +6178,9 @@ def _render_ai_analysis_tab(holdings: pd.DataFrame, metrics: pd.DataFrame, mobil
 
     if clear_clicked:
         st.session_state.pop("ai_analysis_result_markdown", None)
-        st.session_state.pop("tokenrouter_analysis", None)
-        st.session_state.pop("tokenrouter_response_diagnostic", None)
+        st.session_state.pop("ai_analysis_response_diagnostic", None)
         st.session_state.pop("ai_analysis_result_model", None)
         st.session_state.pop("ai_analysis_result_type", None)
-        st.session_state.pop("ai_analysis_usage_metadata", None)
         st.session_state.pop("ai_analysis_error_message", None)
         st.session_state.pop("ai_analysis_error_detail", None)
         st.session_state.pop("ai_analysis_generated_at", None)
@@ -6218,11 +6191,11 @@ def _render_ai_analysis_tab(holdings: pd.DataFrame, metrics: pd.DataFrame, mobil
         selected_model = str(st.session_state.get("ai_analysis_model", default_model))
         selected_type = str(st.session_state.get("ai_analysis_type", AI_ANALYSIS_TYPES[0]))
         custom_question = str(st.session_state.get("ai_analysis_custom_question", ""))
-        client = TokenRouterClient(
-            api_key=os.environ.get("TOKENROUTER_API_KEY"),
-            base_url=_tokenrouter_base_url(),
-            timeout_seconds=_tokenrouter_timeout_seconds(),
-            connect_timeout_seconds=TOKENROUTER_DEFAULT_CONNECT_TIMEOUT_SECONDS,
+        client = OneMinAIClient(
+            api_key=os.environ.get("ONEMIN_AI_API_KEY"),
+            base_url=_onemin_ai_base_url(),
+            timeout_seconds=_onemin_ai_timeout_seconds(),
+            connect_timeout_seconds=ONEMIN_AI_DEFAULT_CONNECT_TIMEOUT_SECONDS,
         )
         st.session_state["ai_analysis_busy"] = True
         try:
@@ -6234,59 +6207,53 @@ def _render_ai_analysis_tab(holdings: pd.DataFrame, metrics: pd.DataFrame, mobil
             )
             st.session_state["ai_analysis_context_diagnostics"] = context_stats
             messages = build_ai_analysis_messages(analysis_payload, selected_type, custom_question)
-            with st.spinner("Analyzing portfolio through TokenRouter..."):
-                result = client.chat_completions(
+            prompt = messages_to_prompt(messages)
+            with st.spinner("Analyzing portfolio through 1min.AI..."):
+                result = client.chat_with_ai(
                     model=selected_model,
-                    messages=messages,
-                    max_tokens=1400,
-                    temperature=0.2,
-                    stream=True,
-                    stream_options={"include_usage": True},
+                    prompt=prompt,
                 )
             analysis_text = str(getattr(result, "content", "") or "").strip()
-            st.session_state["tokenrouter_analysis"] = analysis_text
             st.session_state["ai_analysis_result_markdown"] = analysis_text
             response_diagnostic = getattr(result, "response_diagnostic", {})
-            st.session_state["tokenrouter_response_diagnostic"] = response_diagnostic if isinstance(response_diagnostic, dict) else {}
+            st.session_state["ai_analysis_response_diagnostic"] = response_diagnostic if isinstance(response_diagnostic, dict) else {}
             st.session_state["ai_analysis_result_model"] = str(getattr(result, "model", selected_model) or selected_model)
             st.session_state["ai_analysis_result_type"] = selected_type
-            usage_metadata = getattr(result, "usage_metadata", {})
-            st.session_state["ai_analysis_usage_metadata"] = usage_metadata if isinstance(usage_metadata, dict) else {}
             st.session_state["ai_analysis_generated_at"] = datetime.now().isoformat(timespec="seconds")
             st.session_state.pop("ai_analysis_error_message", None)
             st.session_state.pop("ai_analysis_error_detail", None)
-        except TokenRouterConfigError as exc:
-            st.session_state["ai_analysis_error_message"] = "Set TOKENROUTER_API_KEY in your environment to run AI Analysis."
+        except OneMinAIConfigError as exc:
+            st.session_state["ai_analysis_error_message"] = "Set ONEMIN_AI_API_KEY in your local environment to run AI Analysis."
             st.session_state["ai_analysis_error_detail"] = str(exc)
-        except TokenRouterAuthenticationError as exc:
-            st.session_state["ai_analysis_error_message"] = "TokenRouter rejected the API key. Check TOKENROUTER_API_KEY and try again."
+        except OneMinAIAuthenticationError as exc:
+            st.session_state["ai_analysis_error_message"] = "1min.AI rejected the API key. Check ONEMIN_AI_API_KEY and try again."
             st.session_state["ai_analysis_error_detail"] = str(exc)
-        except TokenRouterInsufficientBalanceError as exc:
-            st.session_state["ai_analysis_error_message"] = "TokenRouter reports insufficient balance or credits."
+        except OneMinAIInsufficientCreditsError as exc:
+            st.session_state["ai_analysis_error_message"] = "1min.AI reports insufficient credits."
             st.session_state["ai_analysis_error_detail"] = str(exc)
-        except TokenRouterRateLimitError as exc:
-            st.session_state["ai_analysis_error_message"] = "TokenRouter rate limited the request. Try again later."
+        except OneMinAIRateLimitError as exc:
+            st.session_state["ai_analysis_error_message"] = "1min.AI rate limited the request. Try again later."
             st.session_state["ai_analysis_error_detail"] = str(exc)
-        except TokenRouterUnsupportedModelError as exc:
-            st.session_state["ai_analysis_error_message"] = "The selected TokenRouter model is not supported. Choose another model."
+        except OneMinAIUnsupportedModelError as exc:
+            st.session_state["ai_analysis_error_message"] = "The selected 1min.AI model is not supported. Choose another model."
             st.session_state["ai_analysis_error_detail"] = str(exc)
-        except TokenRouterTimeoutError as exc:
-            st.session_state["ai_analysis_error_message"] = "The TokenRouter request timed out. Try again or reduce the analysis context."
+        except OneMinAITimeoutError as exc:
+            st.session_state["ai_analysis_error_message"] = "The 1min.AI request timed out. Try again or reduce the analysis context."
             st.session_state["ai_analysis_error_detail"] = str(exc)
-        except TokenRouterConnectionError as exc:
-            st.session_state["ai_analysis_error_message"] = "Could not reach TokenRouter. Check your connection or base URL."
+        except OneMinAIConnectionError as exc:
+            st.session_state["ai_analysis_error_message"] = "Could not reach 1min.AI. Check your connection or base URL."
             st.session_state["ai_analysis_error_detail"] = str(exc)
-        except TokenRouterResponseError as exc:
-            st.session_state["ai_analysis_error_message"] = "TokenRouter returned an invalid or empty response."
+        except OneMinAIResponseError as exc:
+            st.session_state["ai_analysis_error_message"] = "1min.AI returned an invalid or empty response."
             diagnostic = getattr(exc, "diagnostic", {})
-            diagnostic_text = _format_tokenrouter_response_diagnostic(diagnostic)
+            diagnostic_text = _format_onemin_ai_response_diagnostic(diagnostic)
             st.session_state["ai_analysis_error_detail"] = f"{str(exc)}\n\n{diagnostic_text}" if diagnostic_text else str(exc)
-        except TokenRouterError as exc:
-            st.session_state["ai_analysis_error_message"] = "TokenRouter request failed."
+        except OneMinAIError as exc:
+            st.session_state["ai_analysis_error_message"] = "1min.AI provider failure."
             st.session_state["ai_analysis_error_detail"] = str(exc)
-        except Exception as exc:
+        except Exception:
             st.session_state["ai_analysis_error_message"] = "Unexpected error while running AI Analysis."
-            st.session_state["ai_analysis_error_detail"] = str(exc)
+            st.session_state["ai_analysis_error_detail"] = "No additional provider diagnostics were available."
         finally:
             st.session_state["ai_analysis_busy"] = False
 
@@ -6298,31 +6265,20 @@ def _render_ai_analysis_tab(holdings: pd.DataFrame, metrics: pd.DataFrame, mobil
             with st.expander("Details", expanded=False):
                 st.caption(str(error_detail))
 
-    result_markdown = st.session_state.get("tokenrouter_analysis", st.session_state.get("ai_analysis_result_markdown"))
+    result_markdown = st.session_state.get("ai_analysis_result_markdown")
     if result_markdown:
         st.markdown("#### Latest Analysis")
         st.markdown(result_markdown)
         download_model = str(st.session_state.get("ai_analysis_result_model", default_model))
         download_type = str(st.session_state.get("ai_analysis_result_type", AI_ANALYSIS_TYPES[0]))
         generated_at = str(st.session_state.get("ai_analysis_generated_at", datetime.now().isoformat(timespec="seconds")))
-        usage_metadata = st.session_state.get("ai_analysis_usage_metadata", {})
-        if isinstance(usage_metadata, dict) and usage_metadata:
-            usage_line = (
-                f"Model: {usage_metadata.get('model', download_model)} | "
-                f"Prompt tokens: {int(usage_metadata.get('prompt_tokens', 0)):,} | "
-                f"Completion tokens: {int(usage_metadata.get('completion_tokens', 0)):,} | "
-                f"Total tokens: {int(usage_metadata.get('total_tokens', 0)):,}"
-            )
-            if "estimated_cost" in usage_metadata:
-                usage_line += f" | Estimated cost: ${float(usage_metadata.get('estimated_cost', 0.0)):.6f}"
-            st.caption(usage_line)
-        response_diag = st.session_state.get("tokenrouter_response_diagnostic", {})
+        response_diag = st.session_state.get("ai_analysis_response_diagnostic", {})
         if isinstance(response_diag, dict) and response_diag:
             with st.expander("Response Shape Diagnostics (Sanitized)", expanded=False):
-                st.caption(_format_tokenrouter_response_diagnostic(response_diag))
+                st.caption(_format_onemin_ai_response_diagnostic(response_diag))
         download_markdown = "\n".join(
             [
-                "# TokenRouter AI Analysis",
+                "# 1min.AI Portfolio Analysis",
                 f"- Generated: {generated_at}",
                 f"- Model: {download_model}",
                 f"- Analysis Type: {download_type}",

@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import pandas as pd
 
+import app
 from app import _build_ai_export_json, _build_data_completeness, _build_direct_sector_classification_records, _build_export_markdown, _coerce_numeric_columns, _latest_dividend_yields
 
 
@@ -79,7 +80,7 @@ class ExportMarkdownTests(unittest.TestCase):
         self.assertIn("## Dividend Data Metadata", content)
         self.assertIn("## Data Completeness", content)
         self.assertNotIn("## Dividend Calendar Metadata", content)
-        self.assertNotIn("TokenRouter", content)
+        self.assertNotIn("1min.AI Portfolio Analysis", content)
         self.assertIn("## Top 5 Holdings", content)
         self.assertIn("## Top 5 Income Contributors", content)
         self.assertIn("## Holdings Data (CSV)", content)
@@ -286,8 +287,12 @@ class ExportMarkdownTests(unittest.TestCase):
             )
         )
 
-        with patch("app.yf.Ticker", return_value=fake_ticker):
-            payload = json.loads(_build_ai_export_json(holdings, metrics))
+        app._latest_fund_sector_weights.clear()
+        try:
+            with patch("app.yf.Ticker", return_value=fake_ticker):
+                payload = json.loads(_build_ai_export_json(holdings, metrics))
+        finally:
+            app._latest_fund_sector_weights.clear()
 
         self.assertEqual(payload["direct_sector_exposure"], [])
         self.assertEqual(payload["direct_holdings_by_classification"][0]["classification"], "ETFs")

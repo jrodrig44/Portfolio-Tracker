@@ -93,6 +93,26 @@ streamlit run app.py
   - Force refresh dividend yield
   - Reload holdings from disk
 
+## 1min.AI Portfolio Analysis
+
+AI Analysis is optional. It analyzes the current portfolio data directly in memory; it does not require exporting or uploading a portfolio file.
+
+Create a local `.env` file in the project root and add:
+
+```text
+ONEMIN_AI_API_KEY=your_key_here
+```
+
+Optional configuration:
+
+```text
+ONEMIN_AI_MODEL=gpt-5.6-sol
+ONEMIN_AI_BASE_URL=https://api.1min.ai
+ONEMIN_AI_TIMEOUT_SECONDS=180
+```
+
+The default model is `gpt-5.6-sol`; `gpt-5.6-terra` and `gpt-5.6-luna` are available alternatives for balancing quality and credit consumption. Restart the Streamlit app after changing `.env`. Never commit `.env`; it is ignored by this repository. 1min.AI credit accounting is provider-specific and can vary by feature and model.
+
 ## Host On ASUSTOR NAS (AS1002T v2)
 
 This app is ready to run as a Docker container on your NAS.
