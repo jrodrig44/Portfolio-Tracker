@@ -6105,6 +6105,14 @@ def _format_onemin_ai_response_diagnostic(diagnostic: object) -> str:
     lines = ["Sanitized 1min.AI response diagnostic:"]
     if "http_status" in diagnostic:
         lines.append(f"- HTTP status: {diagnostic.get('http_status')}")
+    if diagnostic.get("provider_error_code"):
+        lines.append(f"- Provider error code: {diagnostic.get('provider_error_code')}")
+    if diagnostic.get("provider_error_message"):
+        lines.append(f"- Provider error message: {diagnostic.get('provider_error_message')}")
+    if isinstance(diagnostic.get("provider_validation_details"), list):
+        for detail in diagnostic["provider_validation_details"]:
+            if isinstance(detail, dict) and detail.get("field") and detail.get("message"):
+                lines.append(f"- Validation: {detail.get('field')}: {detail.get('message')}")
     if "record_status" in diagnostic:
         lines.append(f"- API record status: {diagnostic.get('record_status')}")
     if diagnostic.get("record_id"):

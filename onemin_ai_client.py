@@ -273,7 +273,8 @@ def _response_error_payload(response: httpx.Response) -> dict[str, Any]:
 
 def _map_http_error(status_code: int, payload: dict[str, Any], api_key: str | None) -> OneMinAIError:
     error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
-    code = str(error.get("code") or "").lower()
+    provider_code = _sanitize_provider_message(error.get("code"), api_key)
+    code = provider_code.lower()
     message = _sanitize_provider_message(error.get("message"), api_key)
     combined = f"{code} {message}".lower()
     if status_code in {401, 403}:
@@ -288,7 +289,18 @@ def _map_http_error(status_code: int, payload: dict[str, Any], api_key: str | No
         return OneMinAIError(f"1min.AI provider failure (HTTP {status_code}).")
     if status_code in {400, 404, 422}:
         suffix = f": {message}" if message else ""
-        return OneMinAIResponseError(f"1min.AI rejected the request (HTTP {status_code}){suffix}.", diagnostic={"http_status": status_code})
+        diagnostic: dict[str, Any] = {
+            "http_status": status_code,
+            "provider_error_code": provider_code,
+            "provider_error_message": message,
+        }
+        validation_details = _sanitize_provider_validation_details(error.get("details"), api_key)
+        if validation_details:
+            diagnostic["provider_validation_details"] = validation_details
+        return OneMinAIResponseError(
+            f"1min.AI rejected the request (HTTP {status_code}){suffix}.",
+            diagnostic=diagnostic,
+        )
     return OneMinAIError(f"1min.AI request failed (HTTP {status_code}).")
 
 
@@ -297,3 +309,22 @@ def _sanitize_provider_message(value: object, api_key: str | None) -> str:
     if api_key:
         message = message.replace(str(api_key), "[redacted]")
     return message
+
+
+def _sanitize_provider_validation_details(value: object, api_key: str | None) -> list[dict[str, str]]:
+    details = value if isinstance(value, list) else [value] if isinstance(value, dict) else []
+    sanitized: list[dict[str, str]] = []
+    for detail in details:
+        if not isinstance(detail, dict) or not set(detail).issubset({"field", "message"}):
+            continue
+        field = detail.get("field")
+        message = detail.get("message")
+        if not isinstance(field, str) or not isinstance(message, str):
+            continue
+        sanitized.append(
+            {
+                "field": _sanitize_provider_message(field, api_key),
+                "message": _sanitize_provider_message(message, api_key),
+            }
+        )
+    return sanitized

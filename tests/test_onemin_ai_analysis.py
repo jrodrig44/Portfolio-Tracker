@@ -147,6 +147,46 @@ class OneMinAIClientTests(unittest.TestCase):
                     self._client().chat_with_ai(model="model", prompt="prompt")
             self.assertNotIn("private-api-key", str(context.exception))
 
+    def test_validation_error_diagnostic_retains_only_safe_provider_fields(self) -> None:
+        raw_prompt = "Portfolio holdings: HD, JEPI"
+        response_payload = {
+            "success": False,
+            "teamUser": {"email": "private@example.test", "teamId": "team-secret"},
+            "error": {
+                "code": "PROMPT_OBJECT_VALIDATION_FAILED",
+                "message": "Invalid prompt object for private-api-key",
+                "details": [
+                    {"field": "promptObject.prompt", "message": "must be a string"},
+                    {"field": "prompt", "message": raw_prompt, "request": {"prompt": raw_prompt}},
+                ],
+            },
+        }
+        with patch("onemin_ai_client.httpx.post", return_value=_response(response_payload, 422)):
+            with self.assertRaises(OneMinAIResponseError) as context:
+                self._client().chat_with_ai(model="model", prompt=raw_prompt)
+
+        diagnostic = context.exception.diagnostic
+        self.assertEqual(diagnostic["http_status"], 422)
+        self.assertEqual(diagnostic["provider_error_code"], "PROMPT_OBJECT_VALIDATION_FAILED")
+        self.assertEqual(diagnostic["provider_error_message"], "Invalid prompt object for [redacted]")
+        self.assertEqual(diagnostic["provider_validation_details"], [{"field": "promptObject.prompt", "message": "must be a string"}])
+        diagnostic_text = str(diagnostic)
+        for secret_or_private_value in ("private-api-key", raw_prompt, "private@example.test", "team-secret"):
+            self.assertNotIn(secret_or_private_value, diagnostic_text)
+
+    def test_unsupported_model_detection_uses_provider_code_or_message(self) -> None:
+        cases = [
+            (400, "MODEL_NOT_AVAILABLE", "The request was rejected"),
+            (422, "VALIDATION_FAILED", "The configured model is unsupported"),
+        ]
+        for status, code, message in cases:
+            with self.subTest(code=code), patch(
+                "onemin_ai_client.httpx.post",
+                return_value=_response({"success": False, "error": {"code": code, "message": message}}, status),
+            ):
+                with self.assertRaises(OneMinAIUnsupportedModelError):
+                    self._client().chat_with_ai(model="model", prompt="prompt")
+
     def test_connection_and_timeout_are_mapped(self) -> None:
         request = httpx.Request("POST", "https://api.1min.ai/api/chat-with-ai")
         with patch("onemin_ai_client.httpx.post", side_effect=httpx.ConnectError("offline", request=request)):
@@ -263,6 +303,19 @@ class AppAIConfigurationTests(unittest.TestCase):
         self.assertIn("# 1min.AI Portfolio Analysis", downloaded)
         self.assertIn("gpt-5.6-sol", downloaded)
         self.assertIn("# Analysis", downloaded)
+
+    def test_diagnostic_formatter_displays_safe_provider_error_fields(self) -> None:
+        formatted = app._format_onemin_ai_response_diagnostic(
+            {
+                "http_status": 400,
+                "provider_error_code": "INVALID_REQUEST",
+                "provider_error_message": "Missing prompt object",
+                "provider_validation_details": [{"field": "promptObject.prompt", "message": "is required"}],
+            }
+        )
+        self.assertIn("Provider error code: INVALID_REQUEST", formatted)
+        self.assertIn("Provider error message: Missing prompt object", formatted)
+        self.assertIn("Validation: promptObject.prompt: is required", formatted)
 
 
 if __name__ == "__main__":
