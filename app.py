@@ -6139,6 +6139,12 @@ def _render_ai_analysis_tab(holdings: pd.DataFrame, metrics: pd.DataFrame, mobil
     if not _ai_analysis_enabled():
         return
 
+    # Requests run synchronously, so a render that starts with this flag cannot
+    # overlap an active request. Consume it to prevent a completion rerun loop.
+    st.session_state.pop("ai_analysis_completion_rerun_pending", None)
+    if st.session_state.get("ai_analysis_busy"):
+        st.session_state["ai_analysis_busy"] = False
+
     st.subheader("AI Analysis")
     st.caption("This analysis is generated through 1min.AI from portfolio data already loaded in memory. No export file is required.")
 
@@ -6185,6 +6191,8 @@ def _render_ai_analysis_tab(holdings: pd.DataFrame, metrics: pd.DataFrame, mobil
         )
 
     if clear_clicked:
+        st.session_state.pop("ai_analysis_busy", None)
+        st.session_state.pop("ai_analysis_completion_rerun_pending", None)
         st.session_state.pop("ai_analysis_result_markdown", None)
         st.session_state.pop("ai_analysis_response_diagnostic", None)
         st.session_state.pop("ai_analysis_result_model", None)
@@ -6264,6 +6272,9 @@ def _render_ai_analysis_tab(holdings: pd.DataFrame, metrics: pd.DataFrame, mobil
             st.session_state["ai_analysis_error_detail"] = "No additional provider diagnostics were available."
         finally:
             st.session_state["ai_analysis_busy"] = False
+            st.session_state["ai_analysis_completion_rerun_pending"] = True
+            st.rerun()
+            return
 
     error_message = st.session_state.get("ai_analysis_error_message")
     error_detail = st.session_state.get("ai_analysis_error_detail")
