@@ -1,6 +1,8 @@
 import contextlib
 import json
 import os
+from pathlib import Path
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -243,6 +245,15 @@ class PromptConversionTests(unittest.TestCase):
 
 
 class AppAIConfigurationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.database_path_patcher = patch.object(app, "DEFAULT_DB_PATH", Path(self.temp_dir.name) / "portfolio.db")
+        self.database_path_patcher.start()
+
+    def tearDown(self) -> None:
+        self.database_path_patcher.stop()
+        self.temp_dir.cleanup()
+
     def test_onemin_environment_helpers_and_enabled_tab(self) -> None:
         with patch.dict(os.environ, {"ONEMIN_AI_API_KEY": " key ", "ONEMIN_AI_MODEL": " custom-model ", "ONEMIN_AI_BASE_URL": " https://example.test/// ", "ONEMIN_AI_TIMEOUT_SECONDS": "0"}, clear=False):
             self.assertTrue(app._onemin_ai_has_api_key())
@@ -275,6 +286,35 @@ class AppAIConfigurationTests(unittest.TestCase):
         self.assertEqual(app._onemin_ai_model_options("gpt-4.1-mini").count("gpt-4.1-mini"), 1)
         self.assertEqual(app._onemin_ai_model_label("custom-model"), "custom-model")
         self.assertIn("Custom model configured through the local environment.", app._onemin_ai_model_description("custom-model"))
+
+    def test_invalid_persisted_research_model_is_repaired_to_default(self) -> None:
+        from supplemental_research import get_setting, initialize_database, set_setting, validated_research_model
+
+        initialize_database(app.DEFAULT_DB_PATH)
+        set_setting(app.DEFAULT_DB_PATH, "supplemental_research_model", "<MagicMock name='selectbox()' id='123'>")
+        self.assertEqual(validated_research_model(app.DEFAULT_DB_PATH), "gpt-4.1-mini")
+        self.assertEqual(get_setting(app.DEFAULT_DB_PATH, "supplemental_research_model"), "gpt-4.1-mini")
+
+    def test_research_selector_only_persists_valid_strings(self) -> None:
+        holdings = pd.DataFrame([{"ticker": "HD", "shares": 1, "amount_invested": 100.0}])
+        metrics = pd.DataFrame([{"ticker": "HD", "market_value": 100.0, "annual_income": 2.0}])
+        state: dict[str, object] = {}
+        with patch.object(app.st, "session_state", state), patch.object(app.st, "markdown"), patch.object(app.st, "caption"), patch.object(app.st, "selectbox", side_effect=["gpt-4.1-mini", "HD"]), patch.object(app.st, "button", return_value=False), patch.object(app.st, "checkbox", return_value=False), patch.object(app.st, "dataframe"), patch.object(app.st, "info"):
+            app._render_supplemental_research(holdings, metrics)
+        from supplemental_research import get_setting
+        self.assertEqual(get_setting(app.DEFAULT_DB_PATH, "supplemental_research_model"), "gpt-4.1-mini")
+
+        with patch.object(app.st, "selectbox", side_effect=[MagicMock(), "HD"]), patch.object(app.st, "button", return_value=False), patch.object(app.st, "checkbox", return_value=False), patch.object(app.st, "dataframe"), patch.object(app.st, "markdown"), patch.object(app.st, "caption"), patch.object(app.st, "info"):
+            app._render_supplemental_research(holdings, metrics)
+        self.assertEqual(get_setting(app.DEFAULT_DB_PATH, "supplemental_research_model"), "gpt-4.1-mini")
+
+        with patch.object(app.st, "selectbox", side_effect=["unsupported-model", "HD"]), patch.object(app.st, "button", return_value=False), patch.object(app.st, "checkbox", return_value=False), patch.object(app.st, "dataframe"), patch.object(app.st, "markdown"), patch.object(app.st, "caption"), patch.object(app.st, "info"):
+            app._render_supplemental_research(holdings, metrics)
+        self.assertEqual(get_setting(app.DEFAULT_DB_PATH, "supplemental_research_model"), "gpt-4.1-mini")
+
+        with patch.object(app.st, "selectbox", side_effect=["gpt-4o-mini", "HD"]), patch.object(app.st, "button", return_value=False), patch.object(app.st, "checkbox", return_value=False), patch.object(app.st, "dataframe"), patch.object(app.st, "markdown"), patch.object(app.st, "caption"), patch.object(app.st, "info"):
+            app._render_supplemental_research(holdings, metrics)
+        self.assertEqual(get_setting(app.DEFAULT_DB_PATH, "supplemental_research_model"), "gpt-4o-mini")
 
     def test_model_selector_uses_friendly_labels_but_returns_raw_identifier(self) -> None:
         holdings = pd.DataFrame([{"ticker": "HD", "shares": 1, "amount_invested": 100.0}])
@@ -321,7 +361,7 @@ class AppAIConfigurationTests(unittest.TestCase):
         }
         action = SimpleNamespace(button=MagicMock(return_value=False))
         clear = SimpleNamespace(button=MagicMock(return_value=True))
-        with patch.object(app.st, "session_state", state), patch.object(app.st, "subheader"), patch.object(app.st, "caption"), patch.object(app.st, "info"), patch.object(app.st, "selectbox"), patch.object(app.st, "text_area"), patch.object(app.st, "columns", return_value=[action, clear]), patch.object(app.st, "rerun") as rerun:
+        with patch.object(app.st, "session_state", state), patch.object(app.st, "subheader"), patch.object(app.st, "caption"), patch.object(app.st, "info"), patch.object(app.st, "selectbox", side_effect=["gpt-4.1-mini", AI_ANALYSIS_TYPES[0], "gpt-4.1-mini", "HD"]), patch.object(app.st, "text_area"), patch.object(app.st, "columns", return_value=[action, clear]), patch.object(app.st, "rerun") as rerun:
             app._render_ai_analysis_tab(holdings, metrics)
         for key in ("ai_analysis_busy", "ai_analysis_last_attempt_at", "ai_analysis_last_stage", "ai_analysis_result_markdown", "ai_analysis_response_diagnostic", "ai_analysis_result_model", "ai_analysis_result_type", "ai_analysis_error_message", "ai_analysis_error_detail", "ai_analysis_generated_at", "ai_analysis_context_diagnostics"):
             self.assertNotIn(key, state)
@@ -357,7 +397,7 @@ class AppAIConfigurationTests(unittest.TestCase):
 
         action = SimpleNamespace(button=MagicMock(return_value=False))
         clear = SimpleNamespace(button=MagicMock(return_value=False))
-        with patch.object(app.st, "session_state", state), patch.dict(os.environ, {"ONEMIN_AI_API_KEY": "test-key"}, clear=False), patch.object(app, "OneMinAIClient") as next_client_constructor, patch.object(app.st, "subheader"), patch.object(app.st, "caption"), patch.object(app.st, "info"), patch.object(app.st, "selectbox"), patch.object(app.st, "text_area"), patch.object(app.st, "columns", return_value=[action, clear]), patch.object(app.st, "markdown") as markdown, patch.object(app.st, "expander", return_value=contextlib.nullcontext()), patch.object(app.st, "download_button"):
+        with patch.object(app.st, "session_state", state), patch.dict(os.environ, {"ONEMIN_AI_API_KEY": "test-key"}, clear=False), patch.object(app, "OneMinAIClient") as next_client_constructor, patch.object(app.st, "subheader"), patch.object(app.st, "caption"), patch.object(app.st, "info"), patch.object(app.st, "selectbox", side_effect=["gpt-4.1-mini", AI_ANALYSIS_TYPES[0], "gpt-4.1-mini", "HD"]), patch.object(app.st, "text_area"), patch.object(app.st, "columns", return_value=[action, clear]), patch.object(app.st, "markdown") as markdown, patch.object(app.st, "expander", return_value=contextlib.nullcontext()), patch.object(app.st, "download_button"):
             app._render_ai_analysis_tab(holdings, metrics)
 
         next_client_constructor.assert_not_called()
@@ -389,7 +429,7 @@ class AppAIConfigurationTests(unittest.TestCase):
         state: dict[str, object] = {"ai_analysis_busy": True}
         action = SimpleNamespace(button=MagicMock(return_value=False))
         clear = SimpleNamespace(button=MagicMock(return_value=False))
-        with patch.object(app.st, "session_state", state), patch.dict(os.environ, {"ONEMIN_AI_API_KEY": "test-key"}, clear=False), patch.object(app, "OneMinAIClient") as client_constructor, patch.object(app.st, "subheader"), patch.object(app.st, "caption"), patch.object(app.st, "info"), patch.object(app.st, "selectbox"), patch.object(app.st, "text_area"), patch.object(app.st, "columns", return_value=[action, clear]):
+        with patch.object(app.st, "session_state", state), patch.dict(os.environ, {"ONEMIN_AI_API_KEY": "test-key"}, clear=False), patch.object(app, "OneMinAIClient") as client_constructor, patch.object(app.st, "subheader"), patch.object(app.st, "caption"), patch.object(app.st, "info"), patch.object(app.st, "selectbox", side_effect=["gpt-4.1-mini", AI_ANALYSIS_TYPES[0], "gpt-4.1-mini", "HD"]), patch.object(app.st, "text_area"), patch.object(app.st, "columns", return_value=[action, clear]):
             app._render_ai_analysis_tab(holdings, metrics)
 
         self.assertTrue(state["ai_analysis_busy"])
@@ -402,7 +442,7 @@ class AppAIConfigurationTests(unittest.TestCase):
         state: dict[str, object] = {}
         action = SimpleNamespace(button=MagicMock(return_value=False))
         clear = SimpleNamespace(button=MagicMock(return_value=False))
-        with patch.object(app.st, "session_state", state), patch.dict(os.environ, {"ONEMIN_AI_API_KEY": "test-key"}, clear=False), patch.object(app.st, "subheader"), patch.object(app.st, "caption"), patch.object(app.st, "info"), patch.object(app.st, "selectbox"), patch.object(app.st, "text_area"), patch.object(app.st, "columns", return_value=[action, clear]):
+        with patch.object(app.st, "session_state", state), patch.dict(os.environ, {"ONEMIN_AI_API_KEY": "test-key"}, clear=False), patch.object(app.st, "subheader"), patch.object(app.st, "caption"), patch.object(app.st, "info"), patch.object(app.st, "selectbox", side_effect=["gpt-4.1-mini", AI_ANALYSIS_TYPES[0], "gpt-4.1-mini", "HD"]), patch.object(app.st, "text_area"), patch.object(app.st, "columns", return_value=[action, clear]):
             app._render_ai_analysis_tab(holdings, metrics)
 
         callback_kwargs = action.button.call_args.kwargs
@@ -418,7 +458,7 @@ class AppAIConfigurationTests(unittest.TestCase):
         action = SimpleNamespace(button=MagicMock(return_value=False))
         clear = SimpleNamespace(button=MagicMock(return_value=False))
         info_mock = MagicMock()
-        with patch.object(app.st, "session_state", state), patch.dict(os.environ, {"ONEMIN_AI_API_KEY": ""}, clear=False), patch.object(app.st, "subheader") as subheader, patch.object(app.st, "caption"), patch.object(app.st, "info", info_mock), patch.object(app.st, "selectbox"), patch.object(app.st, "text_area"), patch.object(app.st, "columns", return_value=[action, clear]):
+        with patch.object(app.st, "session_state", state), patch.dict(os.environ, {"ONEMIN_AI_API_KEY": ""}, clear=False), patch.object(app.st, "subheader") as subheader, patch.object(app.st, "caption"), patch.object(app.st, "info", info_mock), patch.object(app.st, "selectbox", side_effect=["gpt-4.1-mini", AI_ANALYSIS_TYPES[0], "gpt-4.1-mini", "HD"]), patch.object(app.st, "text_area"), patch.object(app.st, "columns", return_value=[action, clear]):
             app._render_ai_analysis_tab(holdings, metrics)
         subheader.assert_called_once_with("AI Analysis")
         self.assertIn("Set ONEMIN_AI_API_KEY", str(info_mock.call_args))
@@ -435,7 +475,7 @@ class AppAIConfigurationTests(unittest.TestCase):
         }
         action = SimpleNamespace(button=MagicMock(return_value=False))
         clear = SimpleNamespace(button=MagicMock(return_value=False))
-        with patch.object(app.st, "session_state", state), patch.object(app.st, "subheader"), patch.object(app.st, "caption"), patch.object(app.st, "info"), patch.object(app.st, "selectbox"), patch.object(app.st, "text_area"), patch.object(app.st, "columns", return_value=[action, clear]), patch.object(app.st, "markdown"), patch.object(app.st, "download_button") as download_button:
+        with patch.object(app.st, "session_state", state), patch.object(app.st, "subheader"), patch.object(app.st, "caption"), patch.object(app.st, "info"), patch.object(app.st, "selectbox", side_effect=["gpt-4.1-mini", AI_ANALYSIS_TYPES[0], "gpt-4.1-mini", "HD"]), patch.object(app.st, "text_area"), patch.object(app.st, "columns", return_value=[action, clear]), patch.object(app.st, "markdown"), patch.object(app.st, "download_button") as download_button:
             app._render_ai_analysis_tab(holdings, metrics)
         downloaded = download_button.call_args.kwargs["data"].decode("utf-8")
         self.assertIn("# 1min.AI Portfolio Analysis", downloaded)

@@ -216,7 +216,7 @@ def set_setting(db_path: Path | str, key: str, value: str) -> None:
 
 
 def validated_research_model(db_path: Path | str) -> str:
-    configured = get_setting(db_path, "supplemental_research_model", DEFAULT_RESEARCH_MODEL)
+    configured = get_setting(db_path, "supplemental_research_model", "")
     if configured in SUPPORTED_RESEARCH_MODELS:
         return configured
     set_setting(db_path, "supplemental_research_model", DEFAULT_RESEARCH_MODEL)
