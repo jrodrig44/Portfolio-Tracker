@@ -316,6 +316,24 @@ class AppAIConfigurationTests(unittest.TestCase):
             app._render_supplemental_research(holdings, metrics)
         self.assertEqual(get_setting(app.DEFAULT_DB_PATH, "supplemental_research_model"), "gpt-4o-mini")
 
+    def test_selected_research_display_calls_do_not_render_delta_generator(self) -> None:
+        holdings = pd.DataFrame([{"ticker": "HD", "shares": 1, "amount_invested": 100.0}])
+        metrics = pd.DataFrame([{"ticker": "HD", "market_value": 100.0, "annual_income": 2.0}])
+        state: dict[str, object] = {}
+        success_delta = object()
+        service = MagicMock()
+        service.research_ticker.return_value = {"status": "current"}
+        with patch.object(app.st, "session_state", state), patch.object(app, "SupplementalResearchService", return_value=service), patch.object(app.st, "selectbox", side_effect=["gpt-4.1-mini", "HD"]), patch.object(app.st, "button", side_effect=[True, False, False]), patch.object(app.st, "checkbox", return_value=False), patch.object(app.st, "spinner", return_value=contextlib.nullcontext()), patch.object(app.st, "success", return_value=success_delta) as success, patch.object(app.st, "error") as error, patch.object(app.st, "markdown") as markdown, patch.object(app.st, "write") as write, patch.object(app.st, "caption"), patch.object(app.st, "dataframe"):
+            app._render_supplemental_research(holdings, metrics)
+        success.assert_called_once_with("Supplemental research completed for HD.")
+        error.assert_not_called()
+        self.assertFalse(any(success_delta in call.args or success_delta in call.kwargs.values() for call in (*markdown.call_args_list, *write.call_args_list)))
+
+        service.research_ticker.return_value = {"status": "failed", "error": "Provider failure"}
+        with patch.object(app, "SupplementalResearchService", return_value=service), patch.object(app.st, "selectbox", side_effect=["gpt-4.1-mini", "HD"]), patch.object(app.st, "button", side_effect=[True, False, False]), patch.object(app.st, "checkbox", return_value=False), patch.object(app.st, "spinner", return_value=contextlib.nullcontext()), patch.object(app.st, "success") as failed_success, patch.object(app.st, "error") as failed_error, patch.object(app.st, "caption"), patch.object(app.st, "dataframe"), patch.object(app.st, "markdown"), patch.object(app.st, "write"):
+            app._render_supplemental_research(holdings, metrics)
+        failed_error.assert_called_once_with("Provider failure")
+
     def test_model_selector_uses_friendly_labels_but_returns_raw_identifier(self) -> None:
         holdings = pd.DataFrame([{"ticker": "HD", "shares": 1, "amount_invested": 100.0}])
         metrics = pd.DataFrame([{"ticker": "HD", "market_value": 100.0, "annual_income": 2.0}])

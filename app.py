@@ -6242,10 +6242,22 @@ def _render_supplemental_research(holdings: pd.DataFrame, metrics: pd.DataFrame)
     if research_clicked:
         with st.spinner(f"Researching {selected_ticker} through 1min.AI..."):
             result = service.research_ticker(selected_ticker, contexts[selected_ticker], configured_model, manual=True, force=True)
-        st.success(f"Supplemental research completed for {selected_ticker}.") if result.get("status") == "current" else st.error(str(result.get("error") or result.get("reason") or "Supplemental research did not complete."))
+        if result.get("status") == "current":
+            st.success(f"Supplemental research completed for {selected_ticker}.")
+        else:
+            st.error(
+                str(
+                    result.get("error")
+                    or result.get("reason")
+                    or "Supplemental research did not complete."
+                )
+            )
     if due_clicked:
         results = service.refresh_due(contexts, configured_model)
-        st.info(f"Processed {len(results)} due holding(s)." if results else "No supplemental research is due.")
+        if results:
+            st.info(f"Processed {len(results)} due holding(s).")
+        else:
+            st.info("No supplemental research is due.")
     if force_clicked:
         if not force_confirmed:
             st.warning("Confirm the credit-use warning before forcing a refresh.")
