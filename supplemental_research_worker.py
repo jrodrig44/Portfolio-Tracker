@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 from pathlib import Path
 import sqlite3
 import time
@@ -11,13 +10,12 @@ from dotenv import load_dotenv
 
 from onemin_ai_client import OneMinAIClient
 from supplemental_research import (
-    DEFAULT_RESEARCH_MODEL,
     WORKER_CHECK_INTERVAL,
     SupplementalResearchService,
     acquire_worker_lease,
     complete_worker_job,
-    get_setting,
     initialize_database,
+    validated_research_model,
     worker_due_tickers,
 )
 
@@ -70,7 +68,7 @@ def run_once(project_root: Path) -> int:
     if not acquire_worker_lease(db_path):
         LOGGER.info("Another supplemental research job already holds the lease.")
         return 0
-    model = get_setting(db_path, "supplemental_research_model", os.environ.get("ONEMIN_AI_RESEARCH_MODEL", DEFAULT_RESEARCH_MODEL))
+    model = validated_research_model(db_path)
     results = service.refresh_due(contexts, model=model)
     completed = [str(result["ticker"]) for result in results if result.get("status") == "current"]
     failed = [str(result["ticker"]) for result in results if result.get("status") == "failed"]
