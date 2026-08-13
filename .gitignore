@@ -6,3 +6,13 @@ data/*.csv
 .env
 .env.*
 !.env.example
+
+# Local runtime databases
+data/portfolio.db
+data/portfolio.db-wal
+data/portfolio.db-shm
+data/portfolio.db-journal
+data/stash_statement_history.sqlite
+
+# Runtime logs
+data/app_access_log.jsonl
