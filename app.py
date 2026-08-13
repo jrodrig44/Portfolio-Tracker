@@ -6135,15 +6135,97 @@ def _format_onemin_ai_response_diagnostic(diagnostic: object) -> str:
     return "\n".join(lines)
 
 
+def _run_onemin_ai_analysis(holdings: pd.DataFrame, metrics: pd.DataFrame) -> None:
+    selected_model = str(st.session_state["ai_analysis_model"])
+    selected_type = str(st.session_state["ai_analysis_type"])
+    custom_question = str(st.session_state["ai_analysis_custom_question"])
+    st.session_state["ai_analysis_busy"] = True
+    st.session_state["ai_analysis_last_attempt_at"] = datetime.now().isoformat(timespec="seconds")
+    st.session_state["ai_analysis_last_stage"] = "preparing"
+    st.session_state.pop("ai_analysis_error_message", None)
+    st.session_state.pop("ai_analysis_error_detail", None)
+
+    try:
+        analysis_payload, context_stats = _build_ai_analysis_payload_with_diagnostics(
+            holdings,
+            metrics,
+            selected_type,
+            custom_question,
+        )
+        st.session_state["ai_analysis_context_diagnostics"] = context_stats
+        messages = build_ai_analysis_messages(analysis_payload, selected_type, custom_question)
+        prompt = messages_to_prompt(messages)
+        client = OneMinAIClient(
+            api_key=os.environ.get("ONEMIN_AI_API_KEY"),
+            base_url=_onemin_ai_base_url(),
+            timeout_seconds=_onemin_ai_timeout_seconds(),
+            connect_timeout_seconds=ONEMIN_AI_DEFAULT_CONNECT_TIMEOUT_SECONDS,
+        )
+        st.session_state["ai_analysis_last_stage"] = "requesting"
+        with st.spinner("Analyzing portfolio through 1min.AI..."):
+            result = client.chat_with_ai(model=selected_model, prompt=prompt)
+
+        analysis_text = getattr(result, "content", "")
+        if not isinstance(analysis_text, str) or not analysis_text.strip():
+            raise OneMinAIResponseError("1min.AI returned an empty analysis result.")
+
+        response_diagnostic = getattr(result, "response_diagnostic", {})
+        st.session_state["ai_analysis_result_markdown"] = analysis_text.strip()
+        st.session_state["ai_analysis_response_diagnostic"] = response_diagnostic if isinstance(response_diagnostic, dict) else {}
+        st.session_state["ai_analysis_result_model"] = str(getattr(result, "model", selected_model) or selected_model)
+        st.session_state["ai_analysis_result_type"] = selected_type
+        st.session_state["ai_analysis_generated_at"] = datetime.now().isoformat(timespec="seconds")
+        st.session_state["ai_analysis_last_stage"] = "success"
+        st.session_state.pop("ai_analysis_error_message", None)
+        st.session_state.pop("ai_analysis_error_detail", None)
+    except OneMinAIConfigError as exc:
+        st.session_state["ai_analysis_error_message"] = "Set ONEMIN_AI_API_KEY in your local environment to run AI Analysis."
+        st.session_state["ai_analysis_error_detail"] = str(exc)
+        st.session_state["ai_analysis_last_stage"] = "error"
+    except OneMinAIAuthenticationError as exc:
+        st.session_state["ai_analysis_error_message"] = "1min.AI rejected the API key. Check ONEMIN_AI_API_KEY and try again."
+        st.session_state["ai_analysis_error_detail"] = str(exc)
+        st.session_state["ai_analysis_last_stage"] = "error"
+    except OneMinAIInsufficientCreditsError as exc:
+        st.session_state["ai_analysis_error_message"] = "1min.AI reports insufficient credits."
+        st.session_state["ai_analysis_error_detail"] = str(exc)
+        st.session_state["ai_analysis_last_stage"] = "error"
+    except OneMinAIRateLimitError as exc:
+        st.session_state["ai_analysis_error_message"] = "1min.AI rate limited the request. Try again later."
+        st.session_state["ai_analysis_error_detail"] = str(exc)
+        st.session_state["ai_analysis_last_stage"] = "error"
+    except OneMinAIUnsupportedModelError as exc:
+        st.session_state["ai_analysis_error_message"] = "The selected 1min.AI model is not supported. Choose another model."
+        st.session_state["ai_analysis_error_detail"] = str(exc)
+        st.session_state["ai_analysis_last_stage"] = "error"
+    except OneMinAITimeoutError as exc:
+        st.session_state["ai_analysis_error_message"] = "The 1min.AI request timed out. Try again or reduce the analysis context."
+        st.session_state["ai_analysis_error_detail"] = str(exc)
+        st.session_state["ai_analysis_last_stage"] = "error"
+    except OneMinAIConnectionError as exc:
+        st.session_state["ai_analysis_error_message"] = "Could not reach 1min.AI. Check your connection or base URL."
+        st.session_state["ai_analysis_error_detail"] = str(exc)
+        st.session_state["ai_analysis_last_stage"] = "error"
+    except OneMinAIResponseError as exc:
+        st.session_state["ai_analysis_error_message"] = "1min.AI returned an invalid or empty response."
+        diagnostic_text = _format_onemin_ai_response_diagnostic(getattr(exc, "diagnostic", {}))
+        st.session_state["ai_analysis_error_detail"] = f"{str(exc)}\n\n{diagnostic_text}" if diagnostic_text else str(exc)
+        st.session_state["ai_analysis_last_stage"] = "error"
+    except OneMinAIError as exc:
+        st.session_state["ai_analysis_error_message"] = "1min.AI provider failure."
+        st.session_state["ai_analysis_error_detail"] = str(exc)
+        st.session_state["ai_analysis_last_stage"] = "error"
+    except Exception:
+        st.session_state["ai_analysis_error_message"] = "Unexpected error while running AI Analysis."
+        st.session_state["ai_analysis_error_detail"] = "No additional provider diagnostics were available."
+        st.session_state["ai_analysis_last_stage"] = "error"
+    finally:
+        st.session_state["ai_analysis_busy"] = False
+
+
 def _render_ai_analysis_tab(holdings: pd.DataFrame, metrics: pd.DataFrame, mobile_mode: bool = False) -> None:
     if not _ai_analysis_enabled():
         return
-
-    # Requests run synchronously, so a render that starts with this flag cannot
-    # overlap an active request. Consume it to prevent a completion rerun loop.
-    st.session_state.pop("ai_analysis_completion_rerun_pending", None)
-    if st.session_state.get("ai_analysis_busy"):
-        st.session_state["ai_analysis_busy"] = False
 
     st.subheader("AI Analysis")
     st.caption("This analysis is generated through 1min.AI from portfolio data already loaded in memory. No export file is required.")
@@ -6176,8 +6258,15 @@ def _render_ai_analysis_tab(holdings: pd.DataFrame, metrics: pd.DataFrame, mobil
     )
 
     action_col, clear_col = st.columns(2)
-    analyze_disabled = not _onemin_ai_has_api_key() or bool(st.session_state.get("ai_analysis_busy", False))
-    analyze_clicked = action_col.button("Analyze Portfolio", type="primary", disabled=analyze_disabled)
+    active_request = bool(st.session_state.get("ai_analysis_busy", False)) and str(st.session_state.get("ai_analysis_last_stage", "")) in {"preparing", "requesting"}
+    analyze_disabled = not _onemin_ai_has_api_key() or active_request
+    action_col.button(
+        "Analyze Portfolio",
+        type="primary",
+        disabled=analyze_disabled,
+        on_click=_run_onemin_ai_analysis,
+        args=(holdings.copy(deep=True), metrics.copy(deep=True)),
+    )
     clear_clicked = clear_col.button("Clear Displayed Analysis")
 
     existing_context_stats = st.session_state.get("ai_analysis_context_diagnostics")
@@ -6192,7 +6281,8 @@ def _render_ai_analysis_tab(holdings: pd.DataFrame, metrics: pd.DataFrame, mobil
 
     if clear_clicked:
         st.session_state.pop("ai_analysis_busy", None)
-        st.session_state.pop("ai_analysis_completion_rerun_pending", None)
+        st.session_state.pop("ai_analysis_last_attempt_at", None)
+        st.session_state.pop("ai_analysis_last_stage", None)
         st.session_state.pop("ai_analysis_result_markdown", None)
         st.session_state.pop("ai_analysis_response_diagnostic", None)
         st.session_state.pop("ai_analysis_result_model", None)
@@ -6202,79 +6292,6 @@ def _render_ai_analysis_tab(holdings: pd.DataFrame, metrics: pd.DataFrame, mobil
         st.session_state.pop("ai_analysis_generated_at", None)
         st.session_state.pop("ai_analysis_context_diagnostics", None)
         st.rerun()
-
-    if analyze_clicked:
-        selected_model = str(st.session_state.get("ai_analysis_model", default_model))
-        selected_type = str(st.session_state.get("ai_analysis_type", AI_ANALYSIS_TYPES[0]))
-        custom_question = str(st.session_state.get("ai_analysis_custom_question", ""))
-        client = OneMinAIClient(
-            api_key=os.environ.get("ONEMIN_AI_API_KEY"),
-            base_url=_onemin_ai_base_url(),
-            timeout_seconds=_onemin_ai_timeout_seconds(),
-            connect_timeout_seconds=ONEMIN_AI_DEFAULT_CONNECT_TIMEOUT_SECONDS,
-        )
-        st.session_state["ai_analysis_busy"] = True
-        try:
-            analysis_payload, context_stats = _build_ai_analysis_payload_with_diagnostics(
-                holdings,
-                metrics,
-                selected_type,
-                custom_question,
-            )
-            st.session_state["ai_analysis_context_diagnostics"] = context_stats
-            messages = build_ai_analysis_messages(analysis_payload, selected_type, custom_question)
-            prompt = messages_to_prompt(messages)
-            with st.spinner("Analyzing portfolio through 1min.AI..."):
-                result = client.chat_with_ai(
-                    model=selected_model,
-                    prompt=prompt,
-                )
-            analysis_text = str(getattr(result, "content", "") or "").strip()
-            st.session_state["ai_analysis_result_markdown"] = analysis_text
-            response_diagnostic = getattr(result, "response_diagnostic", {})
-            st.session_state["ai_analysis_response_diagnostic"] = response_diagnostic if isinstance(response_diagnostic, dict) else {}
-            st.session_state["ai_analysis_result_model"] = str(getattr(result, "model", selected_model) or selected_model)
-            st.session_state["ai_analysis_result_type"] = selected_type
-            st.session_state["ai_analysis_generated_at"] = datetime.now().isoformat(timespec="seconds")
-            st.session_state.pop("ai_analysis_error_message", None)
-            st.session_state.pop("ai_analysis_error_detail", None)
-        except OneMinAIConfigError as exc:
-            st.session_state["ai_analysis_error_message"] = "Set ONEMIN_AI_API_KEY in your local environment to run AI Analysis."
-            st.session_state["ai_analysis_error_detail"] = str(exc)
-        except OneMinAIAuthenticationError as exc:
-            st.session_state["ai_analysis_error_message"] = "1min.AI rejected the API key. Check ONEMIN_AI_API_KEY and try again."
-            st.session_state["ai_analysis_error_detail"] = str(exc)
-        except OneMinAIInsufficientCreditsError as exc:
-            st.session_state["ai_analysis_error_message"] = "1min.AI reports insufficient credits."
-            st.session_state["ai_analysis_error_detail"] = str(exc)
-        except OneMinAIRateLimitError as exc:
-            st.session_state["ai_analysis_error_message"] = "1min.AI rate limited the request. Try again later."
-            st.session_state["ai_analysis_error_detail"] = str(exc)
-        except OneMinAIUnsupportedModelError as exc:
-            st.session_state["ai_analysis_error_message"] = "The selected 1min.AI model is not supported. Choose another model."
-            st.session_state["ai_analysis_error_detail"] = str(exc)
-        except OneMinAITimeoutError as exc:
-            st.session_state["ai_analysis_error_message"] = "The 1min.AI request timed out. Try again or reduce the analysis context."
-            st.session_state["ai_analysis_error_detail"] = str(exc)
-        except OneMinAIConnectionError as exc:
-            st.session_state["ai_analysis_error_message"] = "Could not reach 1min.AI. Check your connection or base URL."
-            st.session_state["ai_analysis_error_detail"] = str(exc)
-        except OneMinAIResponseError as exc:
-            st.session_state["ai_analysis_error_message"] = "1min.AI returned an invalid or empty response."
-            diagnostic = getattr(exc, "diagnostic", {})
-            diagnostic_text = _format_onemin_ai_response_diagnostic(diagnostic)
-            st.session_state["ai_analysis_error_detail"] = f"{str(exc)}\n\n{diagnostic_text}" if diagnostic_text else str(exc)
-        except OneMinAIError as exc:
-            st.session_state["ai_analysis_error_message"] = "1min.AI provider failure."
-            st.session_state["ai_analysis_error_detail"] = str(exc)
-        except Exception:
-            st.session_state["ai_analysis_error_message"] = "Unexpected error while running AI Analysis."
-            st.session_state["ai_analysis_error_detail"] = "No additional provider diagnostics were available."
-        finally:
-            st.session_state["ai_analysis_busy"] = False
-            st.session_state["ai_analysis_completion_rerun_pending"] = True
-            st.rerun()
-            return
 
     error_message = st.session_state.get("ai_analysis_error_message")
     error_detail = st.session_state.get("ai_analysis_error_detail")

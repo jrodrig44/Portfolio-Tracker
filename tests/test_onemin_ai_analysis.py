@@ -265,67 +265,73 @@ class AppAIConfigurationTests(unittest.TestCase):
             "ai_analysis_generated_at": "timestamp",
             "ai_analysis_context_diagnostics": {"after_chars": 1},
             "ai_analysis_busy": True,
-            "ai_analysis_completion_rerun_pending": True,
+            "ai_analysis_last_attempt_at": "attempt",
+            "ai_analysis_last_stage": "success",
         }
         action = SimpleNamespace(button=MagicMock(return_value=False))
         clear = SimpleNamespace(button=MagicMock(return_value=True))
         with patch.object(app.st, "session_state", state), patch.object(app.st, "subheader"), patch.object(app.st, "caption"), patch.object(app.st, "info"), patch.object(app.st, "selectbox"), patch.object(app.st, "text_area"), patch.object(app.st, "columns", return_value=[action, clear]), patch.object(app.st, "rerun") as rerun:
             app._render_ai_analysis_tab(holdings, metrics)
-        for key in ("ai_analysis_busy", "ai_analysis_completion_rerun_pending", "ai_analysis_result_markdown", "ai_analysis_response_diagnostic", "ai_analysis_result_model", "ai_analysis_result_type", "ai_analysis_error_message", "ai_analysis_error_detail", "ai_analysis_generated_at", "ai_analysis_context_diagnostics"):
+        for key in ("ai_analysis_busy", "ai_analysis_last_attempt_at", "ai_analysis_last_stage", "ai_analysis_result_markdown", "ai_analysis_response_diagnostic", "ai_analysis_result_model", "ai_analysis_result_type", "ai_analysis_error_message", "ai_analysis_error_detail", "ai_analysis_generated_at", "ai_analysis_context_diagnostics"):
             self.assertNotIn(key, state)
         rerun.assert_called_once()
 
-    def test_successful_analysis_stores_result_and_reruns_once_without_resubmission(self) -> None:
+    def test_successful_callback_stores_result_and_makes_one_request(self) -> None:
         holdings = pd.DataFrame([{"ticker": "HD", "shares": 1, "amount_invested": 100.0}])
         metrics = pd.DataFrame([{"ticker": "HD", "market_value": 100.0, "annual_income": 2.0}])
-        state: dict[str, object] = {}
-        action = SimpleNamespace(button=MagicMock(return_value=True))
-        clear = SimpleNamespace(button=MagicMock(return_value=False))
+        state: dict[str, object] = {
+            "ai_analysis_model": "gpt-5.6-sol",
+            "ai_analysis_type": AI_ANALYSIS_TYPES[0],
+            "ai_analysis_custom_question": "Review income durability.",
+        }
         result = SimpleNamespace(
             content="# Completed Analysis",
             model="gpt-5.6-sol",
             response_diagnostic={"http_status": 200, "record_status": "SUCCESS"},
         )
-        with patch.object(app.st, "session_state", state), patch.dict(os.environ, {"ONEMIN_AI_API_KEY": "test-key"}, clear=False), patch.object(app, "_build_ai_analysis_payload_with_diagnostics", return_value=({"portfolio_snapshot": {}}, {"after_chars": 10})), patch.object(app, "build_ai_analysis_messages", return_value=[{"role": "system", "content": "system"}, {"role": "user", "content": "user"}]), patch.object(app, "OneMinAIClient") as client_constructor, patch.object(app.st, "subheader"), patch.object(app.st, "caption"), patch.object(app.st, "info"), patch.object(app.st, "selectbox"), patch.object(app.st, "text_area"), patch.object(app.st, "columns", return_value=[action, clear]), patch.object(app.st, "spinner", return_value=contextlib.nullcontext()), patch.object(app.st, "rerun") as rerun:
+        with patch.object(app.st, "session_state", state), patch.dict(os.environ, {"ONEMIN_AI_API_KEY": "test-key"}, clear=False), patch.object(app, "_build_ai_analysis_payload_with_diagnostics", return_value=({"portfolio_snapshot": {}}, {"after_chars": 10})), patch.object(app, "build_ai_analysis_messages", return_value=[{"role": "system", "content": "system"}, {"role": "user", "content": "user"}]), patch.object(app, "OneMinAIClient") as client_constructor, patch.object(app.st, "spinner", return_value=contextlib.nullcontext()), patch.object(app.st, "rerun") as rerun:
             client_constructor.return_value.chat_with_ai.return_value = result
-            app._render_ai_analysis_tab(holdings, metrics)
+            app._run_onemin_ai_analysis(holdings, metrics)
 
         self.assertEqual(state["ai_analysis_result_markdown"], "# Completed Analysis")
         self.assertEqual(state["ai_analysis_result_model"], "gpt-5.6-sol")
         self.assertEqual(state["ai_analysis_result_type"], AI_ANALYSIS_TYPES[0])
         self.assertIn("ai_analysis_generated_at", state)
+        self.assertIn("ai_analysis_last_attempt_at", state)
+        self.assertEqual(state["ai_analysis_last_stage"], "success")
         self.assertFalse(state["ai_analysis_busy"])
-        self.assertTrue(state["ai_analysis_completion_rerun_pending"])
         client_constructor.return_value.chat_with_ai.assert_called_once()
-        rerun.assert_called_once()
+        rerun.assert_not_called()
 
-        action.button.return_value = False
+        action = SimpleNamespace(button=MagicMock(return_value=False))
+        clear = SimpleNamespace(button=MagicMock(return_value=False))
         with patch.object(app.st, "session_state", state), patch.dict(os.environ, {"ONEMIN_AI_API_KEY": "test-key"}, clear=False), patch.object(app, "OneMinAIClient") as next_client_constructor, patch.object(app.st, "subheader"), patch.object(app.st, "caption"), patch.object(app.st, "info"), patch.object(app.st, "selectbox"), patch.object(app.st, "text_area"), patch.object(app.st, "columns", return_value=[action, clear]), patch.object(app.st, "markdown") as markdown, patch.object(app.st, "expander", return_value=contextlib.nullcontext()), patch.object(app.st, "download_button"):
             app._render_ai_analysis_tab(holdings, metrics)
 
-        self.assertNotIn("ai_analysis_completion_rerun_pending", state)
         next_client_constructor.assert_not_called()
         markdown.assert_any_call("# Completed Analysis")
 
-    def test_failed_analysis_stores_error_clears_busy_and_reruns_once(self) -> None:
+    def test_failed_callback_stores_error_clears_busy_and_does_not_rerun(self) -> None:
         holdings = pd.DataFrame([{"ticker": "HD", "shares": 1, "amount_invested": 100.0}])
         metrics = pd.DataFrame([{"ticker": "HD", "market_value": 100.0, "annual_income": 2.0}])
-        state: dict[str, object] = {}
-        action = SimpleNamespace(button=MagicMock(return_value=True))
-        clear = SimpleNamespace(button=MagicMock(return_value=False))
+        state: dict[str, object] = {
+            "ai_analysis_model": "gpt-5.6-sol",
+            "ai_analysis_type": AI_ANALYSIS_TYPES[0],
+            "ai_analysis_custom_question": "",
+        }
         failure = OneMinAIResponseError("1min.AI rejected the request.", diagnostic={"http_status": 400, "provider_error_code": "INVALID_REQUEST"})
-        with patch.object(app.st, "session_state", state), patch.dict(os.environ, {"ONEMIN_AI_API_KEY": "test-key"}, clear=False), patch.object(app, "_build_ai_analysis_payload_with_diagnostics", return_value=({"portfolio_snapshot": {}}, {"after_chars": 10})), patch.object(app, "build_ai_analysis_messages", return_value=[{"role": "system", "content": "system"}, {"role": "user", "content": "user"}]), patch.object(app, "OneMinAIClient") as client_constructor, patch.object(app.st, "subheader"), patch.object(app.st, "caption"), patch.object(app.st, "info"), patch.object(app.st, "selectbox"), patch.object(app.st, "text_area"), patch.object(app.st, "columns", return_value=[action, clear]), patch.object(app.st, "spinner", return_value=contextlib.nullcontext()), patch.object(app.st, "rerun") as rerun:
+        with patch.object(app.st, "session_state", state), patch.dict(os.environ, {"ONEMIN_AI_API_KEY": "test-key"}, clear=False), patch.object(app, "_build_ai_analysis_payload_with_diagnostics", return_value=({"portfolio_snapshot": {}}, {"after_chars": 10})), patch.object(app, "build_ai_analysis_messages", return_value=[{"role": "system", "content": "system"}, {"role": "user", "content": "user"}]), patch.object(app, "OneMinAIClient") as client_constructor, patch.object(app.st, "spinner", return_value=contextlib.nullcontext()), patch.object(app.st, "rerun") as rerun:
             client_constructor.return_value.chat_with_ai.side_effect = failure
-            app._render_ai_analysis_tab(holdings, metrics)
+            app._run_onemin_ai_analysis(holdings, metrics)
 
         self.assertEqual(state["ai_analysis_error_message"], "1min.AI returned an invalid or empty response.")
         self.assertIn("Provider error code: INVALID_REQUEST", str(state["ai_analysis_error_detail"]))
         self.assertFalse(state["ai_analysis_busy"])
-        self.assertTrue(state["ai_analysis_completion_rerun_pending"])
+        self.assertEqual(state["ai_analysis_last_stage"], "error")
         client_constructor.return_value.chat_with_ai.assert_called_once()
-        rerun.assert_called_once()
+        rerun.assert_not_called()
 
-    def test_stale_busy_flag_is_recovered_without_submitting_request(self) -> None:
+    def test_stale_busy_flag_does_not_disable_button_or_submit_request(self) -> None:
         holdings = pd.DataFrame([{"ticker": "HD", "shares": 1, "amount_invested": 100.0}])
         metrics = pd.DataFrame([{"ticker": "HD", "market_value": 100.0, "annual_income": 2.0}])
         state: dict[str, object] = {"ai_analysis_busy": True}
@@ -334,9 +340,24 @@ class AppAIConfigurationTests(unittest.TestCase):
         with patch.object(app.st, "session_state", state), patch.dict(os.environ, {"ONEMIN_AI_API_KEY": "test-key"}, clear=False), patch.object(app, "OneMinAIClient") as client_constructor, patch.object(app.st, "subheader"), patch.object(app.st, "caption"), patch.object(app.st, "info"), patch.object(app.st, "selectbox"), patch.object(app.st, "text_area"), patch.object(app.st, "columns", return_value=[action, clear]):
             app._render_ai_analysis_tab(holdings, metrics)
 
-        self.assertFalse(state["ai_analysis_busy"])
+        self.assertTrue(state["ai_analysis_busy"])
         self.assertFalse(action.button.call_args.kwargs["disabled"])
         client_constructor.assert_not_called()
+
+    def test_analyze_button_uses_callback_with_copied_dataframes(self) -> None:
+        holdings = pd.DataFrame([{"ticker": "HD", "shares": 1, "amount_invested": 100.0}])
+        metrics = pd.DataFrame([{"ticker": "HD", "market_value": 100.0, "annual_income": 2.0}])
+        state: dict[str, object] = {}
+        action = SimpleNamespace(button=MagicMock(return_value=False))
+        clear = SimpleNamespace(button=MagicMock(return_value=False))
+        with patch.object(app.st, "session_state", state), patch.dict(os.environ, {"ONEMIN_AI_API_KEY": "test-key"}, clear=False), patch.object(app.st, "subheader"), patch.object(app.st, "caption"), patch.object(app.st, "info"), patch.object(app.st, "selectbox"), patch.object(app.st, "text_area"), patch.object(app.st, "columns", return_value=[action, clear]):
+            app._render_ai_analysis_tab(holdings, metrics)
+
+        callback_kwargs = action.button.call_args.kwargs
+        self.assertIs(callback_kwargs["on_click"], app._run_onemin_ai_analysis)
+        copied_holdings, copied_metrics = callback_kwargs["args"]
+        self.assertIsNot(copied_holdings, holdings)
+        self.assertIsNot(copied_metrics, metrics)
 
     def test_missing_key_keeps_tab_visible_and_disables_analysis(self) -> None:
         holdings = pd.DataFrame([{"ticker": "HD", "shares": 1, "amount_invested": 100.0}])
