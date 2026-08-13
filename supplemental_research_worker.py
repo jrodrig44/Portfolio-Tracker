@@ -8,7 +8,6 @@ import time
 
 from dotenv import load_dotenv
 
-from onemin_ai_client import OneMinAIClient
 from supplemental_research import (
     WORKER_CHECK_INTERVAL,
     SupplementalResearchService,
