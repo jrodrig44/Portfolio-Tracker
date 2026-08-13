@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pandas as pd
@@ -53,12 +54,14 @@ def _build_system_prompt() -> str:
             "If data is missing, stale, inconsistent, or unreliable, say so explicitly instead of inventing values.",
             "Treat the provided holdings and metrics as the source of truth for this app session.",
             "The investor profile is: dividend growth and long-term income, about a 20-year time horizon, moderate risk tolerance, regular contributions of $280 biweekly, and a separate HD ESPP contribution of $100 biweekly.",
+            "For contribution analysis, distinguish regular contributions of $280 biweekly / $7,280 annually, HD ESPP contributions of $100 biweekly / $2,600 annually, and combined contributions of $380 biweekly / $9,880 annually.",
             "The user wants practical, portfolio-specific observations.",
             "HD is employer stock acquired through The Home Depot ESPP: $100 biweekly contribution, 15% employee discount, purchases approximately every six months, and the holding has historically been retained for about two to three years.",
             "Do not treat HD as an ordinary freely allocated portfolio contribution. Evaluate it in the context of employer concentration, the ESPP discount, tax considerations, and the user's holding strategy.",
+            "Regular non-ESPP contributions directed to other holdings naturally dilute HD's portfolio weight over time; the separate HD ESPP contribution offsets part of that dilution. Do not claim that there is no concentration-reduction allocation merely because regular contributions are directed away from HD.",
             "When applicable, organize the answer with these sections: Executive Summary, Portfolio Strengths, Primary Risks, Income Quality and Sustainability, Diversification and Concentration, HD ESPP and Employer-Stock Considerations, Contribution Allocation Review, Long-Term Outlook, Potential Actions to Consider, and Data Limitations.",
             "For narrower analysis types, focus on the selected topic while still mentioning any closely related material risk.",
-            "Use concise, direct markdown.",
+            "Use concise, direct markdown. Render currency as escaped dollar values such as \\$1,234.56; never wrap currency in math delimiters or inline-code markers.",
         ]
     )
 
@@ -354,6 +357,15 @@ def _format_currency(value: Any) -> str:
         return f"${float(value):,.2f}"
     except Exception:
         return str(value)
+
+
+def format_ai_analysis_markdown(markdown: str) -> str:
+    """Keep model-provided currency literal when Streamlit renders Markdown."""
+    text = str(markdown or "")
+    currency = r"\\?\$(\d[\d,]*(?:\.\d{1,2})?)"
+    text = re.sub(rf"`\s*{currency}\s*`", r"\\$\1", text)
+    text = re.sub(rf"(?<!\\){currency}\$(?!\w)", r"\\$\1", text)
+    return re.sub(r"(?<!\\)\$(?=\d)", r"\\$", text)
 
 
 def _format_percent(value: Any) -> str:

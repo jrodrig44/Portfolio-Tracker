@@ -17,7 +17,7 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 import yfinance as yf
 
-from ai_analysis_prompt import AI_ANALYSIS_TYPES, build_ai_analysis_markdown, build_ai_analysis_messages
+from ai_analysis_prompt import AI_ANALYSIS_TYPES, build_ai_analysis_markdown, build_ai_analysis_messages, format_ai_analysis_markdown
 from health_engine import compute_portfolio_health as compute_portfolio_health_engine
 from portfolio_intelligence import compute_portfolio_intelligence
 from stash_history import build_statement_history_reconciliation, import_stash_statement_history
@@ -6170,7 +6170,7 @@ def _run_onemin_ai_analysis(holdings: pd.DataFrame, metrics: pd.DataFrame) -> No
             raise OneMinAIResponseError("1min.AI returned an empty analysis result.")
 
         response_diagnostic = getattr(result, "response_diagnostic", {})
-        st.session_state["ai_analysis_result_markdown"] = analysis_text.strip()
+        st.session_state["ai_analysis_result_markdown"] = format_ai_analysis_markdown(analysis_text.strip())
         st.session_state["ai_analysis_response_diagnostic"] = response_diagnostic if isinstance(response_diagnostic, dict) else {}
         st.session_state["ai_analysis_result_model"] = str(getattr(result, "model", selected_model) or selected_model)
         st.session_state["ai_analysis_result_type"] = selected_type

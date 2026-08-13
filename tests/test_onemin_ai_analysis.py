@@ -9,7 +9,7 @@ import httpx
 import pandas as pd
 
 import app
-from ai_analysis_prompt import AI_ANALYSIS_TYPES, build_ai_analysis_messages
+from ai_analysis_prompt import AI_ANALYSIS_TYPES, build_ai_analysis_messages, format_ai_analysis_markdown
 from onemin_ai_client import (
     ONEMIN_AI_DEFAULT_BASE_URL,
     ONEMIN_AI_DEFAULT_MODEL,
@@ -219,6 +219,20 @@ class PromptConversionTests(unittest.TestCase):
         self.assertIn("Do not present the response as personalized fiduciary advice", prompt)
         self.assertIn("How durable is the income?", prompt)
         self.assertIn("$25,000.00", prompt)
+
+    def test_prompt_explains_contribution_dilution_and_markdown_currency_rules(self) -> None:
+        messages = build_ai_analysis_messages({}, "Contribution Allocation Review", "")
+        system_prompt = messages[0]["content"]
+        self.assertIn("$280 biweekly / $7,280 annually", system_prompt)
+        self.assertIn("$100 biweekly / $2,600 annually", system_prompt)
+        self.assertIn("$380 biweekly / $9,880 annually", system_prompt)
+        self.assertIn("naturally dilute HD's portfolio weight", system_prompt)
+        self.assertIn("escaped dollar values such as \\$1,234.56", system_prompt)
+
+    def test_currency_output_is_safe_for_streamlit_markdown(self) -> None:
+        formatted = format_ai_analysis_markdown("Income is $1,234.56, not `$2,600`, and not $380$.")
+        self.assertEqual(formatted, "Income is \\$1,234.56, not \\$2,600, and not \\$380.")
+        self.assertNotIn("`", formatted)
 
 
 class AppAIConfigurationTests(unittest.TestCase):
