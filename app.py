@@ -42,9 +42,10 @@ from supplemental_research import (
     DEFAULT_RESEARCH_MODEL,
     SupplementalResearchService,
     get_research_rows,
-    get_setting,
     research_is_due,
     set_setting,
+    SUPPORTED_RESEARCH_MODELS,
+    validated_research_model,
 )
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
@@ -6227,14 +6228,12 @@ def _render_supplemental_research(holdings: pd.DataFrame, metrics: pd.DataFrame)
     if not tickers:
         st.info("Add a holding before requesting supplemental research.")
         return
-    configured_model = get_setting(DEFAULT_DB_PATH, "supplemental_research_model", DEFAULT_RESEARCH_MODEL)
-    model_options = list(ONEMIN_AI_RECOMMENDED_MODELS)
-    if configured_model not in model_options:
-        model_options.insert(0, configured_model)
+    configured_model = validated_research_model(DEFAULT_DB_PATH)
+    model_options = list(SUPPORTED_RESEARCH_MODELS)
     selected_model = st.selectbox("Supplemental Research Model", options=model_options, index=model_options.index(configured_model), format_func=_onemin_ai_model_label, key="supplemental_research_model_selector")
-    if str(selected_model) != configured_model:
-        set_setting(DEFAULT_DB_PATH, "supplemental_research_model", str(selected_model))
-        configured_model = str(selected_model)
+    if isinstance(selected_model, str) and selected_model in model_options and selected_model != configured_model:
+        set_setting(DEFAULT_DB_PATH, "supplemental_research_model", selected_model)
+        configured_model = selected_model
     selected_ticker = st.selectbox("Research Holding", options=tickers, key="supplemental_research_ticker")
     research_clicked = st.button("Research Selected Holding", key="supplemental_research_selected")
     due_clicked = st.button("Refresh Due Holdings", key="supplemental_research_due")

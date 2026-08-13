@@ -19,6 +19,12 @@ FAILED_RETRY_DELAY = timedelta(hours=24)
 STALE_JOB_LEASE = timedelta(minutes=30)
 WORKER_CHECK_INTERVAL = timedelta(hours=6)
 DEFAULT_RESEARCH_MODEL = "gpt-4.1-mini"
+SUPPORTED_RESEARCH_MODELS = (
+    "gpt-4.1-mini",
+    "gemini-2.5-flash",
+    "claude-haiku-4-5-20251001",
+    "gpt-4o-mini",
+)
 MAX_RESEARCH_BATCH_SIZE = 3
 
 PROHIBITED_RESEARCH_FIELDS = {
@@ -207,6 +213,14 @@ def set_setting(db_path: Path | str, key: str, value: str) -> None:
             "INSERT INTO supplemental_research_settings (setting_key, setting_value, updated_at) VALUES (?, ?, ?) ON CONFLICT(setting_key) DO UPDATE SET setting_value = ?, updated_at = ?",
             (key, str(value), now, str(value), now),
         )
+
+
+def validated_research_model(db_path: Path | str) -> str:
+    configured = get_setting(db_path, "supplemental_research_model", DEFAULT_RESEARCH_MODEL)
+    if configured in SUPPORTED_RESEARCH_MODELS:
+        return configured
+    set_setting(db_path, "supplemental_research_model", DEFAULT_RESEARCH_MODEL)
+    return DEFAULT_RESEARCH_MODEL
 
 
 def research_is_due(row: dict[str, Any], now: datetime | None = None) -> bool:
