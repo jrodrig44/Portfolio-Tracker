@@ -64,7 +64,14 @@ The application provides two separate, independent workflows.
 
 Built-in AI Analysis is optional and runs only when you click **Analyze Portfolio**. It sends a compacted portfolio-analysis context already loaded in memory to 1min.AI; it does not upload an exported portfolio file. Use it for quick or targeted portfolio questions, with the model and analysis type selected in the app.
 
-A local 1min.AI API key is required. The configured default model is `gpt-5.6-sol`. GPT-4o Mini (`gpt-4o-mini`) is a recommended economical option for routine use when configured locally. Other models may consume substantially more 1min.AI credits. Credit usage varies by model, prompt, and response length; 1min.AI credits are not equivalent to model tokens.
+A local 1min.AI API key is required. The model dropdown focuses on lightweight models for quick, economical portfolio analysis. The model configured through `ONEMIN_AI_MODEL` remains the initial selection, including custom or legacy model identifiers, and you can choose another model directly from the dropdown. The selected model's description appears underneath the dropdown.
+
+- GPT-4.1 Mini (`gpt-4.1-mini`): Recommended for routine portfolio analysis, balancing instruction-following, analytical quality, speed, and credit usage.
+- Gemini 2.5 Flash (`gemini-2.5-flash`): Best for fast analysis of larger portfolio contexts and a second analytical perspective at relatively low credit usage.
+- Claude Haiku 4.5 (`claude-haiku-4-5-20251001`): Best for careful explanations, nuanced wording, and detailed portfolio and ESPP instructions.
+- GPT-4o Mini (`gpt-4o-mini`): Economical fallback for basic summaries and simple questions, though it may produce weaker or overstated portfolio conclusions.
+
+Credit consumption varies by provider model, prompt size, and response length. Comprehensive reports can still be created through the independent manual export workflow, which does not require a 1min.AI API key.
 
 Create or update the local project-root `.env` file:
 

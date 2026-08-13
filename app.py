@@ -56,10 +56,41 @@ DEFAULT_PROJECTION_BIWEEKLY_CONTRIB = 280.0
 EXPORT_VERSION = "2026.08"
 ENABLE_AI_ANALYSIS = True
 ONEMIN_AI_RECOMMENDED_MODELS = [
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-5.6-luna",
+    "gpt-4.1-mini",
+    "gemini-2.5-flash",
+    "claude-haiku-4-5-20251001",
+    "gpt-4o-mini",
 ]
+ONEMIN_AI_MODEL_DETAILS = {
+    "gpt-4.1-mini": {
+        "label": "GPT-4.1 Mini",
+        "description": (
+            "Recommended for everyday portfolio analysis. Offers the best balance "
+            "of instruction-following, analytical quality, speed, and credit usage."
+        ),
+    },
+    "gemini-2.5-flash": {
+        "label": "Gemini 2.5 Flash",
+        "description": (
+            "Best for fast analysis of larger portfolio contexts and obtaining a "
+            "second analytical perspective while keeping credit usage relatively low."
+        ),
+    },
+    "claude-haiku-4-5-20251001": {
+        "label": "Claude Haiku 4.5",
+        "description": (
+            "Best for careful explanations, nuanced wording, and following detailed "
+            "portfolio and ESPP instructions."
+        ),
+    },
+    "gpt-4o-mini": {
+        "label": "GPT-4o Mini",
+        "description": (
+            "Economical fallback for basic summaries and simple questions. It uses "
+            "fewer resources but may produce weaker or overstated portfolio conclusions."
+        ),
+    },
+}
 
 OPTION_INCOME_ETF_TICKERS = {"JEPI", "JEPQ", "QYLD", "RYLD", "XYLD"}
 SECTOR_LABEL_ALIASES = {
@@ -5611,6 +5642,22 @@ def _onemin_ai_model_options(default_model: str) -> list[str]:
     return list(dict.fromkeys([configured_model, *ONEMIN_AI_RECOMMENDED_MODELS]))
 
 
+def _onemin_ai_model_label(model: str) -> str:
+    model_id = str(model or "").strip()
+    details = ONEMIN_AI_MODEL_DETAILS.get(model_id)
+    return str(details.get("label") if details else model_id)
+
+
+def _onemin_ai_model_description(model: str) -> str:
+    model_id = str(model or "").strip()
+    details = ONEMIN_AI_MODEL_DETAILS.get(model_id)
+    return str(
+        details.get("description")
+        if details
+        else "Custom model configured through the local environment. Availability, quality, and credit usage depend on 1min.AI."
+    )
+
+
 def _onemin_ai_model_index(default_model: str) -> int:
     options = _onemin_ai_model_options(default_model)
     try:
@@ -6237,12 +6284,14 @@ def _render_ai_analysis_tab(holdings: pd.DataFrame, metrics: pd.DataFrame, mobil
     default_analysis_type = str(st.session_state.get("ai_analysis_type", AI_ANALYSIS_TYPES[0]))
 
     model_options = _onemin_ai_model_options(default_model)
-    st.selectbox(
+    selected_model = st.selectbox(
         "Model",
         options=model_options,
         index=_onemin_ai_model_index(str(st.session_state.get("ai_analysis_model", default_model))),
         key="ai_analysis_model",
+        format_func=_onemin_ai_model_label,
     )
+    st.caption(_onemin_ai_model_description(selected_model))
     st.selectbox(
         "Analysis Type",
         options=AI_ANALYSIS_TYPES,

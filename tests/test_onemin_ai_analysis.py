@@ -248,9 +248,39 @@ class AppAIConfigurationTests(unittest.TestCase):
     def test_model_presets_include_configured_custom_model(self) -> None:
         options = app._onemin_ai_model_options("custom-provider-model")
         self.assertEqual(options[0], "custom-provider-model")
-        self.assertIn("gpt-5.6-sol", options)
-        self.assertIn("gpt-5.6-terra", options)
-        self.assertIn("gpt-5.6-luna", options)
+        self.assertIn("gpt-4.1-mini", options)
+        self.assertIn("gemini-2.5-flash", options)
+        self.assertIn("claude-haiku-4-5-20251001", options)
+        self.assertIn("gpt-4o-mini", options)
+        for removed_model in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
+            self.assertNotIn(removed_model, options)
+
+        configured_recommended_options = app._onemin_ai_model_options("gpt-4.1-mini")
+        self.assertEqual(configured_recommended_options[0], "gpt-4.1-mini")
+        self.assertEqual(configured_recommended_options.count("gpt-4.1-mini"), 1)
+
+    def test_model_metadata_and_custom_fallback_are_complete(self) -> None:
+        for model in app.ONEMIN_AI_RECOMMENDED_MODELS:
+            with self.subTest(model=model):
+                self.assertTrue(app.ONEMIN_AI_MODEL_DETAILS[model]["label"])
+                self.assertTrue(app.ONEMIN_AI_MODEL_DETAILS[model]["description"])
+        self.assertEqual(app._onemin_ai_model_label("gpt-4.1-mini"), "GPT-4.1 Mini")
+        self.assertEqual(app._onemin_ai_model_options("gpt-4.1-mini").count("gpt-4.1-mini"), 1)
+        self.assertEqual(app._onemin_ai_model_label("custom-model"), "custom-model")
+        self.assertIn("Custom model configured through the local environment.", app._onemin_ai_model_description("custom-model"))
+
+    def test_model_selector_uses_friendly_labels_but_returns_raw_identifier(self) -> None:
+        holdings = pd.DataFrame([{"ticker": "HD", "shares": 1, "amount_invested": 100.0}])
+        metrics = pd.DataFrame([{"ticker": "HD", "market_value": 100.0, "annual_income": 2.0}])
+        state: dict[str, object] = {"ai_analysis_model": "gpt-4.1-mini"}
+        action = SimpleNamespace(button=MagicMock(return_value=False))
+        clear = SimpleNamespace(button=MagicMock(return_value=False))
+        with patch.object(app.st, "session_state", state), patch.dict(os.environ, {"ONEMIN_AI_API_KEY": "test-key", "ONEMIN_AI_MODEL": "gpt-4.1-mini"}, clear=False), patch.object(app.st, "subheader"), patch.object(app.st, "caption") as caption, patch.object(app.st, "info"), patch.object(app.st, "selectbox", side_effect=["gpt-4.1-mini", AI_ANALYSIS_TYPES[0]]) as selectbox, patch.object(app.st, "text_area"), patch.object(app.st, "columns", return_value=[action, clear]):
+            app._render_ai_analysis_tab(holdings, metrics)
+        self.assertEqual(selectbox.call_args_list[0].kwargs["format_func"]("gpt-4.1-mini"), "GPT-4.1 Mini")
+        self.assertEqual(selectbox.call_args_list[0].kwargs["options"][0], "gpt-4.1-mini")
+        self.assertEqual(state["ai_analysis_model"], "gpt-4.1-mini")
+        self.assertTrue(any("Recommended for everyday portfolio analysis." in str(call) for call in caption.call_args_list))
 
     def test_nonfinite_app_timeout_uses_default(self) -> None:
         for invalid in ("NaN", "Infinity", "-Infinity"):
@@ -315,6 +345,7 @@ class AppAIConfigurationTests(unittest.TestCase):
         self.assertEqual(state["ai_analysis_last_stage"], "success")
         self.assertFalse(state["ai_analysis_busy"])
         client_constructor.return_value.chat_with_ai.assert_called_once()
+        self.assertEqual(client_constructor.return_value.chat_with_ai.call_args.kwargs["model"], "gpt-5.6-sol")
         rerun.assert_not_called()
 
         action = SimpleNamespace(button=MagicMock(return_value=False))
