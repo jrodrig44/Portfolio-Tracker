@@ -1,57 +1,114 @@
 # Dividend Portfolio Tracker
 
-This is a self-contained local Streamlit app for managing and analyzing a dividend portfolio.
+Dividend Portfolio Tracker is a self-contained local Streamlit application for managing, analyzing, and exporting a dividend-focused investment portfolio. It combines holdings management, market-data enrichment, portfolio analysis, methodology-based health views, and optional AI-assisted analysis in one local workflow.
 
-## Features
+## Core Features
 
-- Add, edit, and remove holdings in a spreadsheet-style table.
-- Auto-save holdings to local storage (`data/portfolio.db`).
-- Enter `Shares` and `Amount Invested` directly.
-- Auto-calculate `Avg Cost` and live `Current Value`.
-- Auto-fetch dividend yield and estimate annual dividend/share.
-- Optional manual override for annual dividend/share per holding.
-- Optional `Asset Type` field per holding for allocation reporting.
-- Mobile-optimized mode with compact layouts for phones.
-- Three dedicated tabs:
-  - Holdings
-  - Portfolio Analysis
-  - Portfolio Insights
-  - Portfolio Health
-  - Dividend Calendar
-- Portfolio Analysis now includes:
-  - Portfolio summary and projection assumptions
-  - Asset allocation by type
-  - Yield and income concentration analysis
-  - Growth projections
-  - Snowball tracker, milestones, progress, and years-to-reach
-- Portfolio Insights now includes:
-  - Key portfolio metrics and trend callouts
-  - Holdings value and yield comparison tables
-  - Asset mix and contribution-efficiency views
-  - Dynamic charts for value, yield, allocation, and contribution distribution
-  - Current snapshot table with priority takeaways
-- Portfolio Health now includes:
-  - Single health score metric
-  - One-line alerts
-  - Goal tracker card
-  - Quick filters for focused views
-- Dividend Calendar now includes:
-  - Monthly projected dividend income (timing view)
-  - Month-over-month and YTD cash-flow tracking
-  - Best vs weakest payout month metrics
-  - Top payer schedule by month
-- Track key metrics:
-  - Cost basis
-  - Market value
-  - Unrealized gain/loss
-  - Annual dividend income
-  - Yield on cost
-  - Portfolio yield
-- Refresh live prices from Yahoo Finance with cache control.
+- Spreadsheet-style holdings management with add, edit, and remove actions.
+- Local SQLite persistence for holdings data.
+- Live Yahoo Finance price updates, dividend-yield estimates, and supplemental investment intelligence where data is available.
+- Manual dividend overrides, cost basis, current market value, unrealized gain/loss, yield on cost, and portfolio-yield tracking.
+- Regular, special, and HD ESPP contribution tracking.
+- Asset-type, direct-sector, look-through sector, holding-concentration, and income-concentration analysis.
+- Portfolio growth projections, income estimates, milestones, and dividend-timing or income-seasonality views when historical timing data is available.
+- Methodology-based portfolio health scores, alerts, goal tracking, and filtered health views. These scores are tracker heuristics, not objective investment ratings.
+- HD ESPP-aware contribution and employer-stock concentration context.
+- Manual Markdown and JSON exports.
+- Optional built-in 1min.AI portfolio analysis.
+- Mobile-friendly layouts and periodic market-data refreshes.
 
-## Run
+## Application Tabs
 
-### One-command start (PowerShell)
+1. Holdings
+2. Portfolio Analysis
+3. AI Analysis
+4. Portfolio Insights
+5. Portfolio Health
+
+### Holdings
+
+- Add, edit, and remove holdings.
+- Enter shares and invested amounts.
+- Configure regular, special, and ESPP contributions.
+- Maintain dividend, ESPP, asset-type, and sector information.
+- Save portfolio data locally.
+
+### Portfolio Analysis
+
+- Review the portfolio summary, allocation, income, yield, and contribution views.
+- Explore growth projections, income milestones, and available dividend timing or seasonality analysis.
+- Use the manual Markdown and JSON export controls.
+
+### AI Analysis
+
+- Run optional targeted analysis through 1min.AI.
+- Uses portfolio information already loaded in memory; no export file is created or uploaded.
+- Select a model and analysis type, then view or download the returned Markdown analysis.
+
+### Portfolio Insights
+
+- Compare holdings, yields, contribution allocations, and concentration views.
+- Review charts, supplemental market or fundamental context, and prioritized portfolio observations.
+
+### Portfolio Health
+
+- Review methodology-based health scores and alerts.
+- Track income goals and filter health views.
+- Health scores are tracker-generated heuristics, not objective investment ratings.
+
+## AI Analysis and Manual Exports
+
+The application provides two separate, independent workflows.
+
+### Built-in 1min.AI Analysis
+
+Built-in AI Analysis is optional and runs only when you click **Analyze Portfolio**. It sends a compacted portfolio-analysis context already loaded in memory to 1min.AI; it does not upload an exported portfolio file. Use it for quick or targeted portfolio questions, with the model and analysis type selected in the app.
+
+A local 1min.AI API key is required. The configured default model is `gpt-5.6-sol`. GPT-4o Mini (`gpt-4o-mini`) is a recommended economical option for routine use when configured locally. Other models may consume substantially more 1min.AI credits. Credit usage varies by model, prompt, and response length; 1min.AI credits are not equivalent to model tokens.
+
+Create or update the local project-root `.env` file:
+
+```text
+ONEMIN_AI_API_KEY=your_key_here
+ONEMIN_AI_MODEL=gpt-5.6-sol
+ONEMIN_AI_BASE_URL=https://api.1min.ai
+ONEMIN_AI_TIMEOUT_SECONDS=180
+```
+
+Restart the application after changing `.env`. The repository ignores `.env`; never commit it or put a real key in `.env.example`.
+
+### Manual Markdown and JSON Exports
+
+Manual exports are independent of built-in AI Analysis. Exporting does not require a 1min.AI API key, and the built-in AI feature does not replace, disable, or modify the export workflow. Export contents reflect the current portfolio snapshot and tracker methodology.
+
+You can save an export and upload it manually to another AI service for a more comprehensive review. External AI analysis is not automatic.
+
+## Running the Application
+
+Startup chain:
+
+```text
+Start Portfolio Tracker.bat -> run.ps1 -> start_streamlit.py -> app.py
+```
+
+### Recommended: Double-click launcher
+
+On Windows, double-click [Start Portfolio Tracker.bat](Start%20Portfolio%20Tracker.bat).
+
+The launcher:
+
+1. Determines its own project directory.
+2. Opens PowerShell and keeps it open with `-NoExit`.
+3. Runs `run.ps1` with an execution-policy bypass scoped only to that PowerShell process.
+4. Changes to the project directory.
+5. Creates `.venv` when needed.
+6. Installs or updates dependencies from `requirements.txt`.
+7. Starts the application through `start_streamlit.py`.
+8. Launches `app.py` through Streamlit.
+
+Keep the PowerShell window open while using the application. Closing it stops the local app. The execution-policy bypass does not permanently change Windows policy.
+
+### PowerShell Alternative
 
 From the project folder, run:
 
@@ -59,107 +116,24 @@ From the project folder, run:
 .\run.ps1
 ```
 
-This script will:
-
-- Create `.venv` automatically (first run only)
-- Install dependencies from `requirements.txt`
-- Launch Streamlit
-
-### Double-click start (Windows)
-
-You can also start the app by double-clicking:
-
-- Start Portfolio Tracker.bat
-
-This opens PowerShell and runs run.ps1 for you.
-
-### Manual start (optional)
+### Manual Start
 
 1. Create and activate a Python environment.
 2. Install dependencies:
 
-```bash
+```powershell
 pip install -r requirements.txt
 ```
 
-3. Start the app:
+3. Start the application:
 
-```bash
+```powershell
 streamlit run app.py
-```
-
-4. In the app sidebar:
-  - Force refresh prices
-  - Force refresh dividend yield
-  - Reload holdings from disk
-
-## 1min.AI Portfolio Analysis
-
-AI Analysis is optional. It analyzes the current portfolio data directly in memory; it does not require exporting or uploading a portfolio file.
-
-Create a local `.env` file in the project root and add:
-
-```text
-ONEMIN_AI_API_KEY=your_key_here
-```
-
-Optional configuration:
-
-```text
-ONEMIN_AI_MODEL=gpt-5.6-sol
-ONEMIN_AI_BASE_URL=https://api.1min.ai
-ONEMIN_AI_TIMEOUT_SECONDS=180
-```
-
-The default model is `gpt-5.6-sol`; `gpt-5.6-terra` and `gpt-5.6-luna` are available alternatives for balancing quality and credit consumption. Restart the Streamlit app after changing `.env`. Never commit `.env`; it is ignored by this repository. 1min.AI credit accounting is provider-specific and can vary by feature and model.
-
-## Host On ASUSTOR NAS (AS1002T v2)
-
-This app is ready to run as a Docker container on your NAS.
-
-### Files added for NAS hosting
-
-- `Dockerfile`
-- `docker-compose.yml`
-- `.streamlit/config.toml`
-
-### Steps
-
-1. Copy this project folder to your NAS shared folder.
-2. Install/open **Docker Engine** or **Container Manager** on ASUSTOR.
-3. Open a terminal on the NAS and go to the project folder.
-4. Build and start:
-
-```bash
-docker compose up -d --build
-```
-
-5. Open the app:
-
-```text
-http://<NAS-IP>:8501
-```
-
-### Data persistence
-
-- The SQLite DB is persisted via volume mapping `./data:/app/data`.
-- Your holdings remain after container restarts/upgrades.
-
-### Update after code changes
-
-```bash
-docker compose up -d --build
-```
-
-### Stop
-
-```bash
-docker compose down
 ```
 
 ## Notes
 
-- Price lookups require internet access.
-- Saved holdings are stored at `data/portfolio.db` (SQLite).
-- Legacy `data/holdings.csv` is auto-migrated one time into SQLite if detected.
+- Price lookups and supplemental Yahoo Finance data require internet access and may be incomplete for some holdings.
+- Local holdings are stored at `data/portfolio.db`.
+- A legacy `data/holdings.csv` file is migrated once when detected.
 
