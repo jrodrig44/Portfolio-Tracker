@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import pandas as pd
 
+import app
 from app import _build_ai_export_payload, _build_export_markdown, _build_investment_intelligence_rows
 
 
@@ -91,6 +92,10 @@ class FakeTicker:
 
 
 class InvestmentIntelligenceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        app._latest_yahoo_metadata.clear()
+        app._latest_investment_intelligence.clear()
+
     def test_ai_payload_includes_supplemental_yahoo_financial_data(self) -> None:
         holdings = pd.DataFrame(
             [

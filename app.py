@@ -64,6 +64,12 @@ DEFAULT_EXPECTED_RETURN = 0.08
 DEFAULT_PROJECTION_BIWEEKLY_CONTRIB = 280.0
 EXPORT_VERSION = "2026.08"
 ENABLE_AI_ANALYSIS = True
+PRICE_CACHE_TTL_SECONDS = 60
+YAHOO_METADATA_CACHE_TTL_SECONDS = 86400
+INVESTMENT_INTELLIGENCE_CACHE_TTL_SECONDS = 21600
+DIVIDEND_TIMING_CACHE_TTL_SECONDS = 86400
+HISTORICAL_CONTEXT_CACHE_TTL_SECONDS = 600
+FUND_SECTOR_WEIGHTS_CACHE_TTL_SECONDS = 3600
 ONEMIN_AI_RECOMMENDED_MODELS = [
     "gpt-4.1-mini",
     "gemini-2.5-flash",
@@ -903,54 +909,119 @@ def _save_holdings(df: pd.DataFrame) -> None:
     SupplementalResearchService(DEFAULT_DB_PATH).sync_holdings(normalized["ticker"].tolist())
 
 
-@st.cache_data(ttl=60)
+def _normalize_yahoo_tickers(tickers: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(sorted({str(ticker or "").strip().upper() for ticker in tickers if str(ticker or "").strip()}))
+
+
+@st.cache_data(ttl=PRICE_CACHE_TTL_SECONDS)
 def _latest_prices(tickers: tuple[str, ...]) -> dict[str, float]:
-    if not tickers:
+    normalized_tickers = _normalize_yahoo_tickers(tickers)
+    if not normalized_tickers:
         return {}
 
-    prices: dict[str, float] = {}
+    prices = {ticker: 0.0 for ticker in normalized_tickers}
+    unresolved = set(normalized_tickers)
 
-    # Use per-symbol fallback to keep behavior predictable for small portfolios.
-    for ticker in tickers:
+    try:
+        batch_history = yf.download(
+            list(normalized_tickers),
+            period="5d",
+            interval="1d",
+            auto_adjust=False,
+            progress=False,
+            group_by="column",
+            threads=True,
+        )
+        if isinstance(batch_history, pd.DataFrame) and not batch_history.empty:
+            close_columns: dict[str, object] = {}
+            if isinstance(batch_history.columns, pd.MultiIndex):
+                for column in batch_history.columns:
+                    parts = [str(part).strip().upper() for part in column]
+                    if "CLOSE" not in parts:
+                        continue
+                    ticker_part = next((part for part in parts if part in normalized_tickers), "")
+                    if ticker_part:
+                        close_columns[ticker_part] = column
+            else:
+                if len(normalized_tickers) == 1:
+                    close_columns[normalized_tickers[0]] = "Close" if "Close" in batch_history.columns else None
+                else:
+                    for column in batch_history.columns:
+                        ticker_part = str(column).strip().upper()
+                        if ticker_part in normalized_tickers:
+                            close_columns[ticker_part] = column
+
+            for ticker, column in close_columns.items():
+                if column is None:
+                    continue
+                values = pd.to_numeric(batch_history[column], errors="coerce").replace([float("inf"), float("-inf")], pd.NA).dropna()
+                if values.empty:
+                    continue
+                prices[ticker] = float(values.iloc[-1])
+                unresolved.discard(ticker)
+    except Exception:
+        pass
+
+    for ticker in sorted(unresolved):
         try:
             history = yf.Ticker(ticker).history(period="5d")
-            if history.empty:
-                prices[ticker] = 0.0
-            else:
-                prices[ticker] = float(history["Close"].dropna().iloc[-1])
+            close_series = history.get("Close") if isinstance(history, pd.DataFrame) else None
+            if close_series is None:
+                continue
+            close = pd.to_numeric(close_series, errors="coerce").replace([float("inf"), float("-inf")], pd.NA).dropna()
+            if not close.empty:
+                prices[ticker] = float(close.iloc[-1])
         except Exception:
-            prices[ticker] = 0.0
+            pass
 
     return prices
 
 
-@st.cache_data(ttl=86400)
+@st.cache_data(ttl=YAHOO_METADATA_CACHE_TTL_SECONDS)
+def _latest_yahoo_metadata(
+    tickers: tuple[str, ...],
+    include_fast_info: bool = False,
+) -> dict[str, dict[str, object]]:
+    normalized_tickers = _normalize_yahoo_tickers(tickers)
+    metadata: dict[str, dict[str, object]] = {}
+    for ticker in normalized_tickers:
+        try:
+            proxy = yf.Ticker(ticker)
+            info = getattr(proxy, "info", {}) or {}
+            if not isinstance(info, dict):
+                info = dict(info)
+            record: dict[str, object] = {"info": _sanitize_export_value(dict(info))}
+            if include_fast_info:
+                fast_info = getattr(proxy, "fast_info", {}) or {}
+                record["fast_info"] = _sanitize_export_value(dict(fast_info)) if hasattr(fast_info, "items") else {}
+            metadata[ticker] = record
+        except Exception:
+            metadata[ticker] = {}
+    return metadata
+
+
+@st.cache_data(ttl=YAHOO_METADATA_CACHE_TTL_SECONDS)
 def _latest_sectors(tickers: tuple[str, ...]) -> dict[str, str]:
-    if not tickers:
+    normalized_tickers = _normalize_yahoo_tickers(tickers)
+    if not normalized_tickers:
         return {}
 
-    sectors: dict[str, str] = {}
-    for ticker in tickers:
-        try:
-            info = yf.Ticker(ticker).info
-            sector = _infer_sector_from_info(info)
-            sectors[ticker] = sector
-        except Exception:
-            sectors[ticker] = ""
-
-    return sectors
+    metadata = _latest_yahoo_metadata(normalized_tickers)
+    return {ticker: _infer_sector_from_info(metadata.get(ticker, {}).get("info", {})) for ticker in normalized_tickers}
 
 
-@st.cache_data(ttl=86400)
+@st.cache_data(ttl=YAHOO_METADATA_CACHE_TTL_SECONDS)
 def _latest_dividend_yields(tickers: tuple[str, ...]) -> dict[str, float]:
     """Return annual dividend yield percentages by ticker, e.g. 3.25 for 3.25%."""
-    if not tickers:
+    normalized_tickers = _normalize_yahoo_tickers(tickers)
+    if not normalized_tickers:
         return {}
 
+    metadata = _latest_yahoo_metadata(normalized_tickers)
     yields: dict[str, float] = {}
-    for ticker in tickers:
+    for ticker in normalized_tickers:
         try:
-            info = yf.Ticker(ticker).info
+            info = metadata.get(ticker, {}).get("info", {})
             raw_yield = info.get("trailingAnnualDividendYield")
             fallback_yield = info.get("dividendYield")
 
@@ -978,7 +1049,7 @@ def _latest_dividend_yields(tickers: tuple[str, ...]) -> dict[str, float]:
     return yields
 
 
-@st.cache_data(ttl=86400)
+@st.cache_data(ttl=DIVIDEND_TIMING_CACHE_TTL_SECONDS)
 def _latest_dividend_month_weights(tickers: tuple[str, ...]) -> dict[str, list[float]]:
     """Return per-ticker month weights (12 values summing to 1.0) from dividend history."""
     if not tickers:
@@ -1039,22 +1110,20 @@ def _infer_asset_type_from_info(info: dict) -> str:
     return "Stock"
 
 
-@st.cache_data(ttl=86400)
+@st.cache_data(ttl=YAHOO_METADATA_CACHE_TTL_SECONDS)
 def _latest_asset_type_hints(tickers: tuple[str, ...]) -> dict[str, str]:
-    if not tickers:
+    normalized_tickers = _normalize_yahoo_tickers(tickers)
+    if not normalized_tickers:
         return {}
 
+    metadata = _latest_yahoo_metadata(normalized_tickers)
     hints: dict[str, str] = {}
-    for ticker in tickers:
-        try:
-            info = yf.Ticker(ticker).info
-            hints[ticker] = _infer_asset_type_from_info(info)
-        except Exception:
-            hints[ticker] = "Stock"
+    for ticker in normalized_tickers:
+        hints[ticker] = _infer_asset_type_from_info(metadata.get(ticker, {}).get("info", {}))
     return hints
 
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=HISTORICAL_CONTEXT_CACHE_TTL_SECONDS)
 def _latest_historical_context(
     tickers: tuple[str, ...],
     history_start_date: str | None = None,
@@ -1196,13 +1265,13 @@ def _is_fund_like_quote_type(quote_type: object) -> bool:
     return normalized in {"ETF", "MUTUALFUND", "INDEX", "FUND"}
 
 
-def _extract_etf_intelligence(ticker_obj: object) -> dict[str, object] | None:
+def _extract_etf_intelligence(ticker_obj: object, fast_info: object | None = None) -> dict[str, object] | None:
     try:
         funds_data = getattr(ticker_obj, "funds_data", None)
         if funds_data is None:
             return None
 
-        fast_info = getattr(ticker_obj, "fast_info", {}) or {}
+        fast_info = fast_info if fast_info is not None else getattr(ticker_obj, "fast_info", {}) or {}
         if hasattr(fast_info, "get"):
             market_cap = fast_info.get("marketCap")
             last_price = fast_info.get("lastPrice")
@@ -1243,23 +1312,27 @@ def _extract_etf_intelligence(ticker_obj: object) -> dict[str, object] | None:
         return None
 
 
+@st.cache_data(ttl=INVESTMENT_INTELLIGENCE_CACHE_TTL_SECONDS)
 def _latest_investment_intelligence(tickers: tuple[str, ...]) -> dict[str, dict[str, object]]:
-    if not tickers:
+    normalized_tickers = _normalize_yahoo_tickers(tickers)
+    if not normalized_tickers:
         return {}
 
+    metadata = _latest_yahoo_metadata(normalized_tickers, include_fast_info=True)
     intelligence_map: dict[str, dict[str, object]] = {}
-    for ticker in tickers:
+    for ticker in normalized_tickers:
         try:
             proxy = yf.Ticker(ticker)
-            info = getattr(proxy, "info", {}) or {}
-            fast_info = getattr(proxy, "fast_info", {}) or {}
+            ticker_metadata = metadata.get(ticker, {})
+            info = ticker_metadata.get("info", {})
+            fast_info = ticker_metadata.get("fast_info", {})
 
             if not info and not fast_info:
                 continue
 
             quote_type = str(info.get("quoteType", "") or "").strip().upper()
             if _is_fund_like_quote_type(quote_type):
-                etf_intelligence = _extract_etf_intelligence(proxy)
+                etf_intelligence = _extract_etf_intelligence(proxy, fast_info=fast_info)
                 if etf_intelligence:
                     intelligence_map[ticker] = {
                         "ticker": ticker,
@@ -7203,22 +7276,32 @@ def main() -> None:
             st.caption("Compact mobile layouts are enabled.")
         if st.button("Force refresh all market data"):
             _latest_prices.clear()
+            _latest_yahoo_metadata.clear()
             _latest_sectors.clear()
             _latest_dividend_yields.clear()
             _latest_asset_type_hints.clear()
             _latest_dividend_month_weights.clear()
+            _latest_historical_context.clear()
+            _latest_fund_sector_weights.clear()
+            _latest_investment_intelligence.clear()
             st.success("All market-data caches cleared. Data will be fetched fresh now.")
         if st.button("Force price refresh"):
             _latest_prices.clear()
             st.success("Price cache cleared. Metrics will refresh now.")
         if st.button("Force sector refresh"):
+            _latest_yahoo_metadata.clear()
             _latest_sectors.clear()
+            _latest_investment_intelligence.clear()
             st.success("Sector cache cleared. Blank sectors will refill now.")
         if st.button("Force dividend refresh"):
+            _latest_yahoo_metadata.clear()
             _latest_dividend_yields.clear()
+            _latest_dividend_month_weights.clear()
             st.success("Dividend yield cache cleared. Dividend fields will refresh now.")
         if st.button("Force asset-type refresh"):
+            _latest_yahoo_metadata.clear()
             _latest_asset_type_hints.clear()
+            _latest_investment_intelligence.clear()
             st.success("Asset-type cache cleared. Default rows will be reclassified now.")
         if st.button("Reload holdings from disk"):
             st.session_state["holdings"] = _load_saved_holdings()

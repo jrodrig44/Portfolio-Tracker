@@ -10,6 +10,11 @@ from app import _build_ai_export_json, _build_data_completeness, _build_direct_s
 
 
 class ExportMarkdownTests(unittest.TestCase):
+    def setUp(self) -> None:
+        app._latest_yahoo_metadata.clear()
+        app._latest_dividend_yields.clear()
+        app._latest_investment_intelligence.clear()
+
     def test_coerce_numeric_columns_defaults_missing_contribution_columns_to_zero(self) -> None:
         frame = pd.DataFrame([{"ticker": "AAPL"}])
 
