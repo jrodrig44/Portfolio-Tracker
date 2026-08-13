@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import time
 from typing import Any, Iterable
 
 from dotenv import load_dotenv
@@ -47,6 +48,7 @@ from supplemental_research import (
     SUPPORTED_RESEARCH_MODELS,
     validated_research_model,
 )
+from logging_setup import configure_structured_logging, log_event
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
 
@@ -167,7 +169,8 @@ HOLDINGS_SCHEMA_COLUMNS = [
 ]
 
 VALID_TICKER_PATTERN = re.compile(r"^(?=.*[A-Z])[A-Z0-9.\-^]+$")
-LOGGER = logging.getLogger(__name__)
+STREAMLIT_LOG_PATH = Path(__file__).resolve().parent / "logs" / "streamlit.jsonl"
+LOGGER = configure_structured_logging("portfolio_tracker", STREAMLIT_LOG_PATH, "streamlit")
 
 
 def _use_export_json_data() -> bool:
@@ -810,6 +813,7 @@ def _load_saved_holdings() -> pd.DataFrame:
                 # Rewrite storage into the current schema during migration.
                 _save_holdings(normalized)
             if not normalized.empty:
+                log_event(LOGGER, "database_loaded", "Portfolio database loaded", active_holdings_count=len(normalized))
                 return normalized
         except Exception:
             pass
@@ -907,6 +911,7 @@ def _save_holdings(df: pd.DataFrame) -> None:
         conn.execute(f"DELETE FROM {HOLDINGS_TABLE}")
         normalized.to_sql(HOLDINGS_TABLE, conn, if_exists="append", index=False)
     SupplementalResearchService(DEFAULT_DB_PATH).sync_holdings(normalized["ticker"].tolist())
+    log_event(LOGGER, "holdings_saved", "Holdings saved", active_holdings_count=len(normalized))
 
 
 def _normalize_yahoo_tickers(tickers: tuple[str, ...]) -> tuple[str, ...]:
@@ -921,6 +926,8 @@ def _latest_prices(tickers: tuple[str, ...]) -> dict[str, float]:
 
     prices = {ticker: 0.0 for ticker in normalized_tickers}
     unresolved = set(normalized_tickers)
+    started_at = time.perf_counter()
+    log_event(LOGGER, "yahoo_price_batch_started", "Yahoo batch price retrieval started", requested_tickers_count=len(normalized_tickers))
 
     try:
         batch_history = yf.download(
@@ -962,6 +969,20 @@ def _latest_prices(tickers: tuple[str, ...]) -> dict[str, float]:
     except Exception:
         pass
 
+    log_event(
+        LOGGER,
+        "yahoo_price_batch_completed",
+        "Yahoo batch price retrieval completed",
+        duration_ms=round((time.perf_counter() - started_at) * 1000),
+        requested_tickers_count=len(normalized_tickers),
+        resolved_tickers_count=len(normalized_tickers) - len(unresolved),
+        fallback_tickers_count=len(unresolved),
+        status="completed",
+    )
+
+    fallback_started_at = time.perf_counter()
+    if unresolved:
+        log_event(LOGGER, "yahoo_price_fallback_started", "Yahoo per-ticker price fallback started", fallback_tickers_count=len(unresolved))
     for ticker in sorted(unresolved):
         try:
             history = yf.Ticker(ticker).history(period="5d")
@@ -974,6 +995,17 @@ def _latest_prices(tickers: tuple[str, ...]) -> dict[str, float]:
         except Exception:
             pass
 
+    if unresolved:
+        log_event(
+            LOGGER,
+            "yahoo_price_fallback_completed",
+            "Yahoo per-ticker price fallback completed",
+            duration_ms=round((time.perf_counter() - fallback_started_at) * 1000),
+            fallback_tickers_count=len(unresolved),
+            unresolved_tickers=sorted(unresolved),
+            status="completed",
+        )
+
     return prices
 
 
@@ -984,6 +1016,8 @@ def _latest_yahoo_metadata(
 ) -> dict[str, dict[str, object]]:
     normalized_tickers = _normalize_yahoo_tickers(tickers)
     metadata: dict[str, dict[str, object]] = {}
+    started_at = time.perf_counter()
+    log_event(LOGGER, "yahoo_metadata_cache_miss_started", "Yahoo metadata cache miss retrieval started", requested_tickers_count=len(normalized_tickers))
     for ticker in normalized_tickers:
         try:
             proxy = yf.Ticker(ticker)
@@ -997,6 +1031,15 @@ def _latest_yahoo_metadata(
             metadata[ticker] = record
         except Exception:
             metadata[ticker] = {}
+    log_event(
+        LOGGER,
+        "yahoo_metadata_cache_miss_completed",
+        "Yahoo metadata cache miss retrieval completed",
+        duration_ms=round((time.perf_counter() - started_at) * 1000),
+        requested_tickers_count=len(normalized_tickers),
+        resolved_tickers_count=sum(bool(record) for record in metadata.values()),
+        status="completed",
+    )
     return metadata
 
 
@@ -1319,6 +1362,8 @@ def _latest_investment_intelligence(tickers: tuple[str, ...]) -> dict[str, dict[
         return {}
 
     metadata = _latest_yahoo_metadata(normalized_tickers, include_fast_info=True)
+    started_at = time.perf_counter()
+    log_event(LOGGER, "investment_intelligence_cache_miss_started", "Investment Intelligence cache miss retrieval started", requested_tickers_count=len(normalized_tickers))
     intelligence_map: dict[str, dict[str, object]] = {}
     for ticker in normalized_tickers:
         try:
@@ -1445,6 +1490,15 @@ def _latest_investment_intelligence(tickers: tuple[str, ...]) -> dict[str, dict[
         except Exception:
             continue
 
+    log_event(
+        LOGGER,
+        "investment_intelligence_cache_miss_completed",
+        "Investment Intelligence cache miss retrieval completed",
+        duration_ms=round((time.perf_counter() - started_at) * 1000),
+        requested_tickers_count=len(normalized_tickers),
+        resolved_tickers_count=len(intelligence_map),
+        status="completed",
+    )
     return intelligence_map
 
 
@@ -7252,6 +7306,9 @@ def _render_last_updated_indicator() -> None:
 
 
 def main() -> None:
+    if not getattr(LOGGER, "_application_started_logged", False):
+        log_event(LOGGER, "application_started", "Portfolio Tracker started")
+        LOGGER._application_started_logged = True
     st.set_page_config(page_title="Dividend Portfolio Tracker", page_icon="📈", layout="wide")
     _enable_periodic_refresh(180000)
     _initialize_export_state()
@@ -7284,24 +7341,29 @@ def main() -> None:
             _latest_historical_context.clear()
             _latest_fund_sector_weights.clear()
             _latest_investment_intelligence.clear()
+            log_event(LOGGER, "market_cache_cleared", "All Yahoo market-data caches cleared", cache_name="all_market_data", operation="clear")
             st.success("All market-data caches cleared. Data will be fetched fresh now.")
         if st.button("Force price refresh"):
             _latest_prices.clear()
+            log_event(LOGGER, "market_cache_cleared", "Yahoo price cache cleared", cache_name="prices", operation="clear")
             st.success("Price cache cleared. Metrics will refresh now.")
         if st.button("Force sector refresh"):
             _latest_yahoo_metadata.clear()
             _latest_sectors.clear()
             _latest_investment_intelligence.clear()
+            log_event(LOGGER, "market_cache_cleared", "Yahoo sector caches cleared", cache_name="metadata_and_sector", operation="clear")
             st.success("Sector cache cleared. Blank sectors will refill now.")
         if st.button("Force dividend refresh"):
             _latest_yahoo_metadata.clear()
             _latest_dividend_yields.clear()
             _latest_dividend_month_weights.clear()
+            log_event(LOGGER, "market_cache_cleared", "Yahoo dividend caches cleared", cache_name="metadata_and_dividends", operation="clear")
             st.success("Dividend yield cache cleared. Dividend fields will refresh now.")
         if st.button("Force asset-type refresh"):
             _latest_yahoo_metadata.clear()
             _latest_asset_type_hints.clear()
             _latest_investment_intelligence.clear()
+            log_event(LOGGER, "market_cache_cleared", "Yahoo asset-type caches cleared", cache_name="metadata_and_asset_type", operation="clear")
             st.success("Asset-type cache cleared. Default rows will be reclassified now.")
         if st.button("Reload holdings from disk"):
             st.session_state["holdings"] = _load_saved_holdings()

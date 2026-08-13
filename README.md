@@ -100,6 +100,17 @@ python.exe supplemental_research_worker.py --once
 
 `start_streamlit.py` launches and stops the worker with the Streamlit process. Credit consumption varies by provider model, prompt size, and response length. Comprehensive reports remain available through the independent manual Markdown and JSON export workflow.
 
+### Local Logs
+
+The application writes local JSONL logs under `logs/`. `logs/streamlit.jsonl` records Streamlit lifecycle, Yahoo cache-miss, price fallback, and explicit cache-clear events. `logs/supplemental_research_worker.jsonl` records independent worker checks, leases, research outcomes, and sleep/shutdown events. Logs rotate at local midnight and retain up to 14 daily backups. They remain local and are ignored by Git.
+
+Selecting an AI model does not create an API request. Only explicit research actions or eligible worker jobs make research requests. To watch a log in PowerShell:
+
+```powershell
+Get-Content ".\logs\supplemental_research_worker.jsonl" -Wait
+Get-Content ".\logs\streamlit.jsonl" -Wait
+```
+
 ### Manual Markdown and JSON Exports
 
 Manual exports are independent of built-in AI Analysis. Exporting does not require a 1min.AI API key, and the built-in AI feature does not replace, disable, or modify the export workflow. Export contents reflect the current portfolio snapshot and tracker methodology.

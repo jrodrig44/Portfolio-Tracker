@@ -16,3 +16,9 @@ data/stash_statement_history.sqlite
 
 # Runtime logs
 data/app_access_log.jsonl
+
+# Local rotating logs
+logs/
+*.log
+*.log.*
+*.jsonl.*
