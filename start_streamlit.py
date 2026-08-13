@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import sys
 from pathlib import Path
 
@@ -18,8 +19,19 @@ def main() -> int:
 
     from streamlit.web import cli as stcli
 
-    sys.argv = ["streamlit", "run", str(app_path)]
-    return int(stcli.main())
+    worker_path = project_root / "supplemental_research_worker.py"
+    worker = subprocess.Popen([sys.executable, str(worker_path)], cwd=project_root)
+    try:
+        sys.argv = ["streamlit", "run", str(app_path)]
+        return int(stcli.main())
+    finally:
+        if worker.poll() is None:
+            worker.terminate()
+            try:
+                worker.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                worker.kill()
+                worker.wait()
 
 
 if __name__ == "__main__":

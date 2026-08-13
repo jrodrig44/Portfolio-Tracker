@@ -91,7 +91,7 @@ class OneMinAIClient:
     def chat_url(self) -> str:
         return f"{self.base_url}{ONEMIN_AI_CHAT_ENDPOINT_PATH}"
 
-    def chat_with_ai(self, *, model: str, prompt: str) -> OneMinAIChatResult:
+    def chat_with_ai(self, *, model: str, prompt: str, web_search: bool = False) -> OneMinAIChatResult:
         model_id = str(model or "").strip()
         prompt_text = str(prompt or "")
         if not self.has_api_key:
@@ -108,7 +108,7 @@ class OneMinAIClient:
                 "prompt": prompt_text,
                 "settings": {
                     "withMemories": False,
-                    "webSearchSettings": {"webSearch": False},
+                    "webSearchSettings": {"webSearch": bool(web_search)},
                 },
             },
         }

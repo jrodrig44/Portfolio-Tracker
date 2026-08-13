@@ -75,6 +75,13 @@ class OneMinAIClientTests(unittest.TestCase):
         self.assertNotIn("conversationId", payload["promptObject"])
         self.assertNotIn("attachments", payload["promptObject"])
 
+    def test_request_can_explicitly_enable_web_search(self) -> None:
+        client = self._client()
+        with patch("onemin_ai_client.httpx.post", return_value=_response(_success_response())) as post_mock:
+            client.chat_with_ai(model="gpt-4.1-mini", prompt="Research ETF objective", web_search=True)
+        payload = post_mock.call_args.kwargs["json"]
+        self.assertTrue(payload["promptObject"]["settings"]["webSearchSettings"]["webSearch"])
+
     def test_default_configuration_and_timeout_fallbacks(self) -> None:
         self.assertEqual(OneMinAIClient(api_key="key").base_url, ONEMIN_AI_DEFAULT_BASE_URL)
         self.assertEqual(ONEMIN_AI_DEFAULT_MODEL, "gpt-5.6-sol")
@@ -275,7 +282,7 @@ class AppAIConfigurationTests(unittest.TestCase):
         state: dict[str, object] = {"ai_analysis_model": "gpt-4.1-mini"}
         action = SimpleNamespace(button=MagicMock(return_value=False))
         clear = SimpleNamespace(button=MagicMock(return_value=False))
-        with patch.object(app.st, "session_state", state), patch.dict(os.environ, {"ONEMIN_AI_API_KEY": "test-key", "ONEMIN_AI_MODEL": "gpt-4.1-mini"}, clear=False), patch.object(app.st, "subheader"), patch.object(app.st, "caption") as caption, patch.object(app.st, "info"), patch.object(app.st, "selectbox", side_effect=["gpt-4.1-mini", AI_ANALYSIS_TYPES[0]]) as selectbox, patch.object(app.st, "text_area"), patch.object(app.st, "columns", return_value=[action, clear]):
+        with patch.object(app.st, "session_state", state), patch.dict(os.environ, {"ONEMIN_AI_API_KEY": "test-key", "ONEMIN_AI_MODEL": "gpt-4.1-mini"}, clear=False), patch.object(app.st, "subheader"), patch.object(app.st, "caption") as caption, patch.object(app.st, "info"), patch.object(app.st, "selectbox", side_effect=["gpt-4.1-mini", AI_ANALYSIS_TYPES[0], "gpt-4.1-mini", "HD"]) as selectbox, patch.object(app.st, "text_area"), patch.object(app.st, "columns", return_value=[action, clear]):
             app._render_ai_analysis_tab(holdings, metrics)
         self.assertEqual(selectbox.call_args_list[0].kwargs["format_func"]("gpt-4.1-mini"), "GPT-4.1 Mini")
         self.assertEqual(selectbox.call_args_list[0].kwargs["options"][0], "gpt-4.1-mini")

@@ -84,6 +84,22 @@ ONEMIN_AI_TIMEOUT_SECONDS=180
 
 Restart the application after changing `.env`. The repository ignores `.env`; never commit it or put a real key in `.env.example`.
 
+### Supplemental Investment Research
+
+Supplemental Investment Research is separate from Portfolio Analysis. Yahoo Finance remains the primary source for prices, dividends, fundamentals, classifications, market values, cost basis, income, projections, and portfolio calculations. 1min.AI web research fills only missing descriptive context such as fund objectives, expense ratios, property focus, geographic exposure, distribution policy, risk characteristics, and recent structural developments. It never overwrites Yahoo or user-entered financial data.
+
+The research model selector focuses on lightweight models and does not use the temporary Portfolio Analysis selection. GPT-4.1 Mini (`gpt-4.1-mini`) is the default research model. Gemini 2.5 Flash (`gemini-2.5-flash`) is useful for fast analysis of larger contexts, Claude Haiku 4.5 (`claude-haiku-4-5-20251001`) for careful explanations and detailed instructions, and GPT-4o Mini (`gpt-4o-mini`) is the economical fallback. The selected raw model identifier is stored locally and survives browser refreshes and application restarts.
+
+Research is never triggered by opening, refreshing, rerunning, or switching tabs, refreshing Yahoo data, or saving a holding. New holdings start as **Missing** and require an explicit **Research Selected Holding** action. The AI Analysis tab also provides **Refresh Due Holdings** for successful research older than approximately 30 days and **Force Refresh All Holdings**, which requires confirmation and may use more credits. Each result displays its status, model, retrieval dates, verified supplemental facts, sanitized HTTPS source links, AI interpretation, limitations, and unresolved fields. Failed refreshes preserve the previous successful result.
+
+The monthly worker runs independently of browser sessions alongside Streamlit. Keep the Streamlit server and worker process running; the website does not need to remain open. The worker checks approximately every six hours, uses a persisted SQLite lease to prevent overlapping jobs, and can be exercised once without sleeping:
+
+```text
+python.exe supplemental_research_worker.py --once
+```
+
+`start_streamlit.py` launches and stops the worker with the Streamlit process. Credit consumption varies by provider model, prompt size, and response length. Comprehensive reports remain available through the independent manual Markdown and JSON export workflow.
+
 ### Manual Markdown and JSON Exports
 
 Manual exports are independent of built-in AI Analysis. Exporting does not require a 1min.AI API key, and the built-in AI feature does not replace, disable, or modify the export workflow. Export contents reflect the current portfolio snapshot and tracker methodology.

@@ -38,6 +38,14 @@ from onemin_ai_client import (
     OneMinAIUnsupportedModelError,
     messages_to_prompt,
 )
+from supplemental_research import (
+    DEFAULT_RESEARCH_MODEL,
+    SupplementalResearchService,
+    get_research_rows,
+    get_setting,
+    research_is_due,
+    set_setting,
+)
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
 
@@ -891,6 +899,7 @@ def _save_holdings(df: pd.DataFrame) -> None:
         _ensure_holdings_table_schema(conn)
         conn.execute(f"DELETE FROM {HOLDINGS_TABLE}")
         normalized.to_sql(HOLDINGS_TABLE, conn, if_exists="append", index=False)
+    SupplementalResearchService(DEFAULT_DB_PATH).sync_holdings(normalized["ticker"].tolist())
 
 
 @st.cache_data(ttl=60)
@@ -6182,6 +6191,83 @@ def _format_onemin_ai_response_diagnostic(diagnostic: object) -> str:
     return "\n".join(lines)
 
 
+def _supplemental_research_contexts(holdings: pd.DataFrame, metrics: pd.DataFrame) -> dict[str, dict[str, object]]:
+    contexts: dict[str, dict[str, object]] = {}
+    normalized = _normalize_columns(holdings, drop_blank_tickers=True)
+    for _, holding in normalized.iterrows():
+        ticker = str(holding.get("ticker", "")).strip().upper()
+        if not ticker:
+            continue
+        matching_metrics = metrics[metrics["ticker"].eq(ticker)] if "ticker" in metrics.columns else pd.DataFrame()
+        metric = matching_metrics.iloc[0].to_dict() if not matching_metrics.empty else {}
+        contexts[ticker] = {
+            "ticker": ticker,
+            "entity_name": ticker,
+            "asset_type": str(holding.get("asset_type") or "Unknown"),
+            "sector": str(holding.get("sector") or "Unknown"),
+            "missing_fields": ["strategy_objective", "risk_characteristics", "recent_structural_developments"],
+            "existing_yahoo_information": {
+                "sector": holding.get("sector") or "",
+                "asset_type": holding.get("asset_type") or "",
+                "current_price": metric.get("current_price", ""),
+                "dividend_yield_pct": metric.get("dividend_yield_pct", ""),
+                "annual_div_per_share": holding.get("annual_div_per_share", ""),
+            },
+        }
+    return contexts
+
+
+def _render_supplemental_research(holdings: pd.DataFrame, metrics: pd.DataFrame) -> None:
+    st.markdown("#### Supplemental Investment Research")
+    st.caption("Yahoo Finance remains the primary source for prices, dividends, calculations, and classifications. This feature researches only missing descriptive context through 1min.AI web search.")
+    contexts = _supplemental_research_contexts(holdings, metrics)
+    service = SupplementalResearchService(DEFAULT_DB_PATH)
+    service.sync_holdings(contexts.keys())
+    tickers = sorted(contexts)
+    if not tickers:
+        st.info("Add a holding before requesting supplemental research.")
+        return
+    configured_model = get_setting(DEFAULT_DB_PATH, "supplemental_research_model", DEFAULT_RESEARCH_MODEL)
+    model_options = list(ONEMIN_AI_RECOMMENDED_MODELS)
+    if configured_model not in model_options:
+        model_options.insert(0, configured_model)
+    selected_model = st.selectbox("Supplemental Research Model", options=model_options, index=model_options.index(configured_model), format_func=_onemin_ai_model_label, key="supplemental_research_model_selector")
+    if str(selected_model) != configured_model:
+        set_setting(DEFAULT_DB_PATH, "supplemental_research_model", str(selected_model))
+        configured_model = str(selected_model)
+    selected_ticker = st.selectbox("Research Holding", options=tickers, key="supplemental_research_ticker")
+    research_clicked = st.button("Research Selected Holding", key="supplemental_research_selected")
+    due_clicked = st.button("Refresh Due Holdings", key="supplemental_research_due")
+    force_confirmed = st.checkbox("I understand that refreshing all eligible holdings may use more credits.", key="supplemental_research_force_confirm")
+    force_clicked = st.button("Force Refresh All Holdings", key="supplemental_research_force")
+    if research_clicked:
+        with st.spinner(f"Researching {selected_ticker} through 1min.AI..."):
+            result = service.research_ticker(selected_ticker, contexts[selected_ticker], configured_model, manual=True, force=True)
+        st.success(f"Supplemental research completed for {selected_ticker}.") if result.get("status") == "current" else st.error(str(result.get("error") or result.get("reason") or "Supplemental research did not complete."))
+    if due_clicked:
+        results = service.refresh_due(contexts, configured_model)
+        st.info(f"Processed {len(results)} due holding(s)." if results else "No supplemental research is due.")
+    if force_clicked:
+        if not force_confirmed:
+            st.warning("Confirm the credit-use warning before forcing a refresh.")
+        else:
+            results = service.refresh_due(contexts, configured_model, force=True)
+            st.info(f"Processed {len(results)} eligible holding(s).")
+    rows = get_research_rows(DEFAULT_DB_PATH, tickers)
+    table = []
+    for row in rows:
+        parsed = json.loads(row.get("research_json") or "{}")
+        sources = json.loads(row.get("sources_json") or "[]")
+        status = str(row.get("research_status", "missing"))
+        if status == "current" and research_is_due(row):
+            status = "due"
+        table.append({"Ticker": row["ticker"], "Status": status.title(), "Last Successful Research": row.get("last_success_at") or "Never", "Next Scheduled Refresh": row.get("next_due_at") or "Not scheduled", "Model Used": row.get("model_used") or "-", "Verified Facts": len(parsed.get("verified_facts", [])), "Sources": len(sources), "Last Error": str(row.get("error_message") or "")[:160]})
+    st.dataframe(pd.DataFrame(table), width="stretch", hide_index=True)
+    selected_rows = [row for row in rows if row["ticker"] == selected_ticker]
+    if selected_rows and selected_rows[0].get("research_markdown"):
+        st.markdown(selected_rows[0]["research_markdown"])
+
+
 def _run_onemin_ai_analysis(holdings: pd.DataFrame, metrics: pd.DataFrame) -> None:
     selected_model = str(st.session_state["ai_analysis_model"])
     selected_type = str(st.session_state["ai_analysis_type"])
@@ -6268,7 +6354,6 @@ def _run_onemin_ai_analysis(holdings: pd.DataFrame, metrics: pd.DataFrame) -> No
         st.session_state["ai_analysis_last_stage"] = "error"
     finally:
         st.session_state["ai_analysis_busy"] = False
-
 
 def _render_ai_analysis_tab(holdings: pd.DataFrame, metrics: pd.DataFrame, mobile_mode: bool = False) -> None:
     if not _ai_analysis_enabled():
@@ -6377,6 +6462,8 @@ def _render_ai_analysis_tab(holdings: pd.DataFrame, metrics: pd.DataFrame, mobil
             file_name="ai_analysis.md",
             mime="text/markdown",
         )
+
+    _render_supplemental_research(holdings, metrics)
 
 
 def _render_health_tab(metrics: pd.DataFrame, mobile_mode: bool = False) -> None:
