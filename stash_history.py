@@ -1,117 +1,220 @@
 from __future__ import annotations
 
 import hashlib
+import math
+import re
 import sqlite3
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
+from pypdf import PdfReader
 
 
-HISTORY_DB_SCHEMA_VERSION = 1
+PROJECT_ROOT = Path(__file__).resolve().parent
+DATA_DIR = PROJECT_ROOT / "data"
+STATEMENTS_DIR = PROJECT_ROOT / "Statements"
+STATEMENT_HISTORY_DB_PATH = DATA_DIR / "stash_statement_history.sqlite"
+PARSER_VERSION = "stash-pdf-v1"
+EARLIEST_EXPECTED_DATE = date(2021, 8, 1)
+_DATE_PATTERN = r"(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},?\s+\d{4})"
+_RANGE_PATTERN = re.compile(rf"(?:statement\s+period|period|from)\s*:?\s*({_DATE_PATTERN})\s*(?:-|to|through)\s*({_DATE_PATTERN})", re.IGNORECASE)
+_HEADER_RANGE_PATTERN = re.compile(rf"({_DATE_PATTERN})\s*(?:-|to|through)\s*({_DATE_PATTERN})", re.IGNORECASE)
 
 
 def _hash_bytes(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
-def _ensure_history_schema(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS statement_history_imports (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_name TEXT NOT NULL,
-            source_hash TEXT NOT NULL,
-            statement_date TEXT NOT NULL,
-            imported_at TEXT NOT NULL,
-            source_path TEXT NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS statement_history_holdings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            import_id INTEGER NOT NULL,
-            ticker TEXT NOT NULL,
-            shares REAL NOT NULL,
-            market_value REAL NOT NULL,
-            FOREIGN KEY(import_id) REFERENCES statement_history_imports(id)
-        )
-        """
-    )
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_statement_history_imports_date ON statement_history_imports(statement_date)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_statement_history_holdings_ticker ON statement_history_holdings(ticker)")
+def _parse_date(value: str) -> date | None:
+    cleaned = value.strip().replace(".", "")
+    for pattern in ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%m/%d/%y", "%B %d, %Y", "%b %d, %Y", "%B %d %Y", "%b %d %Y"):
+        try:
+            return datetime.strptime(cleaned, pattern).date()
+        except ValueError:
+            continue
+    return None
 
 
-def import_stash_statement_history(source_dir: str | Path, db_path: str | Path | None = None) -> dict[str, Any]:
-    """Disable statement imports until a real local Stash parser is implemented."""
-    return {"import_count": 0, "holding_count": 0, "status": "disabled"}
+def _parse_currency(value: str) -> float | None:
+    normalized = value.replace("$", "").replace(",", "").strip()
+    negative = normalized.startswith("(") and normalized.endswith(")")
+    try:
+        parsed = float(normalized.strip("()"))
+    except ValueError:
+        return None
+    return (-parsed if negative else parsed) if math.isfinite(parsed) else None
 
 
-def build_statement_history_reconciliation(current_holdings: pd.DataFrame, db_path: str | Path | None = None) -> list[dict[str, Any]]:
-    db = Path(db_path) if db_path is not None else Path("data") / "stash_statement_history.sqlite"
-    if not db.exists():
-        return []
+def _value_after_label(text: str, labels: tuple[str, ...]) -> float | None:
+    currency = r"(\(?\s*\$?\s*[\d,]+(?:\.\d{2})?\s*\)?)"
+    for label in labels:
+        match = re.search(rf"{label}\s*:?\s*{currency}", text, re.IGNORECASE)
+        if match:
+            value = _parse_currency(match.group(1))
+            if value is not None:
+                return value
+    return None
 
-    with closing(sqlite3.connect(str(db))) as conn:
-        rows = conn.execute(
-            """
-            SELECT ticker, SUM(shares) AS shares, SUM(market_value) AS market_value
-            FROM statement_history_holdings
-            GROUP BY ticker
-            """
-        ).fetchall()
 
-    current = current_holdings.copy() if isinstance(current_holdings, pd.DataFrame) else pd.DataFrame(current_holdings or [])
-    if current.empty:
-        current = pd.DataFrame(columns=["ticker", "shares", "market_value"])
-    else:
-        current = current.copy()
-        if "ticker" in current.columns:
-            current["ticker"] = current["ticker"].fillna("").astype(str).str.strip().str.upper()
-        else:
-            current["ticker"] = ""
-        if "shares" in current.columns:
-            current["shares"] = pd.to_numeric(current["shares"], errors="coerce").fillna(0.0)
-        else:
-            current["shares"] = 0.0
-        if "market_value" in current.columns:
-            current["market_value"] = pd.to_numeric(current["market_value"], errors="coerce").fillna(0.0)
-        else:
-            current["market_value"] = 0.0
+def extract_pdf_text(pdf_path: Path) -> str:
+    reader = PdfReader(str(pdf_path))
+    return "\n".join(page.extract_text() or "" for page in reader.pages)
 
-    current_lookup = {
-        str(row.get("ticker", "")).strip().upper(): row for _, row in current.iterrows() if str(row.get("ticker", "")).strip()
+
+def parse_statement_text(text: str) -> dict[str, Any]:
+    period = _HEADER_RANGE_PATTERN.search("\n".join(text.splitlines()[:10])) or _RANGE_PATTERN.search(text)
+    start_date = _parse_date(period.group(1)) if period else None
+    end_date = _parse_date(period.group(2)) if period else None
+    if end_date is None:
+        ending_match = re.search(rf"(?:ending|as\s+of)\s*:?\s*({_DATE_PATTERN})", text, re.IGNORECASE)
+        end_date = _parse_date(ending_match.group(1)) if ending_match else None
+    return {
+        "statement_start_date": start_date.isoformat() if start_date else None,
+        "statement_end_date": end_date.isoformat() if end_date else None,
+        "portfolio_value": _value_after_label(text, ("net\\s+account\\s+balance", "total\\s+equity", "ending\\s+(?:account|portfolio)\\s+value", "total\\s+(?:account|portfolio)\\s+value", "account\\s+value", "portfolio\\s+value")),
+        "invested_value": _value_after_label(text, ("invested\\s+(?:securities\\s+)?value", "securities\\s+value")),
+        "cash_value": _value_after_label(text, ("cash\\s+balance", "cash\\s+value")),
+        "cost_basis": _value_after_label(text, ("total\\s+cost\\s+basis", "cost\\s+basis")),
+        "contribution_amount": _value_after_label(text, ("(?:contributions|deposits)\\s+(?:during|for)\\s+(?:the\\s+)?period",)),
+        "withdrawal_amount": _value_after_label(text, ("withdrawals?\\s+(?:during|for)\\s+(?:the\\s+)?period",)),
     }
-    statement_lookup = {
-        str(ticker).strip().upper(): {"statement_shares": float(shares or 0.0), "statement_market_value": float(market_value or 0.0)}
-        for ticker, shares, market_value in rows
-    }
-    all_tickers = sorted(set(current_lookup) | set(statement_lookup))
-    reconciliation: list[dict[str, Any]] = []
-    for ticker_key in all_tickers:
-        current_row = current_lookup.get(ticker_key, {})
-        statement_row = statement_lookup.get(ticker_key, {})
-        if hasattr(current_row, "get"):
-            current_shares = float(current_row.get("shares", 0.0) or 0.0)
-            current_market_value = float(current_row.get("market_value", 0.0) or 0.0)
-        else:
-            current_shares = 0.0
-            current_market_value = 0.0
-        excluded = ticker_key in {"HD", "JEPI"}
-        reconciliation.append(
-            {
-                "ticker": ticker_key,
-                "statement_shares": float(statement_row.get("statement_shares", 0.0) or 0.0),
-                "statement_market_value": float(statement_row.get("statement_market_value", 0.0) or 0.0),
-                "current_shares": current_shares,
-                "current_market_value": current_market_value,
-                "excluded": excluded,
-                "reconciliation_note": "Excluded from reconciliation" if excluded else "Pending review",
-            }
-        )
 
-    return reconciliation
+
+def _validate_record(record: dict[str, Any]) -> tuple[str, str]:
+    end_date_text = record.get("statement_end_date")
+    end_date = _parse_date(str(end_date_text)) if end_date_text else None
+    start_date_text = record.get("statement_start_date")
+    start_date = _parse_date(str(start_date_text)) if start_date_text else None
+    value = record.get("portfolio_value")
+    if end_date is None:
+        return "needs_review", "Statement ending date was not found."
+    if end_date < EARLIEST_EXPECTED_DATE:
+        return "needs_review", "Statement ending date is outside expected coverage."
+    if start_date and end_date < start_date:
+        return "needs_review", "Statement ending date precedes its start date."
+    if not isinstance(value, (int, float)) or not math.isfinite(float(value)) or value < 0:
+        return "needs_review", "Ending portfolio value is missing or invalid."
+    invested_value, cash_value = record.get("invested_value"), record.get("cash_value")
+    if all(isinstance(item, (int, float)) for item in (invested_value, cash_value)):
+        if abs(float(invested_value) + float(cash_value) - float(value)) > max(1.0, float(value) * 0.01):
+            return "needs_review", "Invested and cash values differ materially from the ending total."
+    return "valid", "Ready to import."
+
+
+def scan_local_statements(source_dir: Path = STATEMENTS_DIR) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for pdf_path in sorted(source_dir.glob("*.pdf")):
+        try:
+            content = pdf_path.read_bytes()
+            text = extract_pdf_text(pdf_path)
+            if not text.strip():
+                records.append({"source_hash": _hash_bytes(content), "status": "unparseable", "warning": "No extractable statement text.", "source_path": pdf_path})
+                continue
+            record = parse_statement_text(text)
+            record["source_hash"] = _hash_bytes(content)
+            record["source_path"] = pdf_path
+            record["status"], record["warning"] = _validate_record(record)
+            records.append(record)
+        except Exception:
+            records.append({"source_hash": None, "status": "unparseable", "warning": "Statement could not be parsed locally.", "source_path": pdf_path})
+    return records
+
+
+def ensure_history_schema(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> None:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS statement_imports (id INTEGER PRIMARY KEY AUTOINCREMENT, source_hash TEXT NOT NULL UNIQUE, statement_start_date TEXT, statement_end_date TEXT NOT NULL, imported_at TEXT NOT NULL, parser_version TEXT NOT NULL, status TEXT NOT NULL, warning_count INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS statement_portfolio_history (id INTEGER PRIMARY KEY AUTOINCREMENT, import_id INTEGER NOT NULL, history_date TEXT NOT NULL, portfolio_value REAL NOT NULL, invested_value REAL, cash_value REAL, cost_basis REAL, contribution_amount REAL, withdrawal_amount REAL, source_type TEXT NOT NULL DEFAULT 'stash_statement', FOREIGN KEY(import_id) REFERENCES statement_imports(id), UNIQUE(history_date, source_type));
+            CREATE INDEX IF NOT EXISTS idx_statement_history_date ON statement_portfolio_history(history_date);
+        """)
+
+
+def history_summary(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> dict[str, int]:
+    if not db_path.exists():
+        return {"imported": 0, "history_records": 0}
+    with closing(sqlite3.connect(db_path)) as conn:
+        return {"imported": int(conn.execute("SELECT COUNT(*) FROM statement_imports").fetchone()[0]), "history_records": int(conn.execute("SELECT COUNT(*) FROM statement_portfolio_history").fetchone()[0])}
+
+
+def classify_scan(records: list[dict[str, Any]], db_path: Path = STATEMENT_HISTORY_DB_PATH) -> list[dict[str, Any]]:
+    imported_hashes: set[str] = set()
+    existing_dates: dict[str, float] = {}
+    if db_path.exists():
+        with closing(sqlite3.connect(db_path)) as conn:
+            imported_hashes = {str(row[0]) for row in conn.execute("SELECT source_hash FROM statement_imports")}
+            existing_dates = {str(row[0]): float(row[1]) for row in conn.execute("SELECT history_date, portfolio_value FROM statement_portfolio_history")}
+    classified: list[dict[str, Any]] = []
+    for record in records:
+        safe_record = dict(record)
+        if safe_record.get("source_hash") in imported_hashes:
+            safe_record["status"], safe_record["warning"] = "duplicate", "Previously imported."
+        elif safe_record.get("status") == "valid" and safe_record.get("statement_end_date") in existing_dates:
+            if abs(existing_dates[str(safe_record["statement_end_date"])] - float(safe_record["portfolio_value"])) > 0.01:
+                safe_record["status"], safe_record["warning"] = "needs_review", "A different value already exists for this date."
+            else:
+                safe_record["status"], safe_record["warning"] = "duplicate", "A matching statement date already exists."
+        classified.append(safe_record)
+    return classified
+
+
+def import_validated_history(records: list[dict[str, Any]], db_path: Path = STATEMENT_HISTORY_DB_PATH) -> dict[str, int]:
+    ensure_history_schema(db_path)
+    result = {"imported": 0, "duplicates": 0, "needs_review": 0, "unparseable": 0}
+    with closing(sqlite3.connect(db_path)) as conn:
+        try:
+            conn.execute("BEGIN")
+            for record in records:
+                status = record.get("status")
+                if status == "duplicate": result["duplicates"] += 1; continue
+                if status == "unparseable": result["unparseable"] += 1; continue
+                if status != "valid": result["needs_review"] += 1; continue
+                try:
+                    cursor = conn.execute("INSERT INTO statement_imports (source_hash, statement_start_date, statement_end_date, imported_at, parser_version, status, warning_count) VALUES (?, ?, ?, ?, ?, ?, ?)", (record["source_hash"], record.get("statement_start_date"), record["statement_end_date"], datetime.now(timezone.utc).isoformat(timespec="seconds"), PARSER_VERSION, "imported", 0))
+                    conn.execute("INSERT INTO statement_portfolio_history (import_id, history_date, portfolio_value, invested_value, cash_value, cost_basis, contribution_amount, withdrawal_amount) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (cursor.lastrowid, record["statement_end_date"], record["portfolio_value"], record.get("invested_value"), record.get("cash_value"), record.get("cost_basis"), record.get("contribution_amount"), record.get("withdrawal_amount")))
+                    result["imported"] += 1
+                except sqlite3.IntegrityError:
+                    result["duplicates"] += 1
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    return result
+
+
+def load_statement_history(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> list[dict[str, Any]]:
+    if not db_path.exists(): return []
+    with closing(sqlite3.connect(db_path)) as conn:
+        rows = conn.execute("SELECT history_date, portfolio_value, source_type FROM statement_portfolio_history ORDER BY history_date").fetchall()
+    return [{"history_date": row[0], "portfolio_value": float(row[1]), "source_type": row[2]} for row in rows]
+
+
+def delete_imported_history(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> None:
+    if db_path.exists():
+        with closing(sqlite3.connect(db_path)) as conn:
+            conn.execute("DELETE FROM statement_portfolio_history")
+            conn.execute("DELETE FROM statement_imports")
+
+
+def is_placeholder_database(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> bool:
+    if not db_path.exists(): return False
+    with closing(sqlite3.connect(db_path)) as conn:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    return {"statement_history_imports", "statement_history_holdings"}.issubset(tables)
+
+
+def prepare_history_database(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> None:
+    """Create the current schema, replacing only the known fabricated legacy database."""
+    if is_placeholder_database(db_path):
+        with closing(sqlite3.connect(db_path)) as conn:
+            fabricated_only = conn.execute(
+                "SELECT COUNT(*) FROM statement_history_holdings WHERE ticker NOT IN ('AAPL', 'JEPI') OR shares NOT IN (10.0, 5.0) OR market_value NOT IN (1000.0, 250.0)"
+            ).fetchone()[0] == 0
+        if not fabricated_only:
+            raise RuntimeError("The existing statement history database cannot be identified as placeholder data.")
+        db_path.unlink()
+        for suffix in ("-wal", "-shm", "-journal"):
+            db_path.with_name(db_path.name + suffix).unlink(missing_ok=True)
+    ensure_history_schema(db_path)

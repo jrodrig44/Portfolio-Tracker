@@ -21,6 +21,7 @@ import yfinance as yf
 from ai_analysis_prompt import AI_ANALYSIS_TYPES, build_ai_analysis_markdown, build_ai_analysis_messages, format_ai_analysis_markdown
 from health_engine import compute_portfolio_health as compute_portfolio_health_engine
 from portfolio_intelligence import compute_portfolio_intelligence
+from stash_history import classify_scan, delete_imported_history, history_summary, import_validated_history, load_statement_history, prepare_history_database, scan_local_statements
 from onemin_ai_client import (
     ONEMIN_AI_DEFAULT_BASE_URL,
     ONEMIN_AI_DEFAULT_CONNECT_TIMEOUT_SECONDS,
@@ -56,6 +57,7 @@ DATA_DIR = PROJECT_ROOT / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATEMENTS_DIR = PROJECT_ROOT / "Statements"
 STATEMENTS_DIR.mkdir(parents=True, exist_ok=True)
+STATEMENT_HISTORY_DB_PATH = DATA_DIR / "stash_statement_history.sqlite"
 DEFAULT_DB_PATH = DATA_DIR / "portfolio.db"
 LEGACY_CSV_PATH = DATA_DIR / "holdings.csv"
 HOLDINGS_TABLE = "holdings"
@@ -5328,6 +5330,69 @@ def _build_portfolio_analysis_summary(
     }
 
 
+def _statement_preview_rows(records: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [{"Statement start date": row.get("statement_start_date") or "-", "Statement end date": row.get("statement_end_date") or "-", "Ending portfolio value": row.get("portfolio_value"), "Invested value": row.get("invested_value"), "Cash value": row.get("cash_value"), "Validation status": row.get("status"), "Warning": row.get("warning")} for row in records]
+
+
+def _render_statement_history_import(total_value: float) -> None:
+    with st.expander("Statement History Import", expanded=False):
+        pdf_count, _ = _local_statement_status()
+        summary = history_summary(STATEMENT_HISTORY_DB_PATH)
+        records = st.session_state.get("statement_history_scan", [])
+        records = records if isinstance(records, list) else []
+        counts = {status: sum(1 for row in records if row.get("status") == status) for status in ("valid", "duplicate", "needs_review", "unparseable")}
+        for label, value in (("Local statement folder", "Ready"), ("PDFs detected", pdf_count), ("Previously imported", summary["imported"]), ("Ready to import", counts["valid"]), ("Duplicates", counts["duplicate"]), ("Needs review", counts["needs_review"]), ("Unparseable", counts["unparseable"])):
+            st.caption(f"{label}: {value}")
+        if st.button("Scan Local Statements", key="scan_local_statements"):
+            started_at = time.perf_counter()
+            log_event(LOGGER, "statement_scan_started", "Local statement scan started", pdf_count=pdf_count, parser_version="stash-pdf-v1")
+            try:
+                prepare_history_database(STATEMENT_HISTORY_DB_PATH)
+                scanned = classify_scan(scan_local_statements(STATEMENTS_DIR), STATEMENT_HISTORY_DB_PATH)
+                st.session_state["statement_history_scan"] = scanned
+                records = scanned
+                counts = {status: sum(1 for row in scanned if row.get("status") == status) for status in counts}
+                log_event(LOGGER, "statement_scan_completed", "Local statement scan completed", pdf_count=pdf_count, ready_count=counts["valid"], duplicate_count=counts["duplicate"], failed_count=counts["needs_review"] + counts["unparseable"], duration_ms=round((time.perf_counter() - started_at) * 1000), parser_version="stash-pdf-v1", status="completed")
+            except Exception:
+                log_event(LOGGER, "statement_scan_completed", "Local statement scan completed", pdf_count=pdf_count, failed_count=pdf_count, duration_ms=round((time.perf_counter() - started_at) * 1000), parser_version="stash-pdf-v1", status="failed")
+                st.error("The local statement scan could not complete. No statement data was imported.")
+        if records:
+            st.dataframe(pd.DataFrame(_statement_preview_rows(records)).style.format({"Ending portfolio value": "${:,.2f}", "Invested value": "${:,.2f}", "Cash value": "${:,.2f}"}, na_rep="-"), width="stretch", hide_index=True)
+            if st.button("Import Validated History", key="import_validated_history"):
+                started_at = time.perf_counter()
+                log_event(LOGGER, "statement_import_started", "Validated statement import started", ready_count=counts["valid"], parser_version="stash-pdf-v1")
+                try:
+                    result = import_validated_history(records, STATEMENT_HISTORY_DB_PATH)
+                    st.session_state["statement_history_import_result"] = result
+                    st.session_state["statement_history_scan"] = classify_scan(records, STATEMENT_HISTORY_DB_PATH)
+                    log_event(LOGGER, "statement_import_completed", "Validated statement import completed", imported_count=result["imported"], duplicate_count=result["duplicates"], failed_count=result["needs_review"] + result["unparseable"], duration_ms=round((time.perf_counter() - started_at) * 1000), parser_version="stash-pdf-v1", status="completed")
+                except Exception:
+                    log_event(LOGGER, "statement_import_failed", "Validated statement import failed", duration_ms=round((time.perf_counter() - started_at) * 1000), parser_version="stash-pdf-v1", status="failed")
+                    st.error("The local import failed and no partial statement history was retained.")
+        result = st.session_state.get("statement_history_import_result")
+        if isinstance(result, dict):
+            summary = history_summary(STATEMENT_HISTORY_DB_PATH)
+            history = load_statement_history(STATEMENT_HISTORY_DB_PATH)
+            dates = [str(item["history_date"]) for item in history]
+            st.success(f"Successfully imported: {result.get('imported', 0)} | Duplicate statements skipped: {result.get('duplicates', 0)} | Statements requiring review: {result.get('needs_review', 0)} | Historical records stored locally: {summary['history_records']}")
+            st.caption(f"Import coverage: {dates[0]} through {dates[-1]}" if dates else "Import coverage: no imported statement dates")
+            st.caption("After verifying the imported dates and values, the original PDFs may be removed from the local Statements folder. Do not remove your only external backup.")
+        if st.checkbox("Enable deletion of imported local history", key="enable_history_delete") and st.button("Delete Imported History", type="secondary", key="delete_imported_history"):
+            delete_imported_history(STATEMENT_HISTORY_DB_PATH)
+            st.session_state.pop("statement_history_scan", None)
+            st.session_state.pop("statement_history_import_result", None)
+            st.success("Imported local statement history was deleted. Original PDFs were not changed.")
+    history = load_statement_history(STATEMENT_HISTORY_DB_PATH)
+    if history:
+        rows = list(history)
+        today = datetime.now().date().isoformat()
+        if all(row["history_date"] != today for row in rows):
+            rows.append({"history_date": today, "portfolio_value": total_value, "source_type": "live_portfolio_snapshot"})
+        st.markdown("#### Overall Portfolio Performance")
+        st.line_chart(pd.DataFrame(rows).sort_values("history_date").set_index("history_date")[["portfolio_value"]])
+        st.caption("Historical statement points are verified statement-ending values, not daily market values. The current live point is separate and does not modify imported records.")
+
+
 def _render_analysis_tab(metrics: pd.DataFrame, mobile_mode: bool = False) -> None:
     st.subheader("Portfolio Analysis")
 
@@ -5398,6 +5463,8 @@ def _render_analysis_tab(metrics: pd.DataFrame, mobile_mode: bool = False) -> No
     gain = total_value - total_cost
     annual_contribution = biweekly_contribution * 26
     annual_regular_contribution = biweekly_contribution * 26
+
+    _render_statement_history_import(total_value)
 
     weighted_yield_pct = (total_income / total_value * 100) if total_value > 0 else 0.0
     average_holding_yield_pct = float(analysis_df["holding_yield_pct"].mean()) if not analysis_df.empty else 0.0
@@ -7289,9 +7356,9 @@ def _render_last_updated_indicator() -> None:
 
 def _local_statement_status() -> tuple[int, bool]:
     try:
-        return sum(1 for path in STATEMENTS_DIR.glob("*.pdf") if path.is_file()), (DATA_DIR / "stash_statement_history.sqlite").exists()
+        return sum(1 for path in STATEMENTS_DIR.glob("*.pdf") if path.is_file()), STATEMENT_HISTORY_DB_PATH.exists()
     except OSError:
-        return 0, (DATA_DIR / "stash_statement_history.sqlite").exists()
+        return 0, STATEMENT_HISTORY_DB_PATH.exists()
 
 
 def main() -> None:
