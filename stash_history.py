@@ -9,6 +9,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import pdfplumber
 from pypdf import PdfReader
 
 
@@ -58,6 +59,34 @@ def _value_after_label(text: str, labels: tuple[str, ...]) -> float | None:
     return None
 
 
+def _closing_value_from_row(words: list[dict[str, Any]], row_label: tuple[str, ...]) -> float | None:
+    normalized_label = tuple(word.upper() for word in row_label)
+    for word in words:
+        if str(word.get("text", "")).upper() != normalized_label[0]:
+            continue
+        row = [item for item in words if abs(float(item.get("top", 0.0)) - float(word.get("top", 0.0))) < 2]
+        row_text = [str(item.get("text", "")).upper() for item in row]
+        if not all(label in row_text for label in normalized_label):
+            continue
+        values = [_parse_currency(str(item.get("text", ""))) for item in row]
+        numeric_values = [value for value in values if value is not None]
+        if numeric_values:
+            return numeric_values[-1]
+    return None
+
+
+def extract_statement_layout_values(pdf_path: Path) -> dict[str, float | None]:
+    invested_value = None
+    cash_value = None
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            words = page.extract_words()
+            invested_value = invested_value if invested_value is not None else _closing_value_from_row(words, ("TOTAL", "EQUITY", "HOLDINGS"))
+            cash_value = cash_value if cash_value is not None else _closing_value_from_row(words, ("NET", "ACCOUNT", "BALANCE"))
+    portfolio_value = invested_value + cash_value if invested_value is not None and cash_value is not None else invested_value
+    return {"portfolio_value": portfolio_value, "invested_value": invested_value, "cash_value": cash_value}
+
+
 def extract_pdf_text(pdf_path: Path) -> str:
     reader = PdfReader(str(pdf_path))
     return "\n".join(page.extract_text() or "" for page in reader.pages)
@@ -73,7 +102,7 @@ def parse_statement_text(text: str) -> dict[str, Any]:
     return {
         "statement_start_date": start_date.isoformat() if start_date else None,
         "statement_end_date": end_date.isoformat() if end_date else None,
-        "portfolio_value": _value_after_label(text, ("net\\s+account\\s+balance", "total\\s+equity", "ending\\s+(?:account|portfolio)\\s+value", "total\\s+(?:account|portfolio)\\s+value", "account\\s+value", "portfolio\\s+value")),
+        "portfolio_value": _value_after_label(text, ("ending\\s+(?:account|portfolio)\\s+value", "total\\s+(?:account|portfolio)\\s+value", "account\\s+value", "portfolio\\s+value")),
         "invested_value": _value_after_label(text, ("invested\\s+(?:securities\\s+)?value", "securities\\s+value")),
         "cash_value": _value_after_label(text, ("cash\\s+balance", "cash\\s+value")),
         "cost_basis": _value_after_label(text, ("total\\s+cost\\s+basis", "cost\\s+basis")),
@@ -113,6 +142,10 @@ def scan_local_statements(source_dir: Path = STATEMENTS_DIR) -> list[dict[str, A
                 records.append({"source_hash": _hash_bytes(content), "status": "unparseable", "warning": "No extractable statement text.", "source_path": pdf_path})
                 continue
             record = parse_statement_text(text)
+            try:
+                record.update({key: value for key, value in extract_statement_layout_values(pdf_path).items() if value is not None})
+            except Exception:
+                pass
             record["source_hash"] = _hash_bytes(content)
             record["source_path"] = pdf_path
             record["status"], record["warning"] = _validate_record(record)
@@ -128,15 +161,16 @@ def ensure_history_schema(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> None:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS statement_imports (id INTEGER PRIMARY KEY AUTOINCREMENT, source_hash TEXT NOT NULL UNIQUE, statement_start_date TEXT, statement_end_date TEXT NOT NULL, imported_at TEXT NOT NULL, parser_version TEXT NOT NULL, status TEXT NOT NULL, warning_count INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS statement_portfolio_history (id INTEGER PRIMARY KEY AUTOINCREMENT, import_id INTEGER NOT NULL, history_date TEXT NOT NULL, portfolio_value REAL NOT NULL, invested_value REAL, cash_value REAL, cost_basis REAL, contribution_amount REAL, withdrawal_amount REAL, source_type TEXT NOT NULL DEFAULT 'stash_statement', FOREIGN KEY(import_id) REFERENCES statement_imports(id), UNIQUE(history_date, source_type));
+            CREATE TABLE IF NOT EXISTS live_portfolio_snapshots (snapshot_date TEXT PRIMARY KEY, portfolio_value REAL NOT NULL, source_type TEXT NOT NULL DEFAULT 'live_portfolio_snapshot');
             CREATE INDEX IF NOT EXISTS idx_statement_history_date ON statement_portfolio_history(history_date);
+            CREATE INDEX IF NOT EXISTS idx_live_snapshot_date ON live_portfolio_snapshots(snapshot_date);
         """)
 
 
 def history_summary(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> dict[str, int]:
-    if not db_path.exists():
-        return {"imported": 0, "history_records": 0}
+    prepare_history_database(db_path)
     with closing(sqlite3.connect(db_path)) as conn:
-        return {"imported": int(conn.execute("SELECT COUNT(*) FROM statement_imports").fetchone()[0]), "history_records": int(conn.execute("SELECT COUNT(*) FROM statement_portfolio_history").fetchone()[0])}
+        return {"imported": int(conn.execute("SELECT COUNT(*) FROM statement_imports").fetchone()[0]), "history_records": int(conn.execute("SELECT COUNT(*) FROM statement_portfolio_history").fetchone()[0]), "live_snapshots": int(conn.execute("SELECT COUNT(*) FROM live_portfolio_snapshots").fetchone()[0])}
 
 
 def classify_scan(records: list[dict[str, Any]], db_path: Path = STATEMENT_HISTORY_DB_PATH) -> list[dict[str, Any]]:
@@ -161,10 +195,11 @@ def classify_scan(records: list[dict[str, Any]], db_path: Path = STATEMENT_HISTO
 
 
 def import_validated_history(records: list[dict[str, Any]], db_path: Path = STATEMENT_HISTORY_DB_PATH) -> dict[str, int]:
-    ensure_history_schema(db_path)
+    prepare_history_database(db_path)
     result = {"imported": 0, "duplicates": 0, "needs_review": 0, "unparseable": 0}
     with closing(sqlite3.connect(db_path)) as conn:
         try:
+            conn.execute("PRAGMA foreign_keys = ON")
             conn.execute("BEGIN")
             for record in records:
                 status = record.get("status")
@@ -172,10 +207,14 @@ def import_validated_history(records: list[dict[str, Any]], db_path: Path = STAT
                 if status == "unparseable": result["unparseable"] += 1; continue
                 if status != "valid": result["needs_review"] += 1; continue
                 try:
+                    conn.execute("SAVEPOINT statement_record")
                     cursor = conn.execute("INSERT INTO statement_imports (source_hash, statement_start_date, statement_end_date, imported_at, parser_version, status, warning_count) VALUES (?, ?, ?, ?, ?, ?, ?)", (record["source_hash"], record.get("statement_start_date"), record["statement_end_date"], datetime.now(timezone.utc).isoformat(timespec="seconds"), PARSER_VERSION, "imported", 0))
                     conn.execute("INSERT INTO statement_portfolio_history (import_id, history_date, portfolio_value, invested_value, cash_value, cost_basis, contribution_amount, withdrawal_amount) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (cursor.lastrowid, record["statement_end_date"], record["portfolio_value"], record.get("invested_value"), record.get("cash_value"), record.get("cost_basis"), record.get("contribution_amount"), record.get("withdrawal_amount")))
+                    conn.execute("RELEASE SAVEPOINT statement_record")
                     result["imported"] += 1
                 except sqlite3.IntegrityError:
+                    conn.execute("ROLLBACK TO SAVEPOINT statement_record")
+                    conn.execute("RELEASE SAVEPOINT statement_record")
                     result["duplicates"] += 1
             conn.commit()
         except Exception:
@@ -185,17 +224,37 @@ def import_validated_history(records: list[dict[str, Any]], db_path: Path = STAT
 
 
 def load_statement_history(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> list[dict[str, Any]]:
-    if not db_path.exists(): return []
+    prepare_history_database(db_path)
     with closing(sqlite3.connect(db_path)) as conn:
         rows = conn.execute("SELECT history_date, portfolio_value, source_type FROM statement_portfolio_history ORDER BY history_date").fetchall()
     return [{"history_date": row[0], "portfolio_value": float(row[1]), "source_type": row[2]} for row in rows]
 
 
+def upsert_live_portfolio_snapshot(portfolio_value: float, snapshot_date: str | None = None, db_path: Path = STATEMENT_HISTORY_DB_PATH) -> None:
+    if not isinstance(portfolio_value, (int, float)) or not math.isfinite(float(portfolio_value)) or portfolio_value <= 0:
+        raise ValueError("Live portfolio snapshot requires a positive finite value.")
+    prepare_history_database(db_path)
+    snapshot_date = snapshot_date or date.today().isoformat()
+    if _parse_date(snapshot_date) is None:
+        raise ValueError("Live portfolio snapshot date is invalid.")
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute("INSERT INTO live_portfolio_snapshots (snapshot_date, portfolio_value) VALUES (?, ?) ON CONFLICT(snapshot_date) DO UPDATE SET portfolio_value = excluded.portfolio_value", (snapshot_date, float(portfolio_value)))
+        conn.commit()
+
+
+def load_performance_history(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> list[dict[str, Any]]:
+    prepare_history_database(db_path)
+    with closing(sqlite3.connect(db_path)) as conn:
+        rows = conn.execute("SELECT history_date, portfolio_value, source_type FROM statement_portfolio_history UNION ALL SELECT snapshot_date, portfolio_value, source_type FROM live_portfolio_snapshots ORDER BY 1").fetchall()
+    return [{"history_date": row[0], "portfolio_value": float(row[1]), "source_type": row[2]} for row in rows]
+
+
 def delete_imported_history(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> None:
-    if db_path.exists():
-        with closing(sqlite3.connect(db_path)) as conn:
-            conn.execute("DELETE FROM statement_portfolio_history")
-            conn.execute("DELETE FROM statement_imports")
+    prepare_history_database(db_path)
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute("DELETE FROM statement_portfolio_history")
+        conn.execute("DELETE FROM statement_imports")
+        conn.commit()
 
 
 def is_placeholder_database(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> bool:

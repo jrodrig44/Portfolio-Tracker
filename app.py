@@ -21,7 +21,7 @@ import yfinance as yf
 from ai_analysis_prompt import AI_ANALYSIS_TYPES, build_ai_analysis_markdown, build_ai_analysis_messages, format_ai_analysis_markdown
 from health_engine import compute_portfolio_health as compute_portfolio_health_engine
 from portfolio_intelligence import compute_portfolio_intelligence
-from stash_history import classify_scan, delete_imported_history, history_summary, import_validated_history, load_statement_history, prepare_history_database, scan_local_statements
+from stash_history import classify_scan, delete_imported_history, history_summary, import_validated_history, load_performance_history, load_statement_history, prepare_history_database, scan_local_statements, upsert_live_portfolio_snapshot
 from onemin_ai_client import (
     ONEMIN_AI_DEFAULT_BASE_URL,
     ONEMIN_AI_DEFAULT_CONNECT_TIMEOUT_SECONDS,
@@ -5334,6 +5334,19 @@ def _statement_preview_rows(records: list[dict[str, object]]) -> list[dict[str, 
     return [{"Statement start date": row.get("statement_start_date") or "-", "Statement end date": row.get("statement_end_date") or "-", "Ending portfolio value": row.get("portfolio_value"), "Invested value": row.get("invested_value"), "Cash value": row.get("cash_value"), "Validation status": row.get("status"), "Warning": row.get("warning")} for row in records]
 
 
+def _persist_live_snapshot_if_ready(metrics: pd.DataFrame, total_value: float, *, db_path: Path = STATEMENT_HISTORY_DB_PATH, use_export_json_data: bool | None = None, strict_export_accuracy_mode: bool | None = None) -> bool:
+    use_export_json_data = _use_export_json_data() if use_export_json_data is None else use_export_json_data
+    strict_export_accuracy_mode = bool(st.session_state.get("strict_export_accuracy_mode", False)) if strict_export_accuracy_mode is None else strict_export_accuracy_mode
+    if use_export_json_data or strict_export_accuracy_mode or total_value <= 0:
+        return False
+    shares = pd.to_numeric(metrics["shares"] if "shares" in metrics.columns else pd.Series(0.0, index=metrics.index), errors="coerce").fillna(0.0)
+    prices = pd.to_numeric(metrics["current_price"] if "current_price" in metrics.columns else pd.Series(0.0, index=metrics.index), errors="coerce")
+    if bool(((shares > 0) & (prices.isna() | ~prices.apply(math.isfinite) | (prices <= 0))).any()):
+        return False
+    upsert_live_portfolio_snapshot(total_value, db_path=db_path)
+    return True
+
+
 def _render_statement_history_import(total_value: float) -> None:
     with st.expander("Statement History Import", expanded=False):
         pdf_count, _ = _local_statement_status()
@@ -5382,15 +5395,11 @@ def _render_statement_history_import(total_value: float) -> None:
             st.session_state.pop("statement_history_scan", None)
             st.session_state.pop("statement_history_import_result", None)
             st.success("Imported local statement history was deleted. Original PDFs were not changed.")
-    history = load_statement_history(STATEMENT_HISTORY_DB_PATH)
+    history = load_performance_history(STATEMENT_HISTORY_DB_PATH)
     if history:
-        rows = list(history)
-        today = datetime.now().date().isoformat()
-        if all(row["history_date"] != today for row in rows):
-            rows.append({"history_date": today, "portfolio_value": total_value, "source_type": "live_portfolio_snapshot"})
         st.markdown("#### Overall Portfolio Performance")
-        st.line_chart(pd.DataFrame(rows).sort_values("history_date").set_index("history_date")[["portfolio_value"]])
-        st.caption("Historical statement points are verified statement-ending values, not daily market values. The current live point is separate and does not modify imported records.")
+        st.line_chart(pd.DataFrame(history).sort_values("history_date").set_index("history_date")[["portfolio_value"]])
+        st.caption("Historical statement points are verified statement-ending values, not daily market values. Live points are local daily snapshots that update as prices change.")
 
 
 def _render_analysis_tab(metrics: pd.DataFrame, mobile_mode: bool = False) -> None:
@@ -5464,6 +5473,7 @@ def _render_analysis_tab(metrics: pd.DataFrame, mobile_mode: bool = False) -> No
     annual_contribution = biweekly_contribution * 26
     annual_regular_contribution = biweekly_contribution * 26
 
+    _persist_live_snapshot_if_ready(analysis_df, total_value)
     _render_statement_history_import(total_value)
 
     weighted_yield_pct = (total_income / total_value * 100) if total_value > 0 else 0.0
