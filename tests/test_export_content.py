@@ -226,6 +226,7 @@ class ExportMarkdownTests(unittest.TestCase):
         self.assertIn("data_completeness", payload)
         self.assertIn("analysis_guidance", payload)
         self.assertIn("concentration_context", payload)
+        self.assertNotIn("statement_history", payload)
         self.assertIn("context_summary", payload["portfolio_health"])
         self.assertIn("health_score_breakdown", payload["portfolio_health"])
         self.assertIn("health_score_methodology", payload["portfolio_health"])

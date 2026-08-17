@@ -47,43 +47,8 @@ def _ensure_history_schema(conn: sqlite3.Connection) -> None:
 
 
 def import_stash_statement_history(source_dir: str | Path, db_path: str | Path | None = None) -> dict[str, Any]:
-    source_root = Path(source_dir)
-    db = Path(db_path) if db_path is not None else Path("data") / "stash_statement_history.sqlite"
-    db.parent.mkdir(parents=True, exist_ok=True)
-
-    with closing(sqlite3.connect(str(db))) as conn:
-        _ensure_history_schema(conn)
-        pdf_files = sorted(source_root.glob("*.pdf"))
-        for pdf_path in pdf_files:
-            content = pdf_path.read_bytes() if pdf_path.exists() else b""
-            source_hash = _hash_bytes(content)
-            statement_date = pdf_path.stem.split("-")[-1]
-            existing = conn.execute(
-                "SELECT id FROM statement_history_imports WHERE source_name = ? OR source_path = ?",
-                (pdf_path.name, str(pdf_path)),
-            ).fetchone()
-            if existing:
-                continue
-            imported_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            conn.execute(
-                "INSERT INTO statement_history_imports(source_name, source_hash, statement_date, imported_at, source_path) VALUES (?, ?, ?, ?, ?)",
-                (pdf_path.name, source_hash, statement_date, imported_at, str(pdf_path)),
-            )
-            import_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
-            for holding_ticker, holding_shares, holding_market_value in [
-                ("AAPL", 10.0, 1000.0),
-                ("JEPI", 5.0, 250.0),
-            ]:
-                conn.execute(
-                    "INSERT INTO statement_history_holdings(import_id, ticker, shares, market_value) VALUES (?, ?, ?, ?)",
-                    (import_id, holding_ticker, holding_shares, holding_market_value),
-                )
-
-        conn.commit()
-        import_count = conn.execute("SELECT COUNT(*) FROM statement_history_imports").fetchone()[0]
-        holding_count = conn.execute("SELECT COUNT(*) FROM statement_history_holdings").fetchone()[0]
-
-    return {"import_count": int(import_count), "holding_count": int(holding_count), "db_path": str(db)}
+    """Disable statement imports until a real local Stash parser is implemented."""
+    return {"import_count": 0, "holding_count": 0, "status": "disabled"}
 
 
 def build_statement_history_reconciliation(current_holdings: pd.DataFrame, db_path: str | Path | None = None) -> list[dict[str, Any]]:

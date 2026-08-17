@@ -13,6 +13,12 @@ data/portfolio.db-wal
 data/portfolio.db-shm
 data/portfolio.db-journal
 data/stash_statement_history.sqlite
+data/stash_statement_history.sqlite-wal
+data/stash_statement_history.sqlite-shm
+data/stash_statement_history.sqlite-journal
+
+# Local brokerage statements
+/Statements/
 
 # Runtime logs
 data/app_access_log.jsonl

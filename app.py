@@ -21,7 +21,6 @@ import yfinance as yf
 from ai_analysis_prompt import AI_ANALYSIS_TYPES, build_ai_analysis_markdown, build_ai_analysis_messages, format_ai_analysis_markdown
 from health_engine import compute_portfolio_health as compute_portfolio_health_engine
 from portfolio_intelligence import compute_portfolio_intelligence
-from stash_history import build_statement_history_reconciliation, import_stash_statement_history
 from onemin_ai_client import (
     ONEMIN_AI_DEFAULT_BASE_URL,
     ONEMIN_AI_DEFAULT_CONNECT_TIMEOUT_SECONDS,
@@ -50,10 +49,13 @@ from supplemental_research import (
 )
 from logging_setup import configure_structured_logging, log_event
 
-load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
+PROJECT_ROOT = Path(__file__).resolve().parent
+load_dotenv(dotenv_path=PROJECT_ROOT / ".env")
 
-DATA_DIR = Path("data")
-DATA_DIR.mkdir(exist_ok=True)
+DATA_DIR = PROJECT_ROOT / "data"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+STATEMENTS_DIR = PROJECT_ROOT / "Statements"
+STATEMENTS_DIR.mkdir(parents=True, exist_ok=True)
 DEFAULT_DB_PATH = DATA_DIR / "portfolio.db"
 LEGACY_CSV_PATH = DATA_DIR / "holdings.csv"
 HOLDINGS_TABLE = "holdings"
@@ -3003,7 +3005,6 @@ def compute_full_portfolio_snapshot(
     historical_context_map: dict[str, dict[str, object]] | None = None,
     health: dict[str, object] | None = None,
     intelligence_layer_output: dict[str, object] | None = None,
-    statement_history_context: dict[str, object] | None = None,
 ) -> dict[str, object]:
     metrics = _prepare_export_metrics(df.copy())
     if "asset_type" not in metrics.columns:
@@ -3187,7 +3188,6 @@ def compute_full_portfolio_snapshot(
         "historical": {
             "by_ticker": historical_records,
         },
-        "statement_history": statement_history_context or {},
         "health_score": {
             "overall": float(health_payload.get("overall_score", health_payload.get("health_score", 0.0)) or 0.0) if isinstance(health_payload, dict) else 0.0,
             "health_score": float(health_payload.get("overall_score", health_payload.get("health_score", 0.0)) or 0.0) if isinstance(health_payload, dict) else 0.0,
@@ -3265,7 +3265,6 @@ def generate_portfolio_export_json(snapshot: dict[str, object]) -> dict[str, obj
         "income": snapshot.get("income", {}),
         "contributions": snapshot.get("contributions", {}),
         "historical": snapshot.get("historical", {}),
-        "statement_history": snapshot.get("statement_history", {}),
         "health_score": snapshot.get("health_score", {}),
         "income_quality": snapshot.get("income_quality", {}),
         "alerts": snapshot.get("alerts", {}),
@@ -3790,14 +3789,7 @@ def _build_ai_export_payload(
                     }
                 )
 
-    statement_history_path = Path("Statements")
     statement_history_db = DATA_DIR / "stash_statement_history.sqlite"
-    if statement_history_path.exists():
-        import_stash_statement_history(statement_history_path, db_path=statement_history_db)
-
-    statement_history_reconciliation = []
-    if statement_history_db.exists():
-        statement_history_reconciliation = build_statement_history_reconciliation(holdings, db_path=statement_history_db)
 
     supplemental_yahoo_historical_price_data = []
     if _strict_export_accuracy_mode() and _use_export_json_data():
@@ -3939,11 +3931,6 @@ def _build_ai_export_payload(
         historical_context_map=historical_context_map,
         health=health,
         intelligence_layer_output=intelligence_layer_output,
-        statement_history_context={
-            "import_path": str(statement_history_path),
-            "db_path": str(statement_history_db),
-            "reconciliation": statement_history_reconciliation,
-        },
     )
     snapshot_validation_errors: list[str] = []
     try:
@@ -4038,11 +4025,6 @@ def _build_ai_export_payload(
         "concentration_context": concentration_context,
         "contribution_context": contribution_context,
         "historical_context": historical_context,
-        "statement_history": {
-            "import_path": str(statement_history_path),
-            "db_path": str(statement_history_db),
-            "reconciliation": statement_history_reconciliation,
-        },
         "supplemental_yahoo_financial_data": supplemental_yahoo_financial_data,
         "supplemental_yahoo_historical_price_data": supplemental_yahoo_historical_price_data,
         "analysis_guidance": analysis_guidance,
@@ -7305,6 +7287,13 @@ def _render_last_updated_indicator() -> None:
         st.caption("Last updated: just now")
 
 
+def _local_statement_status() -> tuple[int, bool]:
+    try:
+        return sum(1 for path in STATEMENTS_DIR.glob("*.pdf") if path.is_file()), (DATA_DIR / "stash_statement_history.sqlite").exists()
+    except OSError:
+        return 0, (DATA_DIR / "stash_statement_history.sqlite").exists()
+
+
 def main() -> None:
     if not getattr(LOGGER, "_application_started_logged", False):
         log_event(LOGGER, "application_started", "Portfolio Tracker started")
@@ -7322,6 +7311,10 @@ def main() -> None:
     with st.sidebar:
         st.subheader("Data")
         st.write(f"Storage file: `{DEFAULT_DB_PATH}`")
+        statement_count, statement_db_available = _local_statement_status()
+        st.caption("Local statement folder: Ready")
+        st.caption(f"Statements detected: {statement_count}")
+        st.caption(f"Statement history database: {'Available' if statement_db_available else 'Not created'}")
         st.toggle("Use Export JSON Data", key="use_export_json_data", value=False)
         st.toggle("Strict Export Accuracy Mode (100% export-aligned)", key="strict_export_accuracy_mode", value=False)
         st.caption(f"Export JSON path: {EXPORT_JSON_PATH}")

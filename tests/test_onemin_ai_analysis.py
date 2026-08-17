@@ -77,6 +77,16 @@ class OneMinAIClientTests(unittest.TestCase):
         self.assertNotIn("conversationId", payload["promptObject"])
         self.assertNotIn("attachments", payload["promptObject"])
 
+    def test_statement_contents_are_excluded_from_ai_prompts(self) -> None:
+        secret_statement_text = "Account 123456789, 1 Private Lane"
+        messages = build_ai_analysis_messages(
+            {"portfolio_snapshot": {}, "statement_history": {"contents": secret_statement_text}},
+            "Comprehensive Portfolio Review",
+            "",
+        )
+
+        self.assertNotIn(secret_statement_text, messages_to_prompt(messages))
+
     def test_request_can_explicitly_enable_web_search(self) -> None:
         client = self._client()
         with patch("onemin_ai_client.httpx.post", return_value=_response(_success_response())) as post_mock:
