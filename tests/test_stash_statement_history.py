@@ -5,9 +5,10 @@ from pathlib import Path
 from unittest.mock import patch
 import sqlite3
 import pandas as pd
+import calendar
 
 import app
-from stash_history import _closing_value_from_row, _validate_record, classify_scan, clear_scan_preview, delete_imported_history, history_summary, import_validated_history, load_performance_history, load_statement_history, parse_statement_text, prepare_history_database, run_statement_scan, scan_can_import, scan_state, upsert_live_portfolio_snapshot
+from stash_history import _closing_value_from_row, _validate_record, classify_scan, clear_scan_preview, delete_imported_history, extract_statement_layout_values_from_pages, history_summary, import_validated_history, load_performance_history, load_statement_history, parse_statement_header_chars, parse_statement_header_words, parse_statement_text, prepare_history_database, run_statement_scan, scan_can_import, scan_state, upsert_live_portfolio_snapshot
 
 
 class StashStatementHistoryTests(unittest.TestCase):
@@ -73,6 +74,41 @@ class StashStatementHistoryTests(unittest.TestCase):
         self.assertIsNone(record["statement_end_date"])
         self.assertEqual(_validate_record(record)[1], "Verified statement-period header was not found.")
 
+    def test_coordinate_header_parser_accepts_reordered_first_page_words_only(self) -> None:
+        words = [
+            {"text": "August", "top": 18, "x0": 40, "x1": 80}, {"text": "1,", "top": 18, "x0": 82, "x1": 95}, {"text": "2021", "top": 18, "x0": 97, "x1": 125},
+            {"text": "-", "top": 18, "x0": 130, "x1": 135}, {"text": "August", "top": 18, "x0": 140, "x1": 180}, {"text": "31,", "top": 18, "x0": 182, "x1": 200}, {"text": "2021", "top": 18, "x0": 202, "x1": 230},
+            {"text": "ACCOUNT", "top": 64, "x0": 40, "x1": 95}, {"text": "HEADER", "top": 64, "x0": 100, "x1": 145},
+            {"text": "June", "top": 500, "x0": 40, "x1": 65}, {"text": "30,", "top": 500, "x0": 67, "x1": 85}, {"text": "2021", "top": 500, "x0": 87, "x1": 115},
+        ]
+        record = parse_statement_header_words(list(reversed(words)), 800)
+        self.assertEqual(record["statement_end_date"], "2021-08-31")
+        self.assertTrue(record["diagnostics"]["verified_header_found"])
+        self.assertTrue(record["diagnostics"]["nearby_date_range_found"])
+
+    def test_character_coordinate_header_parser_handles_word_extraction_gap(self) -> None:
+        text = "August 1, 2021 - August 31, 2021"
+        chars = []
+        for index, character in enumerate(text):
+            chars.append({"text": character, "top": 22, "x0": index * 6, "x1": index * 6 + 5, "size": 10})
+        for index, character in enumerate("ACCOUNT HEADER"):
+            chars.append({"text": character, "top": 70, "x0": index * 6, "x1": index * 6 + 5, "size": 10})
+        record = parse_statement_header_chars(chars, 800)
+        self.assertEqual(record["statement_end_date"], "2021-08-31")
+        self.assertTrue(record["diagnostics"]["verified_header_found"])
+
+    def test_summary_requires_nearby_balance_rows_not_entire_page(self) -> None:
+        class Page:
+            height = 800
+            def extract_words(self) -> list[dict[str, object]]:
+                return [
+                    {"text": "TOTAL", "top": 400, "x0": 10, "x1": 40}, {"text": "EQUITY", "top": 400, "x0": 45, "x1": 85}, {"text": "HOLDINGS", "top": 400, "x0": 90, "x1": 145}, {"text": "$100.00", "top": 400, "x0": 200, "x1": 250}, {"text": "$120.00", "top": 400, "x0": 260, "x1": 310},
+                    {"text": "NET", "top": 460, "x0": 10, "x1": 30}, {"text": "ACCOUNT", "top": 460, "x0": 35, "x1": 90}, {"text": "BALANCE", "top": 460, "x0": 95, "x1": 150}, {"text": "$1.00", "top": 460, "x0": 200, "x1": 240}, {"text": "$2.00", "top": 460, "x0": 250, "x1": 290},
+                ]
+        values = extract_statement_layout_values_from_pages([Page()])
+        self.assertTrue(values["summary_found"])
+        self.assertEqual(values["portfolio_value"], 122.0)
+
     def test_scan_does_not_import_and_duplicate_dates_require_review(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -124,7 +160,9 @@ class StashStatementHistoryTests(unittest.TestCase):
             def parse_unique_document(_path: Path) -> dict[str, object]:
                 nonlocal parsed_count
                 parsed_count += 1
-                return {"status": "valid", "warning": "Ready to import.", "statement_start_date": "2021-08-01", "statement_end_date": f"checkpoint-date-{parsed_count}", "portfolio_value": 100.0}
+                year = 2021 + (7 + parsed_count - 1) // 12
+                month = (7 + parsed_count - 1) % 12 + 1
+                return {"status": "valid", "warning": "Ready to import.", "statement_start_date": f"{year:04d}-{month:02d}-01", "statement_end_date": f"{year:04d}-{month:02d}-{calendar.monthrange(year, month)[1]:02d}", "portfolio_value": 100.0}
             with patch("stash_history._parse_statement_document", side_effect=parse_unique_document):
                 state = run_statement_scan(root, db_path=db_path)
             self.assertEqual(state["detected_pdf_count"], 61)
@@ -146,6 +184,17 @@ class StashStatementHistoryTests(unittest.TestCase):
             reopened = scan_state(db_path)
             self.assertEqual(reopened["records"][0]["warning"], "Statement ending date was not found.")
 
+    def test_safe_parser_diagnostics_persist_after_reopening_database(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "synthetic.pdf").write_bytes(b"diagnostic-source")
+            db_path = root / "history.sqlite"
+            parsed = {"status": "needs_review", "warning": "Verified statement-period header was not found.", "diagnostics": {"verified_header_found": False, "nearby_date_range_found": False, "verified_account_summary_found": False, "balance_rows_found": False}}
+            with patch("stash_history._parse_statement_document", return_value=parsed):
+                run_statement_scan(root, db_path=db_path)
+            reopened = scan_state(db_path)
+            self.assertEqual(reopened["diagnostics"], {"header_found": 0, "nearby_date_range_found": 0, "account_summary_found": 0, "balance_rows_found": 0})
+
     def test_matching_statement_dates_keep_one_canonical_preview_record(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -156,7 +205,7 @@ class StashStatementHistoryTests(unittest.TestCase):
             with patch("stash_history._parse_statement_document", return_value=parsed):
                 state = run_statement_scan(root, db_path=db_path)
             self.assertEqual(sorted(record["status"] for record in state["records"]), ["duplicate_statement", "valid"])
-            self.assertTrue(scan_can_import(state, 2))
+            self.assertFalse(scan_can_import(state, 2))
 
     def test_conflicting_statement_dates_persist_as_review_without_arbitrary_winner(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -230,7 +279,8 @@ class StashStatementHistoryTests(unittest.TestCase):
     def test_partial_scan_cannot_enable_import(self) -> None:
         self.assertFalse(scan_can_import({"scan_status": "interrupted", "processed_count": 5, "ready": 5}, 61))
         self.assertFalse(scan_can_import({"scan_status": "completed", "processed_count": 60, "ready": 60}, 61))
-        self.assertTrue(scan_can_import({"scan_status": "completed", "processed_count": 61, "ready": 1}, 61))
+        self.assertFalse(scan_can_import({"scan_status": "completed", "processed_count": 61, "ready": 1, "monthly_continuity": {"complete": False}}, 61))
+        self.assertTrue(scan_can_import({"scan_status": "completed", "processed_count": 61, "ready": 1, "monthly_continuity": {"complete": True}}, 61))
 
     def test_failed_import_rolls_back_and_does_not_modify_portfolio_db(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
