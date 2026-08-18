@@ -7,7 +7,7 @@ import sqlite3
 import pandas as pd
 
 import app
-from stash_history import _closing_value_from_row, classify_scan, clear_scan_preview, delete_imported_history, history_summary, import_validated_history, load_performance_history, load_statement_history, parse_statement_text, prepare_history_database, run_statement_scan, scan_can_import, scan_state, upsert_live_portfolio_snapshot
+from stash_history import _closing_value_from_row, _validate_record, classify_scan, clear_scan_preview, delete_imported_history, history_summary, import_validated_history, load_performance_history, load_statement_history, parse_statement_text, prepare_history_database, run_statement_scan, scan_can_import, scan_state, upsert_live_portfolio_snapshot
 
 
 class StashStatementHistoryTests(unittest.TestCase):
@@ -37,18 +37,41 @@ class StashStatementHistoryTests(unittest.TestCase):
                 self.assertEqual(app._local_statement_status(), (0, (app.DATA_DIR / "stash_statement_history.sqlite").exists()))
 
     def test_parser_extracts_statement_period_and_value_from_multiple_layouts(self) -> None:
-        first = parse_statement_text("Statement Period: August 1, 2021 - August 31, 2021\nEnding Account Value: $1,234.56\nCash Balance: $34.56")
-        second = parse_statement_text("Period September 1, 2021 through September 30, 2021\nTotal Portfolio Value $2,000.00\nInvested Securities Value: $1,950.00\nCash Value: $50.00")
+        first = parse_statement_text("Statement Period: August 1, 2021 - August 31, 2021\nACCOUNT HEADER\nEnding Account Value: $1,234.56\nCash Balance: $34.56")
+        second = parse_statement_text("ACCOUNT STATEMENT\nSeptember 1, 2021 through September 30, 2021\nTotal Portfolio Value $2,000.00\nInvested Securities Value: $1,950.00\nCash Value: $50.00")
         self.assertEqual(first["statement_start_date"], "2021-08-01")
         self.assertEqual(first["statement_end_date"], "2021-08-31")
         self.assertEqual(first["portfolio_value"], 1234.56)
         self.assertEqual(second["statement_end_date"], "2021-09-30")
         self.assertEqual(second["portfolio_value"], 2000.0)
 
-        header_layout = parse_statement_text("AUGUST 1 2021 - AUGUST 31 2021\nEnding Account Value: $2,900.00")
+        header_layout = parse_statement_text("ACCOUNT STATEMENT\nAUGUST 1 2021 - AUGUST 31 2021\nEnding Account Value: $2,900.00")
         self.assertEqual(header_layout["statement_start_date"], "2021-08-01")
         self.assertEqual(header_layout["statement_end_date"], "2021-08-31")
         self.assertEqual(header_layout["portfolio_value"], 2900.0)
+
+    def test_verified_monthly_header_wins_over_later_disclosure_dates(self) -> None:
+        text = "\n".join(
+            [
+                "ACCOUNT STATEMENT",
+                "August 1, 2021 - August 31, 2021",
+                "Account Summary",
+                "Ending Account Value: $1,234.56",
+                "",
+                "Statement of Financial Condition June 30, 2021",
+                "Audited report December 31, 2021",
+            ]
+        )
+        record = parse_statement_text(text)
+        self.assertEqual(record["statement_start_date"], "2021-08-01")
+        self.assertEqual(record["statement_end_date"], "2021-08-31")
+        self.assertTrue(record["diagnostics"]["verified_header_found"])
+        self.assertTrue(record["diagnostics"]["statement_date_accepted"])
+
+    def test_missing_verified_header_needs_review_without_disclosure_fallback(self) -> None:
+        record = parse_statement_text("Statement of Financial Condition June 30, 2021 - December 31, 2021")
+        self.assertIsNone(record["statement_end_date"])
+        self.assertEqual(_validate_record(record)[1], "Verified statement-period header was not found.")
 
     def test_scan_does_not_import_and_duplicate_dates_require_review(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

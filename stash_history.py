@@ -19,8 +19,7 @@ STATEMENT_HISTORY_DB_PATH = DATA_DIR / "stash_statement_history.sqlite"
 PARSER_VERSION = "stash-pdf-v1"
 EARLIEST_EXPECTED_DATE = date(2021, 8, 1)
 _DATE_PATTERN = r"(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},?\s+\d{4})"
-_RANGE_PATTERN = re.compile(rf"(?:statement\s+period|period|from)\s*:?\s*({_DATE_PATTERN})\s*(?:-|to|through)\s*({_DATE_PATTERN})", re.IGNORECASE)
-_HEADER_RANGE_PATTERN = re.compile(rf"({_DATE_PATTERN})\s*(?:-|to|through)\s*({_DATE_PATTERN})", re.IGNORECASE)
+_HEADER_RANGE_PATTERN = re.compile(rf"({_DATE_PATTERN})\s*(?:[-\u2013\u2014]|to|through)\s*({_DATE_PATTERN})", re.IGNORECASE)
 
 
 def _hash_bytes(content: bytes) -> str:
@@ -78,7 +77,7 @@ def extract_statement_layout_values_from_pages(pages: Any) -> dict[str, float | 
     invested_value = None
     cash_value = None
     for page in pages:
-        words = page.extract_words()
+        words = [word for word in page.extract_words() if float(word.get("top", 0.0)) <= float(page.height) * 0.75]
         invested_value = invested_value if invested_value is not None else _closing_value_from_row(words, ("TOTAL", "EQUITY", "HOLDINGS"))
         cash_value = cash_value if cash_value is not None else _closing_value_from_row(words, ("NET", "ACCOUNT", "BALANCE"))
     portfolio_value = invested_value + cash_value if invested_value is not None and cash_value is not None else invested_value
@@ -89,11 +88,15 @@ def _parse_statement_document(pdf_path: Path) -> dict[str, Any]:
     try:
         content = pdf_path.read_bytes()
         with pdfplumber.open(pdf_path) as pdf:
-            text = "\n".join(page.extract_text() or "" for page in pdf.pages)
-            if not text.strip():
+            first_page = pdf.pages[0]
+            header_text = first_page.extract_text() or ""
+            if not header_text.strip():
                 return {"source_hash": _hash_bytes(content), "status": "unparseable", "warning": "No extractable statement text."}
-            record = parse_statement_text(text)
-            record.update({key: value for key, value in extract_statement_layout_values_from_pages(pdf.pages).items() if value is not None})
+            record = parse_statement_text(header_text)
+            if record["statement_end_date"] is not None:
+                summary_values = extract_statement_layout_values_from_pages([first_page])
+                record.update({key: value for key, value in summary_values.items() if value is not None})
+                record["diagnostics"]["verified_account_summary_found"] = summary_values["portfolio_value"] is not None
         record["source_hash"] = _hash_bytes(content)
         record["status"], record["warning"] = _validate_record(record)
         return record
@@ -102,21 +105,25 @@ def _parse_statement_document(pdf_path: Path) -> dict[str, Any]:
 
 
 def parse_statement_text(text: str) -> dict[str, Any]:
-    period = _HEADER_RANGE_PATTERN.search("\n".join(text.splitlines()[:10])) or _RANGE_PATTERN.search(text)
+    """Parse only a verified account-statement header region, never disclosure text."""
+    header_lines = text.splitlines()[:8]
+    header_region = "\n".join(header_lines)
+    period = _HEADER_RANGE_PATTERN.search("\n".join(header_lines[:3]))
+    account_header_found = any(re.search(r"\baccount\b", line, re.IGNORECASE) for line in header_lines[:6])
+    header_found = period is not None and account_header_found
+    period = period if header_found else None
     start_date = _parse_date(period.group(1)) if period else None
     end_date = _parse_date(period.group(2)) if period else None
-    if end_date is None:
-        ending_match = re.search(rf"(?:ending|as\s+of)\s*:?\s*({_DATE_PATTERN})", text, re.IGNORECASE)
-        end_date = _parse_date(ending_match.group(1)) if ending_match else None
     return {
         "statement_start_date": start_date.isoformat() if start_date else None,
         "statement_end_date": end_date.isoformat() if end_date else None,
-        "portfolio_value": _value_after_label(text, ("ending\\s+(?:account|portfolio)\\s+value", "total\\s+(?:account|portfolio)\\s+value", "account\\s+value", "portfolio\\s+value")),
-        "invested_value": _value_after_label(text, ("invested\\s+(?:securities\\s+)?value", "securities\\s+value")),
-        "cash_value": _value_after_label(text, ("cash\\s+balance", "cash\\s+value")),
-        "cost_basis": _value_after_label(text, ("total\\s+cost\\s+basis", "cost\\s+basis")),
-        "contribution_amount": _value_after_label(text, ("(?:contributions|deposits)\\s+(?:during|for)\\s+(?:the\\s+)?period",)),
-        "withdrawal_amount": _value_after_label(text, ("withdrawals?\\s+(?:during|for)\\s+(?:the\\s+)?period",)),
+        "portfolio_value": _value_after_label(header_region, ("ending\\s+(?:account|portfolio)\\s+value", "total\\s+(?:account|portfolio)\\s+value", "account\\s+value", "portfolio\\s+value")),
+        "invested_value": _value_after_label(header_region, ("invested\\s+(?:securities\\s+)?value", "securities\\s+value")),
+        "cash_value": _value_after_label(header_region, ("cash\\s+balance", "cash\\s+value")),
+        "cost_basis": _value_after_label(header_region, ("total\\s+cost\\s+basis", "cost\\s+basis")),
+        "contribution_amount": _value_after_label(header_region, ("(?:contributions|deposits)\\s+(?:during|for)\\s+(?:the\\s+)?period",)),
+        "withdrawal_amount": _value_after_label(header_region, ("withdrawals?\\s+(?:during|for)\\s+(?:the\\s+)?period",)),
+        "diagnostics": {"verified_header_found": header_found, "verified_account_summary_found": False, "statement_date_accepted": end_date is not None},
     }
 
 
@@ -127,7 +134,7 @@ def _validate_record(record: dict[str, Any]) -> tuple[str, str]:
     start_date = _parse_date(str(start_date_text)) if start_date_text else None
     value = record.get("portfolio_value")
     if end_date is None:
-        return "needs_review", "Statement ending date was not found."
+        return "needs_review", "Verified statement-period header was not found."
     if end_date < EARLIEST_EXPECTED_DATE:
         return "needs_review", "Statement ending date is outside expected coverage."
     if start_date and end_date < start_date:
