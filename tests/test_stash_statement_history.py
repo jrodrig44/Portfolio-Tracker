@@ -5,17 +5,9 @@ from pathlib import Path
 from unittest.mock import patch
 import sqlite3
 import pandas as pd
-import time
 
 import app
-from stash_history import _closing_value_from_row, classify_scan, delete_imported_history, history_summary, import_validated_history, load_performance_history, load_statement_history, parse_statement_text, prepare_history_database, scan_local_statements, upsert_live_portfolio_snapshot
-
-
-def _test_document_worker(pdf_path_text: str, queue: object) -> None:
-    if Path(pdf_path_text).stem == "hang":
-        time.sleep(10)
-        return
-    queue.put({"kind": "result", "record": {"source_hash": "later", "statement_start_date": "2021-08-01", "statement_end_date": "2021-08-31", "portfolio_value": 100.0, "status": "valid", "warning": "Ready to import."}})
+from stash_history import _closing_value_from_row, classify_scan, clear_scan_preview, delete_imported_history, history_summary, import_validated_history, load_performance_history, load_statement_history, parse_statement_text, prepare_history_database, run_statement_scan, scan_can_import, scan_state, upsert_live_portfolio_snapshot
 
 
 class StashStatementHistoryTests(unittest.TestCase):
@@ -83,20 +75,57 @@ class StashStatementHistoryTests(unittest.TestCase):
             self.assertEqual(result["needs_review"], 1)
             self.assertEqual(history_summary(db_path)["history_records"], 0)
 
-    def test_timed_out_document_does_not_block_later_statement(self) -> None:
+    def test_sequential_scan_processes_all_synthetic_documents_and_checkpoints_each(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            (root / "hang.pdf").write_bytes(b"placeholder")
-            (root / "later.pdf").write_bytes(b"placeholder")
-            completed: list[str] = []
-            records = scan_local_statements(
-                root,
-                timeout_seconds=8.0,
-                worker_target=_test_document_worker,
-                on_document_complete=lambda _sequence, _total, record, _duration: completed.append(str(record["status"])),
-            )
-            self.assertEqual([record["status"] for record in records], ["unparseable", "valid"])
-            self.assertEqual(completed, ["unparseable", "valid"])
+            for index in range(61):
+                (root / f"synthetic-{index}.pdf").write_bytes(f"synthetic-{index}".encode())
+            db_path = root / "history.sqlite"
+            completed_counts: list[int] = []
+            def parse_document(_path: Path) -> dict[str, object]:
+                return {"status": "valid", "warning": "Ready to import.", "statement_start_date": "2021-08-01", "statement_end_date": None, "portfolio_value": 100.0}
+            with patch("stash_history._parse_statement_document", side_effect=parse_document):
+                state = run_statement_scan(root, db_path=db_path, on_document_complete=lambda *_args: completed_counts.append(scan_state(db_path)["processed_count"]))
+            self.assertEqual(state["processed_count"], 61)
+            self.assertEqual(state["scan_status"], "completed")
+            self.assertEqual(completed_counts, list(range(1, 62)))
+
+    def test_interrupted_scan_resumes_without_duplicate_preview_records(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for index in range(3):
+                (root / f"synthetic-{index}.pdf").write_bytes(f"synthetic-{index}".encode())
+            db_path = root / "history.sqlite"
+            calls = 0
+            def interrupted_parse(_path: Path) -> dict[str, object]:
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise KeyboardInterrupt()
+                return {"status": "valid", "warning": "Ready to import.", "statement_start_date": "2021-08-01", "statement_end_date": None, "portfolio_value": 100.0}
+            with patch("stash_history._parse_statement_document", side_effect=interrupted_parse):
+                with self.assertRaises(KeyboardInterrupt):
+                    run_statement_scan(root, db_path=db_path)
+            self.assertEqual(scan_state(db_path)["processed_count"], 1)
+            self.assertEqual(scan_state(db_path)["scan_status"], "interrupted")
+            with patch("stash_history._parse_statement_document", return_value={"status": "valid", "warning": "Ready to import.", "statement_start_date": "2021-08-01", "statement_end_date": None, "portfolio_value": 100.0}):
+                resumed = run_statement_scan(root, db_path=db_path)
+            self.assertEqual(resumed["processed_count"], 3)
+            self.assertEqual(len(resumed["records"]), 3)
+
+    def test_clear_preview_does_not_delete_imported_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "history.sqlite"
+            record = {"source_hash": "imported", "statement_start_date": "2021-08-01", "statement_end_date": "2021-08-31", "portfolio_value": 100.0, "status": "valid"}
+            import_validated_history([record], db_path)
+            clear_scan_preview(db_path)
+            self.assertEqual(history_summary(db_path)["imported"], 1)
+            self.assertEqual(scan_state(db_path)["processed_count"], 0)
+
+    def test_partial_scan_cannot_enable_import(self) -> None:
+        self.assertFalse(scan_can_import({"scan_status": "interrupted", "processed_count": 5, "ready": 5}, 61))
+        self.assertFalse(scan_can_import({"scan_status": "completed", "processed_count": 60, "ready": 60}, 61))
+        self.assertTrue(scan_can_import({"scan_status": "completed", "processed_count": 61, "ready": 1}, 61))
 
     def test_failed_import_rolls_back_and_does_not_modify_portfolio_db(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

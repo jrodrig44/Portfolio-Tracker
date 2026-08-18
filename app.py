@@ -15,13 +15,12 @@ from dotenv import load_dotenv
 import pandas as pd
 import datetime as dt
 import streamlit as st
-from streamlit_autorefresh import st_autorefresh
 import yfinance as yf
 
 from ai_analysis_prompt import AI_ANALYSIS_TYPES, build_ai_analysis_markdown, build_ai_analysis_messages, format_ai_analysis_markdown
 from health_engine import compute_portfolio_health as compute_portfolio_health_engine
 from portfolio_intelligence import compute_portfolio_intelligence
-from stash_history import classify_scan, delete_imported_history, history_summary, import_validated_history, load_performance_history, load_statement_history, prepare_history_database, scan_local_statements, upsert_live_portfolio_snapshot
+from stash_history import clear_scan_preview, delete_imported_history, history_summary, import_validated_history, load_performance_history, load_statement_history, run_statement_scan, scan_can_import, scan_state, upsert_live_portfolio_snapshot
 from onemin_ai_client import (
     ONEMIN_AI_DEFAULT_BASE_URL,
     ONEMIN_AI_DEFAULT_CONNECT_TIMEOUT_SECONDS,
@@ -5351,57 +5350,50 @@ def _render_statement_history_import(total_value: float) -> None:
     with st.expander("Statement History Import", expanded=False):
         pdf_count, _ = _local_statement_status()
         summary = history_summary(STATEMENT_HISTORY_DB_PATH)
-        records = st.session_state.get("statement_history_scan", [])
-        records = records if isinstance(records, list) else []
-        counts = {status: sum(1 for row in records if row.get("status") == status) for status in ("valid", "duplicate", "needs_review", "unparseable")}
-        for label, value in (("Local statement folder", "Ready"), ("PDFs detected", pdf_count), ("Previously imported", summary["imported"]), ("Ready to import", counts["valid"]), ("Duplicates", counts["duplicate"]), ("Needs review", counts["needs_review"]), ("Unparseable", counts["unparseable"])):
+        state = scan_state(STATEMENT_HISTORY_DB_PATH)
+        records = state["records"]
+        for label, value in (("Local statement folder", "Ready"), ("PDFs detected", pdf_count), ("Processed", f"{state['processed_count']} of {state['total_count'] or pdf_count}"), ("Remaining", max(pdf_count - state["processed_count"], 0)), ("Ready", state["ready"]), ("Needs review", state["needs_review"]), ("Unparseable", state["unparseable"]), ("Scan status", state["scan_status"]), ("Previously imported", summary["imported"])):
             st.caption(f"{label}: {value}")
-        if st.button("Scan Local Statements", key="scan_local_statements"):
+
+        def render_progress(sequence: int, total_count: int) -> None:
+            progress_text.caption(f"Processing statement {sequence} of {total_count}")
+
+        def persist_progress(_sequence: int, total_count: int, _record: dict[str, object]) -> None:
+            current = scan_state(STATEMENT_HISTORY_DB_PATH)
+            progress_bar.progress(current["processed_count"] / total_count if total_count else 1.0)
+            progress_text.caption(f"Processed {current['processed_count']} of {total_count} | Remaining: {max(total_count - current['processed_count'], 0)} | Ready: {current['ready']} | Needs review: {current['needs_review']} | Unparseable: {current['unparseable']}")
+            live_preview.dataframe(pd.DataFrame(_statement_preview_rows(current["records"])), width="stretch", hide_index=True)
+
+        start_scan = st.button("Start Scan", key="start_local_statements")
+        resume_scan = st.button("Resume Scan", key="resume_local_statements", disabled=state["scan_status"] not in {"interrupted", "running"})
+        if st.button("Clear Scan Preview", type="secondary", key="clear_statement_preview"):
+            clear_scan_preview(STATEMENT_HISTORY_DB_PATH)
+            st.rerun()
+        if start_scan or resume_scan:
             started_at = time.perf_counter()
             log_event(LOGGER, "statement_scan_started", "Local statement scan started", pdf_count=pdf_count, parser_version="stash-pdf-v1")
             progress_text = st.empty()
             progress_bar = st.progress(0)
             live_preview = st.empty()
-            completed_records: list[dict[str, object]] = []
-
-            def on_document_started(sequence: int, total_count: int) -> None:
-                progress_text.caption(f"Processing statement {sequence} of {total_count}")
-
-            def on_document_complete(sequence: int, total_count: int, record: dict[str, object], duration_ms: int) -> None:
-                completed_records.append(record)
-                st.session_state["statement_history_scan"] = list(completed_records)
-                progress_bar.progress(sequence / total_count if total_count else 1.0)
-                completed_count = sum(1 for item in completed_records if item.get("status") in {"valid", "duplicate"})
-                review_count = sum(1 for item in completed_records if item.get("status") == "needs_review")
-                unparseable_count = sum(1 for item in completed_records if item.get("status") == "unparseable")
-                progress_text.caption(f"Processing statement {sequence} of {total_count} | Completed: {completed_count} | Needs review: {review_count} | Unparseable: {unparseable_count}")
-                live_preview.dataframe(pd.DataFrame(_statement_preview_rows(completed_records)), width="stretch", hide_index=True)
-                log_event(LOGGER, "statement_document_completed", "Local statement document completed", document_sequence=sequence, total_document_count=total_count, duration_ms=duration_ms, status=str(record.get("status", "unparseable")))
-
             try:
-                prepare_history_database(STATEMENT_HISTORY_DB_PATH)
-                scanned = classify_scan(scan_local_statements(STATEMENTS_DIR, on_document_started=on_document_started, on_document_complete=on_document_complete), STATEMENT_HISTORY_DB_PATH)
-                st.session_state["statement_history_scan"] = scanned
-                records = scanned
-                counts = {status: sum(1 for row in scanned if row.get("status") == status) for status in counts}
+                state = run_statement_scan(STATEMENTS_DIR, db_path=STATEMENT_HISTORY_DB_PATH, restart=start_scan, on_document_started=render_progress, on_document_complete=persist_progress)
+                records = state["records"]
             except Exception:
                 st.error("The local statement scan could not complete. No statement data was imported.")
             finally:
-                final_records = st.session_state.get("statement_history_scan", [])
-                final_records = final_records if isinstance(final_records, list) else []
-                final_counts = {status: sum(1 for row in final_records if row.get("status") == status) for status in ("valid", "duplicate", "needs_review", "unparseable")}
+                final_state = scan_state(STATEMENT_HISTORY_DB_PATH)
                 progress_bar.progress(1.0)
-                progress_text.caption(f"Scan complete | Completed: {final_counts['valid'] + final_counts['duplicate']} | Needs review: {final_counts['needs_review']} | Unparseable: {final_counts['unparseable']}")
-                log_event(LOGGER, "statement_scan_completed", "Local statement scan completed", completed_count=final_counts["valid"] + final_counts["duplicate"], failed_count=final_counts["unparseable"], needs_review_count=final_counts["needs_review"], duration_ms=round((time.perf_counter() - started_at) * 1000), parser_version="stash-pdf-v1", status="completed" if len(final_records) == pdf_count else "interrupted")
+                progress_text.caption(f"{final_state['scan_status'].title()} | Processed {final_state['processed_count']} of {final_state['total_count']} | Ready: {final_state['ready']} | Needs review: {final_state['needs_review']} | Unparseable: {final_state['unparseable']}")
+                log_event(LOGGER, "statement_scan_completed", "Local statement scan completed", completed_count=final_state["processed_count"], failed_count=final_state["unparseable"], needs_review_count=final_state["needs_review"], duration_ms=round((time.perf_counter() - started_at) * 1000), parser_version="stash-pdf-v1", status=final_state["scan_status"])
         if records:
             st.dataframe(pd.DataFrame(_statement_preview_rows(records)).style.format({"Ending portfolio value": "${:,.2f}", "Invested value": "${:,.2f}", "Cash value": "${:,.2f}"}, na_rep="-"), width="stretch", hide_index=True)
-            if st.button("Import Validated History", key="import_validated_history"):
+            import_enabled = scan_can_import(state, pdf_count)
+            if st.button("Import Validated History", key="import_validated_history", disabled=not import_enabled):
                 started_at = time.perf_counter()
-                log_event(LOGGER, "statement_import_started", "Validated statement import started", ready_count=counts["valid"], parser_version="stash-pdf-v1")
+                log_event(LOGGER, "statement_import_started", "Validated statement import started", ready_count=state["ready"], parser_version="stash-pdf-v1")
                 try:
                     result = import_validated_history(records, STATEMENT_HISTORY_DB_PATH)
                     st.session_state["statement_history_import_result"] = result
-                    st.session_state["statement_history_scan"] = classify_scan(records, STATEMENT_HISTORY_DB_PATH)
                     log_event(LOGGER, "statement_import_completed", "Validated statement import completed", imported_count=result["imported"], duplicate_count=result["duplicates"], failed_count=result["needs_review"] + result["unparseable"], duration_ms=round((time.perf_counter() - started_at) * 1000), parser_version="stash-pdf-v1", status="completed")
                 except Exception:
                     log_event(LOGGER, "statement_import_failed", "Validated statement import failed", duration_ms=round((time.perf_counter() - started_at) * 1000), parser_version="stash-pdf-v1", status="failed")
@@ -5416,7 +5408,6 @@ def _render_statement_history_import(total_value: float) -> None:
             st.caption("After verifying the imported dates and values, the original PDFs may be removed from the local Statements folder. Do not remove your only external backup.")
         if st.checkbox("Enable deletion of imported local history", key="enable_history_delete") and st.button("Delete Imported History", type="secondary", key="delete_imported_history"):
             delete_imported_history(STATEMENT_HISTORY_DB_PATH)
-            st.session_state.pop("statement_history_scan", None)
             st.session_state.pop("statement_history_import_result", None)
             st.success("Imported local statement history was deleted. Original PDFs were not changed.")
     history = load_performance_history(STATEMENT_HISTORY_DB_PATH)
@@ -7371,14 +7362,6 @@ def _build_monthly_income_seasonality(
     }
 
 
-def _enable_periodic_refresh(interval_ms: int) -> None:
-    """Trigger a background refresh of the app without a manual browser reload."""
-    try:
-        st_autorefresh(interval=interval_ms, limit=None, key="market_data_refresh")
-    except Exception:
-        pass
-
-
 def _render_last_updated_indicator() -> None:
     """Show the last refresh time so the user can see background updates are happening."""
     last_updated = st.session_state.get("last_market_data_update")
@@ -7400,7 +7383,6 @@ def main() -> None:
         log_event(LOGGER, "application_started", "Portfolio Tracker started")
         LOGGER._application_started_logged = True
     st.set_page_config(page_title="Dividend Portfolio Tracker", page_icon="📈", layout="wide")
-    _enable_periodic_refresh(180000)
     _initialize_export_state()
     st.session_state["last_market_data_update"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     _reset_export_missing_field_warnings()

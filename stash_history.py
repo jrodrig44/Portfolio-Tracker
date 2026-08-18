@@ -2,17 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import math
-import multiprocessing
 import re
 import sqlite3
-import time
 from contextlib import closing
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import pdfplumber
-from pypdf import PdfReader
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -20,7 +17,6 @@ DATA_DIR = PROJECT_ROOT / "data"
 STATEMENTS_DIR = PROJECT_ROOT / "Statements"
 STATEMENT_HISTORY_DB_PATH = DATA_DIR / "stash_statement_history.sqlite"
 PARSER_VERSION = "stash-pdf-v1"
-DOCUMENT_TIMEOUT_SECONDS = 30.0
 EARLIEST_EXPECTED_DATE = date(2021, 8, 1)
 _DATE_PATTERN = r"(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},?\s+\d{4})"
 _RANGE_PATTERN = re.compile(rf"(?:statement\s+period|period|from)\s*:?\s*({_DATE_PATTERN})\s*(?:-|to|through)\s*({_DATE_PATTERN})", re.IGNORECASE)
@@ -78,11 +74,6 @@ def _closing_value_from_row(words: list[dict[str, Any]], row_label: tuple[str, .
     return None
 
 
-def extract_statement_layout_values(pdf_path: Path) -> dict[str, float | None]:
-    with pdfplumber.open(pdf_path) as pdf:
-        return extract_statement_layout_values_from_pages(pdf.pages)
-
-
 def extract_statement_layout_values_from_pages(pages: Any) -> dict[str, float | None]:
     invested_value = None
     cash_value = None
@@ -94,31 +85,20 @@ def extract_statement_layout_values_from_pages(pages: Any) -> dict[str, float | 
     return {"portfolio_value": portfolio_value, "invested_value": invested_value, "cash_value": cash_value}
 
 
-def extract_pdf_text(pdf_path: Path) -> str:
-    reader = PdfReader(str(pdf_path))
-    return "\n".join(page.extract_text() or "" for page in reader.pages)
-
-
-def _parse_statement_document_worker(pdf_path_text: str, queue: Any) -> None:
-    """Run all PDF work in a child so the parent can terminate a stuck document."""
-    pdf_path = Path(pdf_path_text)
+def _parse_statement_document(pdf_path: Path) -> dict[str, Any]:
     try:
-        queue.put({"kind": "stage", "stage": "reading bytes"})
         content = pdf_path.read_bytes()
-        queue.put({"kind": "stage", "stage": "pdfplumber text extraction"})
         with pdfplumber.open(pdf_path) as pdf:
             text = "\n".join(page.extract_text() or "" for page in pdf.pages)
             if not text.strip():
-                queue.put({"kind": "result", "record": {"source_hash": _hash_bytes(content), "status": "unparseable", "warning": "No extractable statement text."}})
-                return
+                return {"source_hash": _hash_bytes(content), "status": "unparseable", "warning": "No extractable statement text."}
             record = parse_statement_text(text)
-            queue.put({"kind": "stage", "stage": "pdfplumber layout extraction"})
             record.update({key: value for key, value in extract_statement_layout_values_from_pages(pdf.pages).items() if value is not None})
         record["source_hash"] = _hash_bytes(content)
         record["status"], record["warning"] = _validate_record(record)
-        queue.put({"kind": "result", "record": record})
+        return record
     except Exception:
-        queue.put({"kind": "result", "record": {"source_hash": None, "status": "unparseable", "warning": "Statement could not be parsed locally."}})
+        return {"source_hash": None, "status": "unparseable", "warning": "Statement could not be parsed locally."}
 
 
 def parse_statement_text(text: str) -> dict[str, Any]:
@@ -161,50 +141,8 @@ def _validate_record(record: dict[str, Any]) -> tuple[str, str]:
     return "valid", "Ready to import."
 
 
-def scan_local_statements(
-    source_dir: Path = STATEMENTS_DIR,
-    *,
-    timeout_seconds: float = DOCUMENT_TIMEOUT_SECONDS,
-    on_document_started: Any = None,
-    on_document_complete: Any = None,
-    worker_target: Any = _parse_statement_document_worker,
-) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
-    pdf_paths = sorted(source_dir.glob("*.pdf"))
-    total_count = len(pdf_paths)
-    for sequence, pdf_path in enumerate(pdf_paths, start=1):
-        started_at = time.perf_counter()
-        last_stage = "reading bytes"
-        if callable(on_document_started):
-            on_document_started(sequence, total_count)
-        queue: Any = multiprocessing.Queue()
-        process = multiprocessing.Process(target=worker_target, args=(str(pdf_path), queue))
-        process.start()
-        record: dict[str, Any] | None = None
-        deadline = started_at + timeout_seconds
-        while time.perf_counter() < deadline and record is None:
-            try:
-                message = queue.get(timeout=min(0.2, max(0.01, deadline - time.perf_counter())))
-                if message.get("kind") == "stage":
-                    last_stage = str(message.get("stage", last_stage))
-                elif message.get("kind") == "result":
-                    record = dict(message["record"])
-            except Exception:
-                continue
-        if record is None:
-            if process.is_alive():
-                process.terminate()
-            record = {"source_hash": None, "status": "unparseable", "warning": f"Local parsing timed out during {last_stage}."}
-        process.join(timeout=1)
-        if process.is_alive():
-            process.kill()
-            process.join()
-        queue.close()
-        record["source_path"] = pdf_path
-        records.append(record)
-        if callable(on_document_complete):
-            on_document_complete(sequence, total_count, record, round((time.perf_counter() - started_at) * 1000))
-    return records
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def ensure_history_schema(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> None:
@@ -214,9 +152,112 @@ def ensure_history_schema(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> None:
             CREATE TABLE IF NOT EXISTS statement_imports (id INTEGER PRIMARY KEY AUTOINCREMENT, source_hash TEXT NOT NULL UNIQUE, statement_start_date TEXT, statement_end_date TEXT NOT NULL, imported_at TEXT NOT NULL, parser_version TEXT NOT NULL, status TEXT NOT NULL, warning_count INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS statement_portfolio_history (id INTEGER PRIMARY KEY AUTOINCREMENT, import_id INTEGER NOT NULL, history_date TEXT NOT NULL, portfolio_value REAL NOT NULL, invested_value REAL, cash_value REAL, cost_basis REAL, contribution_amount REAL, withdrawal_amount REAL, source_type TEXT NOT NULL DEFAULT 'stash_statement', FOREIGN KEY(import_id) REFERENCES statement_imports(id), UNIQUE(history_date, source_type));
             CREATE TABLE IF NOT EXISTS live_portfolio_snapshots (snapshot_date TEXT PRIMARY KEY, portfolio_value REAL NOT NULL, source_type TEXT NOT NULL DEFAULT 'live_portfolio_snapshot');
+            CREATE TABLE IF NOT EXISTS statement_scan_jobs (job_id TEXT PRIMARY KEY, total_count INTEGER NOT NULL, processed_count INTEGER NOT NULL DEFAULT 0, scan_status TEXT NOT NULL, parser_version TEXT NOT NULL, updated_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS statement_scan_preview (source_hash TEXT PRIMARY KEY, scan_status TEXT NOT NULL, statement_start_date TEXT, statement_end_date TEXT, portfolio_value REAL, invested_value REAL, cash_value REAL, cost_basis REAL, contribution_amount REAL, withdrawal_amount REAL, validation_status TEXT NOT NULL, parser_version TEXT NOT NULL, updated_at TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS idx_statement_history_date ON statement_portfolio_history(history_date);
             CREATE INDEX IF NOT EXISTS idx_live_snapshot_date ON live_portfolio_snapshots(snapshot_date);
+            CREATE INDEX IF NOT EXISTS idx_scan_preview_status ON statement_scan_preview(validation_status);
         """)
+
+
+def _scan_job(db_path: Path) -> dict[str, Any]:
+    prepare_history_database(db_path)
+    with closing(sqlite3.connect(db_path)) as conn:
+        row = conn.execute("SELECT total_count, processed_count, scan_status, updated_at FROM statement_scan_jobs WHERE job_id = 'local_statements'").fetchone()
+    return {"total_count": int(row[0]), "processed_count": int(row[1]), "scan_status": str(row[2]), "updated_at": str(row[3])} if row else {"total_count": 0, "processed_count": 0, "scan_status": "not_started", "updated_at": ""}
+
+
+def load_scan_preview(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> list[dict[str, Any]]:
+    prepare_history_database(db_path)
+    with closing(sqlite3.connect(db_path)) as conn:
+        rows = conn.execute("SELECT source_hash, scan_status, statement_start_date, statement_end_date, portfolio_value, invested_value, cash_value, cost_basis, contribution_amount, withdrawal_amount, validation_status FROM statement_scan_preview ORDER BY statement_end_date, source_hash").fetchall()
+    keys = ["source_hash", "scan_status", "statement_start_date", "statement_end_date", "portfolio_value", "invested_value", "cash_value", "cost_basis", "contribution_amount", "withdrawal_amount", "status"]
+    return [dict(zip(keys, row)) for row in rows]
+
+
+def scan_state(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> dict[str, Any]:
+    state = _scan_job(db_path)
+    records = load_scan_preview(db_path)
+    state.update({
+        "ready": sum(1 for record in records if record["status"] == "valid"),
+        "needs_review": sum(1 for record in records if record["status"] == "needs_review"),
+        "unparseable": sum(1 for record in records if record["status"] == "unparseable"),
+        "records": records,
+    })
+    return state
+
+
+def scan_can_import(state: dict[str, Any], detected_count: int) -> bool:
+    return bool(
+        state.get("scan_status") == "completed"
+        and int(state.get("processed_count", 0)) == int(detected_count)
+        and int(state.get("ready", 0)) > 0
+    )
+
+
+def clear_scan_preview(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> None:
+    prepare_history_database(db_path)
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute("DELETE FROM statement_scan_preview")
+        conn.execute("DELETE FROM statement_scan_jobs WHERE job_id = 'local_statements'")
+        conn.commit()
+
+
+def _save_scan_record(conn: sqlite3.Connection, record: dict[str, Any]) -> None:
+    conn.execute(
+        "INSERT INTO statement_scan_preview (source_hash, scan_status, statement_start_date, statement_end_date, portfolio_value, invested_value, cash_value, cost_basis, contribution_amount, withdrawal_amount, validation_status, parser_version, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source_hash) DO UPDATE SET scan_status=excluded.scan_status, statement_start_date=excluded.statement_start_date, statement_end_date=excluded.statement_end_date, portfolio_value=excluded.portfolio_value, invested_value=excluded.invested_value, cash_value=excluded.cash_value, cost_basis=excluded.cost_basis, contribution_amount=excluded.contribution_amount, withdrawal_amount=excluded.withdrawal_amount, validation_status=excluded.validation_status, parser_version=excluded.parser_version, updated_at=excluded.updated_at",
+        (record["source_hash"], "processed", record.get("statement_start_date"), record.get("statement_end_date"), record.get("portfolio_value"), record.get("invested_value"), record.get("cash_value"), record.get("cost_basis"), record.get("contribution_amount"), record.get("withdrawal_amount"), record["status"], PARSER_VERSION, _utc_now()),
+    )
+
+
+def run_statement_scan(
+    source_dir: Path = STATEMENTS_DIR,
+    *,
+    db_path: Path = STATEMENT_HISTORY_DB_PATH,
+    restart: bool = False,
+    on_document_started: Any = None,
+    on_document_complete: Any = None,
+) -> dict[str, Any]:
+    """Sequentially scan local PDFs and persist each preview before continuing."""
+    prepare_history_database(db_path)
+    pdf_paths = sorted(source_dir.glob("*.pdf"))
+    if restart:
+        clear_scan_preview(db_path)
+    with closing(sqlite3.connect(db_path)) as conn:
+        existing_hashes = {str(row[0]) for row in conn.execute("SELECT source_hash FROM statement_scan_preview")}
+        conn.execute("INSERT INTO statement_scan_jobs (job_id, total_count, processed_count, scan_status, parser_version, updated_at) VALUES ('local_statements', ?, ?, 'running', ?, ?) ON CONFLICT(job_id) DO UPDATE SET total_count=excluded.total_count, processed_count=excluded.processed_count, scan_status='running', parser_version=excluded.parser_version, updated_at=excluded.updated_at", (len(pdf_paths), len(existing_hashes), PARSER_VERSION, _utc_now()))
+        conn.commit()
+    try:
+        for sequence, pdf_path in enumerate(pdf_paths, start=1):
+            content = pdf_path.read_bytes()
+            source_hash = _hash_bytes(content)
+            if source_hash in existing_hashes:
+                continue
+            if callable(on_document_started):
+                on_document_started(sequence, len(pdf_paths))
+            try:
+                record = _parse_statement_document(pdf_path)
+            except Exception:
+                record = {"status": "unparseable", "warning": "Statement could not be parsed locally."}
+            record["source_hash"] = source_hash
+            with closing(sqlite3.connect(db_path)) as conn:
+                _save_scan_record(conn, record)
+                processed_count = conn.execute("SELECT COUNT(*) FROM statement_scan_preview").fetchone()[0]
+                conn.execute("UPDATE statement_scan_jobs SET processed_count=?, updated_at=? WHERE job_id='local_statements'", (processed_count, _utc_now()))
+                conn.commit()
+            if callable(on_document_complete):
+                on_document_complete(sequence, len(pdf_paths), record)
+        with closing(sqlite3.connect(db_path)) as conn:
+            processed_count = conn.execute("SELECT COUNT(*) FROM statement_scan_preview").fetchone()[0]
+            conn.execute("UPDATE statement_scan_jobs SET processed_count=?, scan_status='completed', updated_at=? WHERE job_id='local_statements'", (processed_count, _utc_now()))
+            conn.commit()
+    except BaseException:
+        with closing(sqlite3.connect(db_path)) as conn:
+            processed_count = conn.execute("SELECT COUNT(*) FROM statement_scan_preview").fetchone()[0]
+            conn.execute("UPDATE statement_scan_jobs SET processed_count=?, scan_status='interrupted', updated_at=? WHERE job_id='local_statements'", (processed_count, _utc_now()))
+            conn.commit()
+        raise
+    return scan_state(db_path)
 
 
 def history_summary(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> dict[str, int]:

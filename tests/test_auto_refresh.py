@@ -1,18 +1,16 @@
 import unittest
+import app
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pandas as pd
 
-from app import _build_ai_export_payload, _build_export_markdown, _enable_periodic_refresh, _latest_historical_context, _normalize_columns
+from app import _build_ai_export_payload, _build_export_markdown, _latest_historical_context, _normalize_columns
 
 
 class AutoRefreshTests(unittest.TestCase):
-    @patch("app.st_autorefresh")
-    def test_enable_periodic_refresh_uses_streamlit_autorefresh(self, autorefresh_mock) -> None:
-        _enable_periodic_refresh(60000)
-
-        autorefresh_mock.assert_called_once_with(interval=60000, limit=None, key="market_data_refresh")
+    def test_automatic_refresh_is_disabled_for_local_statement_scans(self) -> None:
+        self.assertFalse(hasattr(app, "_enable_periodic_refresh"))
 
     def test_normalize_columns_preserves_regular_and_special_contributions(self) -> None:
         holdings = pd.DataFrame(
