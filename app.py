@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import calendar
 import json
 import logging
 import math
@@ -5354,7 +5355,7 @@ def _render_statement_history_import(total_value: float) -> None:
         records = state["records"]
         continuity = state["monthly_continuity"]
         diagnostics = state["diagnostics"]
-        for label, value in (("Local statement folder", "Ready"), ("PDFs detected", state["detected_pdf_count"] or pdf_count), ("Unique PDFs", state["unique_pdf_count"]), ("Processed unique", f"{state['processed_unique_count']} of {state['unique_pdf_count']}"), ("Duplicate files", state["duplicate_file_count"]), ("Accounted for", f"{state['processed_count']} of {state['detected_pdf_count'] or pdf_count}"), ("Remaining", max((state["detected_pdf_count"] or pdf_count) - state["processed_count"], 0)), ("Ready", state["ready"]), ("Needs review", state["needs_review"]), ("Unparseable", state["unparseable"]), ("Missing months", continuity["missing_month_count"]), ("Duplicate months", continuity["duplicate_month_count"]), ("Monthly continuity", "Complete" if continuity["complete"] else "Needs review"), ("Header markers found", diagnostics["header_found"]), ("Nearby date ranges found", diagnostics["nearby_date_range_found"]), ("Account summaries found", diagnostics["account_summary_found"]), ("Balance rows found", diagnostics["balance_rows_found"]), ("Scan status", state["scan_status"]), ("Previously imported", summary["imported"])):
+        for label, value in (("Local statement folder", "Ready"), ("PDFs detected", state["detected_pdf_count"] or pdf_count), ("Unique PDFs", state["unique_pdf_count"]), ("Processed unique", f"{state['processed_unique_count']} of {state['unique_pdf_count']}"), ("Duplicate files", state["duplicate_file_count"]), ("Accounted for", f"{state['processed_count']} of {state['detected_pdf_count'] or pdf_count}"), ("Remaining", max((state["detected_pdf_count"] or pdf_count) - state["processed_count"], 0)), ("Ready", state["ready"]), ("Needs review", state["needs_review"]), ("Unparseable", state["unparseable"]), ("Missing months", continuity["missing_month_count"]), ("Duplicate months", continuity["duplicate_month_count"]), ("Monthly continuity", "Complete" if continuity["complete"] else "Needs review"), ("Header markers found", diagnostics["header_found"]), ("Nearby date ranges found", diagnostics["nearby_date_range_found"]), ("Nearby account markers found", diagnostics["nearby_account_marker_found"]), ("Account summaries found", diagnostics["account_summary_found"]), ("Balance rows found", diagnostics["balance_rows_found"]), ("Accounting equations passed", diagnostics["accounting_equation_passed"]), ("Scan status", state["scan_status"]), ("Previously imported", summary["imported"])):
             st.caption(f"{label}: {value}")
 
         def render_progress(sequence: int, total_count: int) -> None:
@@ -5395,14 +5396,17 @@ def _render_statement_history_import(total_value: float) -> None:
             manual_records = [record for record in records if record.get("source_type") == "manual_statement_review"]
             if missing_months:
                 selected_month = st.selectbox("Missing month", missing_months, key="manual_statement_month")
-                ending_date = st.date_input("Statement ending date", key="manual_statement_ending_date")
-                invested_value = st.number_input("Closing Total Equity Holdings", min_value=0.0, value=0.0, step=0.01, format="%.2f", key="manual_statement_equity")
+                selected_year, selected_month_number = (int(part) for part in selected_month.split("-"))
+                default_ending_date = datetime(selected_year, selected_month_number, calendar.monthrange(selected_year, selected_month_number)[1]).date()
+                ending_date = st.date_input("Statement ending date", value=default_ending_date, key="manual_statement_ending_date")
+                invested_value = st.number_input("Closing Total Priced Portfolio", min_value=0.0, value=0.0, step=0.01, format="%.2f", key="manual_statement_priced_portfolio")
                 cash_value = st.number_input("Closing Net Account Balance", min_value=0.0, value=0.0, step=0.01, format="%.2f", key="manual_statement_cash")
-                st.caption(f"Calculated portfolio value: {_format_currency(invested_value + cash_value)}")
+                portfolio_value = st.number_input("Closing Total Equity Holdings", min_value=0.0, value=0.0, step=0.01, format="%.2f", key="manual_statement_total_equity")
+                st.caption(f"Calculated expected total: {_format_currency(invested_value + cash_value)} | Entered Total Equity Holdings: {_format_currency(portfolio_value)}")
                 confirmed = st.checkbox("I verified these values against the original statement.", key="manual_statement_confirmed")
                 if st.button("Save Manual Review", key="save_manual_statement_review"):
                     try:
-                        save_manual_statement_review(selected_month, ending_date.isoformat(), invested_value, cash_value, confirmed, db_path=STATEMENT_HISTORY_DB_PATH)
+                        save_manual_statement_review(selected_month, ending_date.isoformat(), invested_value, cash_value, portfolio_value, confirmed, db_path=STATEMENT_HISTORY_DB_PATH)
                         st.rerun()
                     except ValueError as exc:
                         st.error(str(exc))
@@ -5412,17 +5416,18 @@ def _render_statement_history_import(total_value: float) -> None:
                 edit_month = st.selectbox("Edit manual review month", sorted(editable_months), key="edit_manual_statement_month")
                 edit_record = editable_months[edit_month]
                 edit_date = st.date_input("Edited statement ending date", value=datetime.fromisoformat(str(edit_record["statement_end_date"])).date(), key="edit_manual_statement_date")
-                edit_equity = st.number_input("Edited Closing Total Equity Holdings", min_value=0.0, value=float(edit_record["invested_value"]), step=0.01, format="%.2f", key="edit_manual_statement_equity")
+                edit_invested = st.number_input("Edited Closing Total Priced Portfolio", min_value=0.0, value=float(edit_record["invested_value"]), step=0.01, format="%.2f", key="edit_manual_statement_priced_portfolio")
                 edit_cash = st.number_input("Edited Closing Net Account Balance", min_value=0.0, value=float(edit_record["cash_value"]), step=0.01, format="%.2f", key="edit_manual_statement_cash")
+                edit_equity = st.number_input("Edited Closing Total Equity Holdings", min_value=0.0, value=float(edit_record["portfolio_value"]), step=0.01, format="%.2f", key="edit_manual_statement_equity")
                 edit_confirmed = st.checkbox("I verified these edited values against the original statement.", value=bool(edit_record["confirmed"]), key="edit_manual_statement_confirmed")
                 if st.button("Save Edited Manual Review", key="edit_manual_statement_review"):
                     try:
-                        save_manual_statement_review(edit_month, edit_date.isoformat(), edit_equity, edit_cash, edit_confirmed, manual_id=str(edit_record["source_hash"]), db_path=STATEMENT_HISTORY_DB_PATH)
+                        save_manual_statement_review(edit_month, edit_date.isoformat(), edit_invested, edit_cash, edit_equity, edit_confirmed, manual_id=str(edit_record["source_hash"]), db_path=STATEMENT_HISTORY_DB_PATH)
                         st.rerun()
                     except ValueError as exc:
                         st.error(str(exc))
                 for record in manual_records:
-                    if st.button("Remove Manual Review", key=f"remove_manual_{record['source_hash']}"):
+                    if st.button(f"Remove {record['review_month']}", key=f"remove_manual_{record['source_hash']}"):
                         remove_manual_statement_review(str(record["source_hash"]), STATEMENT_HISTORY_DB_PATH)
                         st.rerun()
             import_enabled = scan_can_import(state, pdf_count)

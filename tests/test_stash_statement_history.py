@@ -102,12 +102,45 @@ class StashStatementHistoryTests(unittest.TestCase):
             height = 800
             def extract_words(self) -> list[dict[str, object]]:
                 return [
-                    {"text": "TOTAL", "top": 400, "x0": 10, "x1": 40}, {"text": "EQUITY", "top": 400, "x0": 45, "x1": 85}, {"text": "HOLDINGS", "top": 400, "x0": 90, "x1": 145}, {"text": "$100.00", "top": 400, "x0": 200, "x1": 250}, {"text": "$120.00", "top": 400, "x0": 260, "x1": 310},
-                    {"text": "NET", "top": 460, "x0": 10, "x1": 30}, {"text": "ACCOUNT", "top": 460, "x0": 35, "x1": 90}, {"text": "BALANCE", "top": 460, "x0": 95, "x1": 150}, {"text": "$1.00", "top": 460, "x0": 200, "x1": 240}, {"text": "$2.00", "top": 460, "x0": 250, "x1": 290},
+                    {"text": "ACCOUNT", "top": 300, "x0": 10, "x1": 70}, {"text": "SUMMARY", "top": 300, "x0": 75, "x1": 140},
+                    {"text": "TOTAL", "top": 360, "x0": 10, "x1": 40}, {"text": "PRICED", "top": 360, "x0": 45, "x1": 85}, {"text": "PORTFOLIO", "top": 360, "x0": 90, "x1": 145}, {"text": "$100.00", "top": 360, "x0": 200, "x1": 250}, {"text": "$120.00", "top": 360, "x0": 260, "x1": 310},
+                    {"text": "NET", "top": 400, "x0": 10, "x1": 30}, {"text": "ACCOUNT", "top": 400, "x0": 35, "x1": 90}, {"text": "BALANCE", "top": 400, "x0": 95, "x1": 150}, {"text": "$1.00", "top": 400, "x0": 200, "x1": 240}, {"text": "$2.00", "top": 400, "x0": 250, "x1": 290},
+                    {"text": "TOTAL", "top": 440, "x0": 10, "x1": 40}, {"text": "EQUITY", "top": 440, "x0": 45, "x1": 85}, {"text": "HOLDINGS", "top": 440, "x0": 90, "x1": 145}, {"text": "$101.00", "top": 440, "x0": 200, "x1": 250}, {"text": "$122.00", "top": 440, "x0": 260, "x1": 310},
                 ]
         values = extract_statement_layout_values_from_pages([Page()])
         self.assertTrue(values["summary_found"])
+        self.assertTrue(values["accounting_passed"])
         self.assertEqual(values["portfolio_value"], 122.0)
+
+    def test_account_summary_mismatch_is_not_accepted(self) -> None:
+        class Page:
+            height = 800
+            def extract_words(self) -> list[dict[str, object]]:
+                return [
+                    {"text": "TOTAL", "top": 360, "x0": 10, "x1": 40}, {"text": "PRICED", "top": 360, "x0": 45, "x1": 85}, {"text": "PORTFOLIO", "top": 360, "x0": 90, "x1": 145}, {"text": "$10.00", "top": 360, "x0": 200, "x1": 250}, {"text": "$12.00", "top": 360, "x0": 260, "x1": 310},
+                    {"text": "NET", "top": 400, "x0": 10, "x1": 30}, {"text": "ACCOUNT", "top": 400, "x0": 35, "x1": 90}, {"text": "BALANCE", "top": 400, "x0": 95, "x1": 150}, {"text": "$1.00", "top": 400, "x0": 200, "x1": 240}, {"text": "$2.00", "top": 400, "x0": 250, "x1": 290},
+                    {"text": "TOTAL", "top": 440, "x0": 10, "x1": 40}, {"text": "EQUITY", "top": 440, "x0": 45, "x1": 85}, {"text": "HOLDINGS", "top": 440, "x0": 90, "x1": 145}, {"text": "$11.00", "top": 440, "x0": 200, "x1": 250}, {"text": "$15.00", "top": 440, "x0": 260, "x1": 310},
+                ]
+        values = extract_statement_layout_values_from_pages([Page()])
+        self.assertFalse(values["accounting_passed"])
+        self.assertIsNone(values["portfolio_value"])
+
+    def test_bounded_header_range_without_nearby_account_marker_is_accepted(self) -> None:
+        words = [
+            {"text": "April", "top": 20, "x0": 10, "x1": 45}, {"text": "1,", "top": 20, "x0": 48, "x1": 60}, {"text": "2023", "top": 20, "x0": 62, "x1": 90},
+            {"text": "–", "top": 20, "x0": 95, "x1": 100}, {"text": "April", "top": 20, "x0": 105, "x1": 140}, {"text": "30,", "top": 20, "x0": 143, "x1": 160}, {"text": "2023", "top": 20, "x0": 163, "x1": 191},
+        ]
+        record = parse_statement_header_words(words, 800)
+        self.assertEqual(record["statement_end_date"], "2023-04-30")
+        self.assertFalse(record["diagnostics"]["nearby_account_marker_found"])
+
+    def test_backend_import_rejects_scanner_record_without_verified_equation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "history.sqlite"
+            record = {"source_hash": "scanner-unverified", "statement_end_date": "2023-04-30", "portfolio_value": 12.0, "invested_value": 10.0, "cash_value": 2.0, "status": "valid", "diagnostics": {"accounting_equation_passed": False}}
+            result = import_validated_history([record], db_path)
+            self.assertEqual(result["imported"], 0)
+            self.assertEqual(result["needs_review"], 1)
 
     def test_scan_does_not_import_and_duplicate_dates_require_review(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -193,27 +226,39 @@ class StashStatementHistoryTests(unittest.TestCase):
             with patch("stash_history._parse_statement_document", return_value=parsed):
                 run_statement_scan(root, db_path=db_path)
             reopened = scan_state(db_path)
-            self.assertEqual(reopened["diagnostics"], {"header_found": 0, "nearby_date_range_found": 0, "account_summary_found": 0, "balance_rows_found": 0})
+            self.assertEqual(reopened["diagnostics"], {"header_found": 0, "nearby_date_range_found": 0, "nearby_account_marker_found": 0, "account_summary_found": 0, "balance_rows_found": 0, "accounting_equation_passed": 0})
 
     def test_manual_review_validates_persists_edits_and_removes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "history.sqlite"
             with self.assertRaises(ValueError):
-                save_manual_statement_review("2021-08", "2021-08-30", 10.0, 1.0, True, db_path=db_path)
+                save_manual_statement_review("2021-08", "2021-08-30", 10.0, 1.0, 11.0, True, db_path=db_path)
             with self.assertRaises(ValueError):
-                save_manual_statement_review("2021-08", "2021-08-31", -1.0, 1.0, True, db_path=db_path)
+                save_manual_statement_review("2021-08", "2021-08-31", -1.0, 1.0, 0.0, True, db_path=db_path)
             with self.assertRaises(ValueError):
-                save_manual_statement_review("2021-08", "2021-08-31", 10.0, 1.0, False, db_path=db_path)
-            manual_id = save_manual_statement_review("2021-08", "2021-08-31", 10.0, 1.5, True, db_path=db_path)
+                save_manual_statement_review("2021-08", "2021-08-31", 10.0, 1.0, 11.0, False, db_path=db_path)
+            with self.assertRaises(ValueError):
+                save_manual_statement_review("2021-08", "2021-08-31", 10.0, 1.5, 12.0, True, db_path=db_path)
+            manual_id = save_manual_statement_review("2021-08", "2021-08-31", 10.0, 1.5, 11.5, True, db_path=db_path)
             record = load_manual_statement_reviews(db_path)[0]
             self.assertEqual(record["portfolio_value"], 11.5)
             self.assertEqual(record["warning"], "Manually verified against the local statement.")
             self.assertEqual(record["source_type"], "manual_statement_review")
             with self.assertRaises(ValueError):
-                save_manual_statement_review("2021-08", "2021-08-31", 10.0, 1.5, True, db_path=db_path)
-            save_manual_statement_review("2021-08", "2021-08-31", 20.0, 2.0, True, manual_id=manual_id, db_path=db_path)
+                save_manual_statement_review("2021-08", "2021-08-31", 10.0, 1.5, 11.5, True, db_path=db_path)
+            save_manual_statement_review("2021-08", "2021-08-31", 20.0, 2.0, 22.0, True, manual_id=manual_id, db_path=db_path)
             self.assertEqual(load_manual_statement_reviews(db_path)[0]["portfolio_value"], 22.0)
             remove_manual_statement_review(manual_id, db_path)
+            self.assertEqual(load_manual_statement_reviews(db_path), [])
+
+    def test_old_two_field_manual_reviews_are_cleared_by_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "history.sqlite"
+            with closing(sqlite3.connect(db_path)) as connection:
+                connection.execute("CREATE TABLE manual_statement_reviews (manual_id TEXT PRIMARY KEY, review_month TEXT, statement_end_date TEXT, portfolio_value REAL, invested_value REAL, cash_value REAL, confirmed INTEGER, validation_status TEXT, warning TEXT, updated_at TEXT)")
+                connection.execute("INSERT INTO manual_statement_reviews VALUES ('legacy', '2023-04', '2023-04-30', 12.0, 10.0, 2.0, 1, 'valid', 'legacy', 'now')")
+                connection.commit()
+            prepare_history_database(db_path)
             self.assertEqual(load_manual_statement_reviews(db_path), [])
 
     def test_manual_reviews_complete_continuity_and_preserve_source_type_on_import(self) -> None:
@@ -222,7 +267,7 @@ class StashStatementHistoryTests(unittest.TestCase):
             year, month = 2021, 8
             for _ in range(60):
                 ending = f"{year:04d}-{month:02d}-{calendar.monthrange(year, month)[1]:02d}"
-                save_manual_statement_review(f"{year:04d}-{month:02d}", ending, 10.0, 1.0, True, db_path=db_path)
+                save_manual_statement_review(f"{year:04d}-{month:02d}", ending, 10.0, 1.0, 11.0, True, db_path=db_path)
                 year, month = (year + 1, 1) if month == 12 else (year, month + 1)
             state = scan_state(db_path)
             self.assertTrue(state["monthly_continuity"]["complete"])

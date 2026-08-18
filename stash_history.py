@@ -100,14 +100,15 @@ def parse_statement_header_words(words: list[dict[str, Any]], page_height: float
             period_top = top
             break
     nearby_account_found = period_top is not None and any(abs(account_top - period_top) <= 160 for account_top in account_tops)
-    start_date = _parse_date(period.group(1)) if period and nearby_account_found else None
-    end_date = _parse_date(period.group(2)) if period and nearby_account_found else None
+    start_date = _parse_date(period.group(1)) if period else None
+    end_date = _parse_date(period.group(2)) if period else None
     return {
         "statement_start_date": start_date.isoformat() if start_date else None,
         "statement_end_date": end_date.isoformat() if end_date else None,
         "diagnostics": {
-            "verified_header_found": nearby_account_found,
+            "verified_header_found": period is not None,
             "nearby_date_range_found": period is not None,
+            "nearby_account_marker_found": nearby_account_found,
             "verified_account_summary_found": False,
             "balance_rows_found": False,
             "statement_date_accepted": end_date is not None,
@@ -150,14 +151,15 @@ def parse_statement_header_chars(chars: list[dict[str, Any]], page_height: float
             break
     account_tops = [top for top, line_text in lines if re.search(r"\baccount\b", line_text, re.IGNORECASE)]
     nearby_account_found = period_top is not None and any(abs(account_top - period_top) <= 160 for account_top in account_tops)
-    start_date = _parse_date(period.group(1)) if period and nearby_account_found else None
-    end_date = _parse_date(period.group(2)) if period and nearby_account_found else None
+    start_date = _parse_date(period.group(1)) if period else None
+    end_date = _parse_date(period.group(2)) if period else None
     return {
         "statement_start_date": start_date.isoformat() if start_date else None,
         "statement_end_date": end_date.isoformat() if end_date else None,
         "diagnostics": {
-            "verified_header_found": nearby_account_found,
+            "verified_header_found": period is not None,
             "nearby_date_range_found": period is not None,
+            "nearby_account_marker_found": nearby_account_found,
             "verified_account_summary_found": False,
             "balance_rows_found": False,
             "statement_date_accepted": end_date is not None,
@@ -178,19 +180,21 @@ def _balance_row(words: list[dict[str, Any]], row_label: tuple[str, ...]) -> tup
 
 
 def extract_statement_layout_values_from_pages(pages: Any) -> dict[str, float | None]:
-    invested_value = cash_value = None
-    summary_found = balance_rows_found = False
+    invested_value = cash_value = portfolio_value = None
+    summary_found = balance_rows_found = accounting_passed = False
     for page in pages:
         words = page.extract_words()
-        invested_value, equity_top = _balance_row(words, ("TOTAL", "EQUITY", "HOLDINGS"))
+        invested_value, priced_top = _balance_row(words, ("TOTAL", "PRICED", "PORTFOLIO"))
         cash_value, cash_top = _balance_row(words, ("NET", "ACCOUNT", "BALANCE"))
-        balance_rows_found = invested_value is not None and cash_value is not None
-        summary_found = balance_rows_found and equity_top is not None and cash_top is not None and abs(equity_top - cash_top) <= 220
-        if not summary_found:
-            invested_value = cash_value = None
+        portfolio_value, equity_top = _balance_row(words, ("TOTAL", "EQUITY", "HOLDINGS"))
+        balance_rows_found = all(value is not None for value in (invested_value, cash_value, portfolio_value))
+        row_tops = [top for top in (priced_top, cash_top, equity_top) if top is not None]
+        summary_found = balance_rows_found and len(row_tops) == 3 and max(row_tops) - min(row_tops) <= 220
+        accounting_passed = summary_found and abs(float(invested_value) + float(cash_value) - float(portfolio_value)) <= 0.01
+        if not accounting_passed:
+            invested_value = cash_value = portfolio_value = None
         break
-    portfolio_value = invested_value + cash_value if invested_value is not None and cash_value is not None else invested_value
-    return {"portfolio_value": portfolio_value, "invested_value": invested_value, "cash_value": cash_value, "summary_found": summary_found, "balance_rows_found": balance_rows_found}
+    return {"portfolio_value": portfolio_value, "invested_value": invested_value, "cash_value": cash_value, "summary_found": summary_found, "balance_rows_found": balance_rows_found, "accounting_passed": accounting_passed}
 
 
 def _parse_statement_document(pdf_path: Path) -> dict[str, Any]:
@@ -209,6 +213,7 @@ def _parse_statement_document(pdf_path: Path) -> dict[str, Any]:
                 record.update({key: value for key, value in summary_values.items() if key in {"portfolio_value", "invested_value", "cash_value"} and value is not None})
                 record["diagnostics"]["verified_account_summary_found"] = bool(summary_values["summary_found"])
                 record["diagnostics"]["balance_rows_found"] = bool(summary_values["balance_rows_found"])
+                record["diagnostics"]["accounting_equation_passed"] = bool(summary_values["accounting_passed"])
         record["source_hash"] = _hash_bytes(content)
         record["status"], record["warning"] = _validate_record(record)
         return record
@@ -251,11 +256,13 @@ def _validate_record(record: dict[str, Any]) -> tuple[str, str]:
         return "needs_review", "Statement ending date is outside expected coverage."
     if start_date and end_date < start_date:
         return "needs_review", "Statement ending date precedes its start date."
+    if end_date and end_date.day != __import__("calendar").monthrange(end_date.year, end_date.month)[1]:
+        return "needs_review", "Statement ending date is not the final calendar day of its month."
     if not isinstance(value, (int, float)) or not math.isfinite(float(value)) or value < 0:
         return "needs_review", "Ending portfolio value is missing or invalid."
     invested_value, cash_value = record.get("invested_value"), record.get("cash_value")
     if all(isinstance(item, (int, float)) for item in (invested_value, cash_value)):
-        if abs(float(invested_value) + float(cash_value) - float(value)) > max(1.0, float(value) * 0.01):
+        if abs(float(invested_value) + float(cash_value) - float(value)) > 0.01:
             return "needs_review", "Invested and cash values differ materially from the ending total."
     return "valid", "Ready to import."
 
@@ -272,8 +279,8 @@ def ensure_history_schema(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> None:
             CREATE TABLE IF NOT EXISTS statement_portfolio_history (id INTEGER PRIMARY KEY AUTOINCREMENT, import_id INTEGER NOT NULL, history_date TEXT NOT NULL, portfolio_value REAL NOT NULL, invested_value REAL, cash_value REAL, cost_basis REAL, contribution_amount REAL, withdrawal_amount REAL, source_type TEXT NOT NULL DEFAULT 'stash_statement', FOREIGN KEY(import_id) REFERENCES statement_imports(id), UNIQUE(history_date, source_type));
             CREATE TABLE IF NOT EXISTS live_portfolio_snapshots (snapshot_date TEXT PRIMARY KEY, portfolio_value REAL NOT NULL, source_type TEXT NOT NULL DEFAULT 'live_portfolio_snapshot');
             CREATE TABLE IF NOT EXISTS statement_scan_jobs (job_id TEXT PRIMARY KEY, total_count INTEGER NOT NULL, processed_count INTEGER NOT NULL DEFAULT 0, detected_pdf_count INTEGER NOT NULL DEFAULT 0, unique_pdf_count INTEGER NOT NULL DEFAULT 0, processed_unique_count INTEGER NOT NULL DEFAULT 0, duplicate_file_count INTEGER NOT NULL DEFAULT 0, scan_status TEXT NOT NULL, parser_version TEXT NOT NULL, updated_at TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS statement_scan_preview (source_hash TEXT PRIMARY KEY, scan_status TEXT NOT NULL, statement_start_date TEXT, statement_end_date TEXT, portfolio_value REAL, invested_value REAL, cash_value REAL, cost_basis REAL, contribution_amount REAL, withdrawal_amount REAL, validation_status TEXT NOT NULL, warning TEXT NOT NULL DEFAULT '', header_found INTEGER NOT NULL DEFAULT 0, nearby_date_range_found INTEGER NOT NULL DEFAULT 0, account_summary_found INTEGER NOT NULL DEFAULT 0, balance_rows_found INTEGER NOT NULL DEFAULT 0, parser_version TEXT NOT NULL, updated_at TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS manual_statement_reviews (manual_id TEXT PRIMARY KEY, review_month TEXT NOT NULL UNIQUE, statement_end_date TEXT NOT NULL, portfolio_value REAL NOT NULL, invested_value REAL NOT NULL, cash_value REAL NOT NULL, confirmed INTEGER NOT NULL DEFAULT 0, validation_status TEXT NOT NULL, warning TEXT NOT NULL, updated_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS statement_scan_preview (source_hash TEXT PRIMARY KEY, scan_status TEXT NOT NULL, statement_start_date TEXT, statement_end_date TEXT, portfolio_value REAL, invested_value REAL, cash_value REAL, cost_basis REAL, contribution_amount REAL, withdrawal_amount REAL, validation_status TEXT NOT NULL, warning TEXT NOT NULL DEFAULT '', header_found INTEGER NOT NULL DEFAULT 0, nearby_date_range_found INTEGER NOT NULL DEFAULT 0, nearby_account_marker_found INTEGER NOT NULL DEFAULT 0, account_summary_found INTEGER NOT NULL DEFAULT 0, balance_rows_found INTEGER NOT NULL DEFAULT 0, accounting_equation_passed INTEGER NOT NULL DEFAULT 0, parser_version TEXT NOT NULL, updated_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS manual_statement_reviews (manual_id TEXT PRIMARY KEY, review_month TEXT NOT NULL UNIQUE, statement_end_date TEXT NOT NULL, portfolio_value REAL NOT NULL, invested_value REAL NOT NULL, cash_value REAL NOT NULL, confirmed INTEGER NOT NULL DEFAULT 0, validation_status TEXT NOT NULL, warning TEXT NOT NULL, accounting_verified INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS idx_statement_history_date ON statement_portfolio_history(history_date);
             CREATE INDEX IF NOT EXISTS idx_live_snapshot_date ON live_portfolio_snapshots(snapshot_date);
             CREATE INDEX IF NOT EXISTS idx_scan_preview_status ON statement_scan_preview(validation_status);
@@ -285,9 +292,13 @@ def ensure_history_schema(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> None:
         preview_columns = {row[1] for row in conn.execute("PRAGMA table_info(statement_scan_preview)")}
         if "warning" not in preview_columns:
             conn.execute("ALTER TABLE statement_scan_preview ADD COLUMN warning TEXT NOT NULL DEFAULT ''")
-        for column in ("header_found", "nearby_date_range_found", "account_summary_found", "balance_rows_found"):
+        for column in ("header_found", "nearby_date_range_found", "nearby_account_marker_found", "account_summary_found", "balance_rows_found", "accounting_equation_passed"):
             if column not in preview_columns:
                 conn.execute(f"ALTER TABLE statement_scan_preview ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0")
+        manual_columns = {row[1] for row in conn.execute("PRAGMA table_info(manual_statement_reviews)")}
+        if "accounting_verified" not in manual_columns:
+            conn.execute("ALTER TABLE manual_statement_reviews ADD COLUMN accounting_verified INTEGER NOT NULL DEFAULT 0")
+            conn.execute("DELETE FROM manual_statement_reviews")
         conn.commit()
 
 
@@ -304,8 +315,8 @@ def _scan_job(db_path: Path) -> dict[str, Any]:
 def load_scan_preview(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> list[dict[str, Any]]:
     prepare_history_database(db_path)
     with closing(sqlite3.connect(db_path)) as conn:
-        rows = conn.execute("SELECT source_hash, scan_status, statement_start_date, statement_end_date, portfolio_value, invested_value, cash_value, cost_basis, contribution_amount, withdrawal_amount, validation_status, warning, header_found, nearby_date_range_found, account_summary_found, balance_rows_found FROM statement_scan_preview ORDER BY statement_end_date, source_hash").fetchall()
-    keys = ["source_hash", "scan_status", "statement_start_date", "statement_end_date", "portfolio_value", "invested_value", "cash_value", "cost_basis", "contribution_amount", "withdrawal_amount", "status", "warning", "header_found", "nearby_date_range_found", "account_summary_found", "balance_rows_found"]
+        rows = conn.execute("SELECT source_hash, scan_status, statement_start_date, statement_end_date, portfolio_value, invested_value, cash_value, cost_basis, contribution_amount, withdrawal_amount, validation_status, warning, header_found, nearby_date_range_found, nearby_account_marker_found, account_summary_found, balance_rows_found, accounting_equation_passed FROM statement_scan_preview ORDER BY statement_end_date, source_hash").fetchall()
+    keys = ["source_hash", "scan_status", "statement_start_date", "statement_end_date", "portfolio_value", "invested_value", "cash_value", "cost_basis", "contribution_amount", "withdrawal_amount", "status", "warning", "header_found", "nearby_date_range_found", "nearby_account_marker_found", "account_summary_found", "balance_rows_found", "accounting_equation_passed"]
     return [dict(zip(keys, row)) for row in rows]
 
 
@@ -326,14 +337,16 @@ def missing_statement_months(records: list[dict[str, Any]]) -> list[str]:
     return sorted(set(expected) - represented)
 
 
-def save_manual_statement_review(review_month: str, statement_end_date: str, invested_value: float, cash_value: float, confirmed: bool, *, manual_id: str | None = None, db_path: Path = STATEMENT_HISTORY_DB_PATH) -> str:
+def save_manual_statement_review(review_month: str, statement_end_date: str, invested_value: float, cash_value: float, portfolio_value: float, confirmed: bool, *, manual_id: str | None = None, db_path: Path = STATEMENT_HISTORY_DB_PATH) -> str:
     prepare_history_database(db_path)
     month_date = _parse_date(f"{review_month}-01")
     end_date = _parse_date(statement_end_date)
     if month_date is None or end_date is None or end_date.strftime("%Y-%m") != review_month or end_date.day != __import__("calendar").monthrange(end_date.year, end_date.month)[1]:
         raise ValueError("Statement ending date must be the final calendar day of the selected missing month.")
-    if not all(isinstance(value, (int, float)) and math.isfinite(float(value)) and float(value) >= 0 for value in (invested_value, cash_value)):
+    if not all(isinstance(value, (int, float)) and math.isfinite(float(value)) and float(value) >= 0 for value in (invested_value, cash_value, portfolio_value)):
         raise ValueError("Closing values must be finite and nonnegative.")
+    if abs(float(invested_value) + float(cash_value) - float(portfolio_value)) > 0.01:
+        raise ValueError("Total Priced Portfolio plus Net Account Balance must equal Total Equity Holdings.")
     if not confirmed:
         raise ValueError("Manual statement values require explicit confirmation.")
     existing = load_scan_preview(db_path) + [record for record in load_manual_statement_reviews(db_path) if record["source_hash"] != manual_id]
@@ -342,7 +355,7 @@ def save_manual_statement_review(review_month: str, statement_end_date: str, inv
         raise ValueError("Selected month is already represented.")
     manual_id = manual_id or f"manual-{uuid.uuid4().hex}"
     with closing(sqlite3.connect(db_path)) as conn:
-        conn.execute("INSERT INTO manual_statement_reviews (manual_id, review_month, statement_end_date, portfolio_value, invested_value, cash_value, confirmed, validation_status, warning, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'valid', 'Manually verified against the local statement.', ?) ON CONFLICT(manual_id) DO UPDATE SET review_month=excluded.review_month, statement_end_date=excluded.statement_end_date, portfolio_value=excluded.portfolio_value, invested_value=excluded.invested_value, cash_value=excluded.cash_value, confirmed=excluded.confirmed, validation_status='valid', warning='Manually verified against the local statement.', updated_at=excluded.updated_at", (manual_id, review_month, statement_end_date, float(invested_value) + float(cash_value), float(invested_value), float(cash_value), int(confirmed), _utc_now()))
+        conn.execute("INSERT INTO manual_statement_reviews (manual_id, review_month, statement_end_date, portfolio_value, invested_value, cash_value, confirmed, validation_status, warning, accounting_verified, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'valid', 'Manually verified against the local statement.', 1, ?) ON CONFLICT(manual_id) DO UPDATE SET review_month=excluded.review_month, statement_end_date=excluded.statement_end_date, portfolio_value=excluded.portfolio_value, invested_value=excluded.invested_value, cash_value=excluded.cash_value, confirmed=excluded.confirmed, validation_status='valid', warning='Manually verified against the local statement.', accounting_verified=1, updated_at=excluded.updated_at", (manual_id, review_month, statement_end_date, float(portfolio_value), float(invested_value), float(cash_value), int(confirmed), _utc_now()))
         conn.commit()
     return manual_id
 
@@ -351,6 +364,13 @@ def remove_manual_statement_review(manual_id: str, db_path: Path = STATEMENT_HIS
     prepare_history_database(db_path)
     with closing(sqlite3.connect(db_path)) as conn:
         conn.execute("DELETE FROM manual_statement_reviews WHERE manual_id=?", (manual_id,))
+        conn.commit()
+
+
+def clear_manual_statement_reviews(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> None:
+    prepare_history_database(db_path)
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute("DELETE FROM manual_statement_reviews")
         conn.commit()
 
 
@@ -375,7 +395,7 @@ def scan_state(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> dict[str, Any]:
     valid_months = [str(record["statement_end_date"])[:7] for record in records if record["status"] == "valid" and record.get("statement_end_date")]
     duplicate_months = sorted({month for month in valid_months if valid_months.count(month) > 1})
     state["monthly_continuity"] = {"complete": not (set(expected_months) - set(valid_months)) and not duplicate_months and all(record["confirmed"] for record in manual_records), "missing_month_count": len(set(expected_months) - set(valid_months)), "duplicate_month_count": len(duplicate_months), "missing_months": missing_statement_months(records)}
-    state["diagnostics"] = {"header_found": sum(int(record.get("header_found", 0)) for record in records), "nearby_date_range_found": sum(int(record.get("nearby_date_range_found", 0)) for record in records), "account_summary_found": sum(int(record.get("account_summary_found", 0)) for record in records), "balance_rows_found": sum(int(record.get("balance_rows_found", 0)) for record in records)}
+    state["diagnostics"] = {"header_found": sum(int(record.get("header_found", 0)) for record in records), "nearby_date_range_found": sum(int(record.get("nearby_date_range_found", 0)) for record in records), "nearby_account_marker_found": sum(int(record.get("nearby_account_marker_found", 0)) for record in records), "account_summary_found": sum(int(record.get("account_summary_found", 0)) for record in records), "balance_rows_found": sum(int(record.get("balance_rows_found", 0)) for record in records), "accounting_equation_passed": sum(int(record.get("accounting_equation_passed", 0)) for record in records)}
     return state
 
 
@@ -398,8 +418,8 @@ def clear_scan_preview(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> None:
 
 def _save_scan_record(conn: sqlite3.Connection, record: dict[str, Any]) -> None:
     conn.execute(
-        "INSERT INTO statement_scan_preview (source_hash, scan_status, statement_start_date, statement_end_date, portfolio_value, invested_value, cash_value, cost_basis, contribution_amount, withdrawal_amount, validation_status, warning, header_found, nearby_date_range_found, account_summary_found, balance_rows_found, parser_version, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source_hash) DO UPDATE SET scan_status=excluded.scan_status, statement_start_date=excluded.statement_start_date, statement_end_date=excluded.statement_end_date, portfolio_value=excluded.portfolio_value, invested_value=excluded.invested_value, cash_value=excluded.cash_value, cost_basis=excluded.cost_basis, contribution_amount=excluded.contribution_amount, withdrawal_amount=excluded.withdrawal_amount, validation_status=excluded.validation_status, warning=excluded.warning, header_found=excluded.header_found, nearby_date_range_found=excluded.nearby_date_range_found, account_summary_found=excluded.account_summary_found, balance_rows_found=excluded.balance_rows_found, parser_version=excluded.parser_version, updated_at=excluded.updated_at",
-        (record["source_hash"], str(record.get("status") or "unparseable"), record.get("statement_start_date"), record.get("statement_end_date"), record.get("portfolio_value"), record.get("invested_value"), record.get("cash_value"), record.get("cost_basis"), record.get("contribution_amount"), record.get("withdrawal_amount"), record["status"], str(record.get("warning") or ""), int(bool(record.get("diagnostics", {}).get("verified_header_found"))), int(bool(record.get("diagnostics", {}).get("nearby_date_range_found"))), int(bool(record.get("diagnostics", {}).get("verified_account_summary_found"))), int(bool(record.get("diagnostics", {}).get("balance_rows_found"))), PARSER_VERSION, _utc_now()),
+        "INSERT INTO statement_scan_preview (source_hash, scan_status, statement_start_date, statement_end_date, portfolio_value, invested_value, cash_value, cost_basis, contribution_amount, withdrawal_amount, validation_status, warning, header_found, nearby_date_range_found, nearby_account_marker_found, account_summary_found, balance_rows_found, accounting_equation_passed, parser_version, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source_hash) DO UPDATE SET scan_status=excluded.scan_status, statement_start_date=excluded.statement_start_date, statement_end_date=excluded.statement_end_date, portfolio_value=excluded.portfolio_value, invested_value=excluded.invested_value, cash_value=excluded.cash_value, cost_basis=excluded.cost_basis, contribution_amount=excluded.contribution_amount, withdrawal_amount=excluded.withdrawal_amount, validation_status=excluded.validation_status, warning=excluded.warning, header_found=excluded.header_found, nearby_date_range_found=excluded.nearby_date_range_found, nearby_account_marker_found=excluded.nearby_account_marker_found, account_summary_found=excluded.account_summary_found, balance_rows_found=excluded.balance_rows_found, accounting_equation_passed=excluded.accounting_equation_passed, parser_version=excluded.parser_version, updated_at=excluded.updated_at",
+        (record["source_hash"], str(record.get("status") or "unparseable"), record.get("statement_start_date"), record.get("statement_end_date"), record.get("portfolio_value"), record.get("invested_value"), record.get("cash_value"), record.get("cost_basis"), record.get("contribution_amount"), record.get("withdrawal_amount"), record["status"], str(record.get("warning") or ""), int(bool(record.get("diagnostics", {}).get("verified_header_found"))), int(bool(record.get("diagnostics", {}).get("nearby_date_range_found"))), int(bool(record.get("diagnostics", {}).get("nearby_account_marker_found"))), int(bool(record.get("diagnostics", {}).get("verified_account_summary_found"))), int(bool(record.get("diagnostics", {}).get("balance_rows_found"))), int(bool(record.get("diagnostics", {}).get("accounting_equation_passed"))), PARSER_VERSION, _utc_now()),
     )
 
 
@@ -543,6 +563,9 @@ def import_validated_history(records: list[dict[str, Any]], db_path: Path = STAT
                 if status == "unparseable": result["unparseable"] += 1; continue
                 if status != "valid": result["needs_review"] += 1; continue
                 if record.get("source_type") == "manual_statement_review" and not record.get("confirmed"):
+                    result["needs_review"] += 1
+                    continue
+                if record.get("diagnostics") and not record["diagnostics"].get("accounting_equation_passed", False):
                     result["needs_review"] += 1
                     continue
                 try:
