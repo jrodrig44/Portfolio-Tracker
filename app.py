@@ -5359,16 +5359,40 @@ def _render_statement_history_import(total_value: float) -> None:
         if st.button("Scan Local Statements", key="scan_local_statements"):
             started_at = time.perf_counter()
             log_event(LOGGER, "statement_scan_started", "Local statement scan started", pdf_count=pdf_count, parser_version="stash-pdf-v1")
+            progress_text = st.empty()
+            progress_bar = st.progress(0)
+            live_preview = st.empty()
+            completed_records: list[dict[str, object]] = []
+
+            def on_document_started(sequence: int, total_count: int) -> None:
+                progress_text.caption(f"Processing statement {sequence} of {total_count}")
+
+            def on_document_complete(sequence: int, total_count: int, record: dict[str, object], duration_ms: int) -> None:
+                completed_records.append(record)
+                st.session_state["statement_history_scan"] = list(completed_records)
+                progress_bar.progress(sequence / total_count if total_count else 1.0)
+                completed_count = sum(1 for item in completed_records if item.get("status") in {"valid", "duplicate"})
+                review_count = sum(1 for item in completed_records if item.get("status") == "needs_review")
+                unparseable_count = sum(1 for item in completed_records if item.get("status") == "unparseable")
+                progress_text.caption(f"Processing statement {sequence} of {total_count} | Completed: {completed_count} | Needs review: {review_count} | Unparseable: {unparseable_count}")
+                live_preview.dataframe(pd.DataFrame(_statement_preview_rows(completed_records)), width="stretch", hide_index=True)
+                log_event(LOGGER, "statement_document_completed", "Local statement document completed", document_sequence=sequence, total_document_count=total_count, duration_ms=duration_ms, status=str(record.get("status", "unparseable")))
+
             try:
                 prepare_history_database(STATEMENT_HISTORY_DB_PATH)
-                scanned = classify_scan(scan_local_statements(STATEMENTS_DIR), STATEMENT_HISTORY_DB_PATH)
+                scanned = classify_scan(scan_local_statements(STATEMENTS_DIR, on_document_started=on_document_started, on_document_complete=on_document_complete), STATEMENT_HISTORY_DB_PATH)
                 st.session_state["statement_history_scan"] = scanned
                 records = scanned
                 counts = {status: sum(1 for row in scanned if row.get("status") == status) for status in counts}
-                log_event(LOGGER, "statement_scan_completed", "Local statement scan completed", pdf_count=pdf_count, ready_count=counts["valid"], duplicate_count=counts["duplicate"], failed_count=counts["needs_review"] + counts["unparseable"], duration_ms=round((time.perf_counter() - started_at) * 1000), parser_version="stash-pdf-v1", status="completed")
             except Exception:
-                log_event(LOGGER, "statement_scan_completed", "Local statement scan completed", pdf_count=pdf_count, failed_count=pdf_count, duration_ms=round((time.perf_counter() - started_at) * 1000), parser_version="stash-pdf-v1", status="failed")
                 st.error("The local statement scan could not complete. No statement data was imported.")
+            finally:
+                final_records = st.session_state.get("statement_history_scan", [])
+                final_records = final_records if isinstance(final_records, list) else []
+                final_counts = {status: sum(1 for row in final_records if row.get("status") == status) for status in ("valid", "duplicate", "needs_review", "unparseable")}
+                progress_bar.progress(1.0)
+                progress_text.caption(f"Scan complete | Completed: {final_counts['valid'] + final_counts['duplicate']} | Needs review: {final_counts['needs_review']} | Unparseable: {final_counts['unparseable']}")
+                log_event(LOGGER, "statement_scan_completed", "Local statement scan completed", completed_count=final_counts["valid"] + final_counts["duplicate"], failed_count=final_counts["unparseable"], needs_review_count=final_counts["needs_review"], duration_ms=round((time.perf_counter() - started_at) * 1000), parser_version="stash-pdf-v1", status="completed" if len(final_records) == pdf_count else "interrupted")
         if records:
             st.dataframe(pd.DataFrame(_statement_preview_rows(records)).style.format({"Ending portfolio value": "${:,.2f}", "Invested value": "${:,.2f}", "Cash value": "${:,.2f}"}, na_rep="-"), width="stretch", hide_index=True)
             if st.button("Import Validated History", key="import_validated_history"):

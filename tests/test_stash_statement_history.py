@@ -5,9 +5,17 @@ from pathlib import Path
 from unittest.mock import patch
 import sqlite3
 import pandas as pd
+import time
 
 import app
 from stash_history import _closing_value_from_row, classify_scan, delete_imported_history, history_summary, import_validated_history, load_performance_history, load_statement_history, parse_statement_text, prepare_history_database, scan_local_statements, upsert_live_portfolio_snapshot
+
+
+def _test_document_worker(pdf_path_text: str, queue: object) -> None:
+    if Path(pdf_path_text).stem == "hang":
+        time.sleep(10)
+        return
+    queue.put({"kind": "result", "record": {"source_hash": "later", "statement_start_date": "2021-08-01", "statement_end_date": "2021-08-31", "portfolio_value": 100.0, "status": "valid", "warning": "Ready to import."}})
 
 
 class StashStatementHistoryTests(unittest.TestCase):
@@ -55,8 +63,7 @@ class StashStatementHistoryTests(unittest.TestCase):
             root = Path(temp_dir)
             pdf_path = root / "synthetic.pdf"
             pdf_path.write_bytes(b"synthetic")
-            with patch("stash_history.extract_pdf_text", return_value="Statement Period: August 1, 2021 - August 31, 2021\nEnding Account Value: $100.00"):
-                records = scan_local_statements(root)
+            records = [{"source_hash": "synthetic", "statement_start_date": "2021-08-01", "statement_end_date": "2021-08-31", "portfolio_value": 100.0, "status": "valid", "warning": "Ready to import."}]
             self.assertFalse((root / "history.sqlite").exists())
             db_path = root / "history.sqlite"
             import_validated_history(records, db_path)
@@ -70,14 +77,26 @@ class StashStatementHistoryTests(unittest.TestCase):
     def test_invalid_values_and_unparseable_pdfs_do_not_create_rows(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            pdf_path = root / "synthetic.pdf"
-            pdf_path.write_bytes(b"synthetic")
-            with patch("stash_history.extract_pdf_text", return_value="not a statement"):
-                records = scan_local_statements(root)
+            records = [{"source_hash": "synthetic", "status": "needs_review", "warning": "Ending portfolio value is missing or invalid."}]
             db_path = root / "history.sqlite"
             result = import_validated_history(records, db_path)
             self.assertEqual(result["needs_review"], 1)
             self.assertEqual(history_summary(db_path)["history_records"], 0)
+
+    def test_timed_out_document_does_not_block_later_statement(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "hang.pdf").write_bytes(b"placeholder")
+            (root / "later.pdf").write_bytes(b"placeholder")
+            completed: list[str] = []
+            records = scan_local_statements(
+                root,
+                timeout_seconds=8.0,
+                worker_target=_test_document_worker,
+                on_document_complete=lambda _sequence, _total, record, _duration: completed.append(str(record["status"])),
+            )
+            self.assertEqual([record["status"] for record in records], ["unparseable", "valid"])
+            self.assertEqual(completed, ["unparseable", "valid"])
 
     def test_failed_import_rolls_back_and_does_not_modify_portfolio_db(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

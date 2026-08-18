@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import math
+import multiprocessing
 import re
 import sqlite3
+import time
 from contextlib import closing
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -18,6 +20,7 @@ DATA_DIR = PROJECT_ROOT / "data"
 STATEMENTS_DIR = PROJECT_ROOT / "Statements"
 STATEMENT_HISTORY_DB_PATH = DATA_DIR / "stash_statement_history.sqlite"
 PARSER_VERSION = "stash-pdf-v1"
+DOCUMENT_TIMEOUT_SECONDS = 30.0
 EARLIEST_EXPECTED_DATE = date(2021, 8, 1)
 _DATE_PATTERN = r"(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},?\s+\d{4})"
 _RANGE_PATTERN = re.compile(rf"(?:statement\s+period|period|from)\s*:?\s*({_DATE_PATTERN})\s*(?:-|to|through)\s*({_DATE_PATTERN})", re.IGNORECASE)
@@ -76,13 +79,17 @@ def _closing_value_from_row(words: list[dict[str, Any]], row_label: tuple[str, .
 
 
 def extract_statement_layout_values(pdf_path: Path) -> dict[str, float | None]:
+    with pdfplumber.open(pdf_path) as pdf:
+        return extract_statement_layout_values_from_pages(pdf.pages)
+
+
+def extract_statement_layout_values_from_pages(pages: Any) -> dict[str, float | None]:
     invested_value = None
     cash_value = None
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            words = page.extract_words()
-            invested_value = invested_value if invested_value is not None else _closing_value_from_row(words, ("TOTAL", "EQUITY", "HOLDINGS"))
-            cash_value = cash_value if cash_value is not None else _closing_value_from_row(words, ("NET", "ACCOUNT", "BALANCE"))
+    for page in pages:
+        words = page.extract_words()
+        invested_value = invested_value if invested_value is not None else _closing_value_from_row(words, ("TOTAL", "EQUITY", "HOLDINGS"))
+        cash_value = cash_value if cash_value is not None else _closing_value_from_row(words, ("NET", "ACCOUNT", "BALANCE"))
     portfolio_value = invested_value + cash_value if invested_value is not None and cash_value is not None else invested_value
     return {"portfolio_value": portfolio_value, "invested_value": invested_value, "cash_value": cash_value}
 
@@ -90,6 +97,28 @@ def extract_statement_layout_values(pdf_path: Path) -> dict[str, float | None]:
 def extract_pdf_text(pdf_path: Path) -> str:
     reader = PdfReader(str(pdf_path))
     return "\n".join(page.extract_text() or "" for page in reader.pages)
+
+
+def _parse_statement_document_worker(pdf_path_text: str, queue: Any) -> None:
+    """Run all PDF work in a child so the parent can terminate a stuck document."""
+    pdf_path = Path(pdf_path_text)
+    try:
+        queue.put({"kind": "stage", "stage": "reading bytes"})
+        content = pdf_path.read_bytes()
+        queue.put({"kind": "stage", "stage": "pdfplumber text extraction"})
+        with pdfplumber.open(pdf_path) as pdf:
+            text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+            if not text.strip():
+                queue.put({"kind": "result", "record": {"source_hash": _hash_bytes(content), "status": "unparseable", "warning": "No extractable statement text."}})
+                return
+            record = parse_statement_text(text)
+            queue.put({"kind": "stage", "stage": "pdfplumber layout extraction"})
+            record.update({key: value for key, value in extract_statement_layout_values_from_pages(pdf.pages).items() if value is not None})
+        record["source_hash"] = _hash_bytes(content)
+        record["status"], record["warning"] = _validate_record(record)
+        queue.put({"kind": "result", "record": record})
+    except Exception:
+        queue.put({"kind": "result", "record": {"source_hash": None, "status": "unparseable", "warning": "Statement could not be parsed locally."}})
 
 
 def parse_statement_text(text: str) -> dict[str, Any]:
@@ -132,26 +161,49 @@ def _validate_record(record: dict[str, Any]) -> tuple[str, str]:
     return "valid", "Ready to import."
 
 
-def scan_local_statements(source_dir: Path = STATEMENTS_DIR) -> list[dict[str, Any]]:
+def scan_local_statements(
+    source_dir: Path = STATEMENTS_DIR,
+    *,
+    timeout_seconds: float = DOCUMENT_TIMEOUT_SECONDS,
+    on_document_started: Any = None,
+    on_document_complete: Any = None,
+    worker_target: Any = _parse_statement_document_worker,
+) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
-    for pdf_path in sorted(source_dir.glob("*.pdf")):
-        try:
-            content = pdf_path.read_bytes()
-            text = extract_pdf_text(pdf_path)
-            if not text.strip():
-                records.append({"source_hash": _hash_bytes(content), "status": "unparseable", "warning": "No extractable statement text.", "source_path": pdf_path})
-                continue
-            record = parse_statement_text(text)
+    pdf_paths = sorted(source_dir.glob("*.pdf"))
+    total_count = len(pdf_paths)
+    for sequence, pdf_path in enumerate(pdf_paths, start=1):
+        started_at = time.perf_counter()
+        last_stage = "reading bytes"
+        if callable(on_document_started):
+            on_document_started(sequence, total_count)
+        queue: Any = multiprocessing.Queue()
+        process = multiprocessing.Process(target=worker_target, args=(str(pdf_path), queue))
+        process.start()
+        record: dict[str, Any] | None = None
+        deadline = started_at + timeout_seconds
+        while time.perf_counter() < deadline and record is None:
             try:
-                record.update({key: value for key, value in extract_statement_layout_values(pdf_path).items() if value is not None})
+                message = queue.get(timeout=min(0.2, max(0.01, deadline - time.perf_counter())))
+                if message.get("kind") == "stage":
+                    last_stage = str(message.get("stage", last_stage))
+                elif message.get("kind") == "result":
+                    record = dict(message["record"])
             except Exception:
-                pass
-            record["source_hash"] = _hash_bytes(content)
-            record["source_path"] = pdf_path
-            record["status"], record["warning"] = _validate_record(record)
-            records.append(record)
-        except Exception:
-            records.append({"source_hash": None, "status": "unparseable", "warning": "Statement could not be parsed locally.", "source_path": pdf_path})
+                continue
+        if record is None:
+            if process.is_alive():
+                process.terminate()
+            record = {"source_hash": None, "status": "unparseable", "warning": f"Local parsing timed out during {last_stage}."}
+        process.join(timeout=1)
+        if process.is_alive():
+            process.kill()
+            process.join()
+        queue.close()
+        record["source_path"] = pdf_path
+        records.append(record)
+        if callable(on_document_complete):
+            on_document_complete(sequence, total_count, record, round((time.perf_counter() - started_at) * 1000))
     return records
 
 
