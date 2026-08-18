@@ -152,26 +152,37 @@ def ensure_history_schema(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> None:
             CREATE TABLE IF NOT EXISTS statement_imports (id INTEGER PRIMARY KEY AUTOINCREMENT, source_hash TEXT NOT NULL UNIQUE, statement_start_date TEXT, statement_end_date TEXT NOT NULL, imported_at TEXT NOT NULL, parser_version TEXT NOT NULL, status TEXT NOT NULL, warning_count INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS statement_portfolio_history (id INTEGER PRIMARY KEY AUTOINCREMENT, import_id INTEGER NOT NULL, history_date TEXT NOT NULL, portfolio_value REAL NOT NULL, invested_value REAL, cash_value REAL, cost_basis REAL, contribution_amount REAL, withdrawal_amount REAL, source_type TEXT NOT NULL DEFAULT 'stash_statement', FOREIGN KEY(import_id) REFERENCES statement_imports(id), UNIQUE(history_date, source_type));
             CREATE TABLE IF NOT EXISTS live_portfolio_snapshots (snapshot_date TEXT PRIMARY KEY, portfolio_value REAL NOT NULL, source_type TEXT NOT NULL DEFAULT 'live_portfolio_snapshot');
-            CREATE TABLE IF NOT EXISTS statement_scan_jobs (job_id TEXT PRIMARY KEY, total_count INTEGER NOT NULL, processed_count INTEGER NOT NULL DEFAULT 0, scan_status TEXT NOT NULL, parser_version TEXT NOT NULL, updated_at TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS statement_scan_preview (source_hash TEXT PRIMARY KEY, scan_status TEXT NOT NULL, statement_start_date TEXT, statement_end_date TEXT, portfolio_value REAL, invested_value REAL, cash_value REAL, cost_basis REAL, contribution_amount REAL, withdrawal_amount REAL, validation_status TEXT NOT NULL, parser_version TEXT NOT NULL, updated_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS statement_scan_jobs (job_id TEXT PRIMARY KEY, total_count INTEGER NOT NULL, processed_count INTEGER NOT NULL DEFAULT 0, detected_pdf_count INTEGER NOT NULL DEFAULT 0, unique_pdf_count INTEGER NOT NULL DEFAULT 0, processed_unique_count INTEGER NOT NULL DEFAULT 0, duplicate_file_count INTEGER NOT NULL DEFAULT 0, scan_status TEXT NOT NULL, parser_version TEXT NOT NULL, updated_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS statement_scan_preview (source_hash TEXT PRIMARY KEY, scan_status TEXT NOT NULL, statement_start_date TEXT, statement_end_date TEXT, portfolio_value REAL, invested_value REAL, cash_value REAL, cost_basis REAL, contribution_amount REAL, withdrawal_amount REAL, validation_status TEXT NOT NULL, warning TEXT NOT NULL DEFAULT '', parser_version TEXT NOT NULL, updated_at TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS idx_statement_history_date ON statement_portfolio_history(history_date);
             CREATE INDEX IF NOT EXISTS idx_live_snapshot_date ON live_portfolio_snapshots(snapshot_date);
             CREATE INDEX IF NOT EXISTS idx_scan_preview_status ON statement_scan_preview(validation_status);
         """)
+        job_columns = {row[1] for row in conn.execute("PRAGMA table_info(statement_scan_jobs)")}
+        for column in ("detected_pdf_count", "unique_pdf_count", "processed_unique_count", "duplicate_file_count"):
+            if column not in job_columns:
+                conn.execute(f"ALTER TABLE statement_scan_jobs ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0")
+        preview_columns = {row[1] for row in conn.execute("PRAGMA table_info(statement_scan_preview)")}
+        if "warning" not in preview_columns:
+            conn.execute("ALTER TABLE statement_scan_preview ADD COLUMN warning TEXT NOT NULL DEFAULT ''")
+        conn.commit()
 
 
 def _scan_job(db_path: Path) -> dict[str, Any]:
     prepare_history_database(db_path)
     with closing(sqlite3.connect(db_path)) as conn:
-        row = conn.execute("SELECT total_count, processed_count, scan_status, updated_at FROM statement_scan_jobs WHERE job_id = 'local_statements'").fetchone()
-    return {"total_count": int(row[0]), "processed_count": int(row[1]), "scan_status": str(row[2]), "updated_at": str(row[3])} if row else {"total_count": 0, "processed_count": 0, "scan_status": "not_started", "updated_at": ""}
+        row = conn.execute("SELECT detected_pdf_count, unique_pdf_count, processed_unique_count, duplicate_file_count, scan_status, updated_at FROM statement_scan_jobs WHERE job_id = 'local_statements'").fetchone()
+    if not row:
+        return {"detected_pdf_count": 0, "unique_pdf_count": 0, "processed_unique_count": 0, "duplicate_file_count": 0, "processed_count": 0, "total_count": 0, "scan_status": "not_started", "updated_at": ""}
+    detected_pdf_count, unique_pdf_count, processed_unique_count, duplicate_file_count = (int(value) for value in row[:4])
+    return {"detected_pdf_count": detected_pdf_count, "unique_pdf_count": unique_pdf_count, "processed_unique_count": processed_unique_count, "duplicate_file_count": duplicate_file_count, "processed_count": processed_unique_count + duplicate_file_count, "total_count": detected_pdf_count, "scan_status": str(row[4]), "updated_at": str(row[5])}
 
 
 def load_scan_preview(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> list[dict[str, Any]]:
     prepare_history_database(db_path)
     with closing(sqlite3.connect(db_path)) as conn:
-        rows = conn.execute("SELECT source_hash, scan_status, statement_start_date, statement_end_date, portfolio_value, invested_value, cash_value, cost_basis, contribution_amount, withdrawal_amount, validation_status FROM statement_scan_preview ORDER BY statement_end_date, source_hash").fetchall()
-    keys = ["source_hash", "scan_status", "statement_start_date", "statement_end_date", "portfolio_value", "invested_value", "cash_value", "cost_basis", "contribution_amount", "withdrawal_amount", "status"]
+        rows = conn.execute("SELECT source_hash, scan_status, statement_start_date, statement_end_date, portfolio_value, invested_value, cash_value, cost_basis, contribution_amount, withdrawal_amount, validation_status, warning FROM statement_scan_preview ORDER BY statement_end_date, source_hash").fetchall()
+    keys = ["source_hash", "scan_status", "statement_start_date", "statement_end_date", "portfolio_value", "invested_value", "cash_value", "cost_basis", "contribution_amount", "withdrawal_amount", "status", "warning"]
     return [dict(zip(keys, row)) for row in rows]
 
 
@@ -205,8 +216,8 @@ def clear_scan_preview(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> None:
 
 def _save_scan_record(conn: sqlite3.Connection, record: dict[str, Any]) -> None:
     conn.execute(
-        "INSERT INTO statement_scan_preview (source_hash, scan_status, statement_start_date, statement_end_date, portfolio_value, invested_value, cash_value, cost_basis, contribution_amount, withdrawal_amount, validation_status, parser_version, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source_hash) DO UPDATE SET scan_status=excluded.scan_status, statement_start_date=excluded.statement_start_date, statement_end_date=excluded.statement_end_date, portfolio_value=excluded.portfolio_value, invested_value=excluded.invested_value, cash_value=excluded.cash_value, cost_basis=excluded.cost_basis, contribution_amount=excluded.contribution_amount, withdrawal_amount=excluded.withdrawal_amount, validation_status=excluded.validation_status, parser_version=excluded.parser_version, updated_at=excluded.updated_at",
-        (record["source_hash"], "processed", record.get("statement_start_date"), record.get("statement_end_date"), record.get("portfolio_value"), record.get("invested_value"), record.get("cash_value"), record.get("cost_basis"), record.get("contribution_amount"), record.get("withdrawal_amount"), record["status"], PARSER_VERSION, _utc_now()),
+        "INSERT INTO statement_scan_preview (source_hash, scan_status, statement_start_date, statement_end_date, portfolio_value, invested_value, cash_value, cost_basis, contribution_amount, withdrawal_amount, validation_status, warning, parser_version, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source_hash) DO UPDATE SET scan_status=excluded.scan_status, statement_start_date=excluded.statement_start_date, statement_end_date=excluded.statement_end_date, portfolio_value=excluded.portfolio_value, invested_value=excluded.invested_value, cash_value=excluded.cash_value, cost_basis=excluded.cost_basis, contribution_amount=excluded.contribution_amount, withdrawal_amount=excluded.withdrawal_amount, validation_status=excluded.validation_status, warning=excluded.warning, parser_version=excluded.parser_version, updated_at=excluded.updated_at",
+        (record["source_hash"], "processed", record.get("statement_start_date"), record.get("statement_end_date"), record.get("portfolio_value"), record.get("invested_value"), record.get("cash_value"), record.get("cost_basis"), record.get("contribution_amount"), record.get("withdrawal_amount"), record["status"], str(record.get("warning") or ""), PARSER_VERSION, _utc_now()),
     )
 
 
@@ -223,18 +234,28 @@ def run_statement_scan(
     pdf_paths = sorted(source_dir.glob("*.pdf"))
     if restart:
         clear_scan_preview(db_path)
+    unique_paths: dict[str, tuple[int, Path]] = {}
+    for sequence, pdf_path in enumerate(pdf_paths, start=1):
+        source_hash = _hash_bytes(pdf_path.read_bytes())
+        unique_paths.setdefault(source_hash, (sequence, pdf_path))
+    detected_pdf_count = len(pdf_paths)
+    unique_pdf_count = len(unique_paths)
+    duplicate_file_count = detected_pdf_count - unique_pdf_count
     with closing(sqlite3.connect(db_path)) as conn:
         existing_hashes = {str(row[0]) for row in conn.execute("SELECT source_hash FROM statement_scan_preview")}
-        conn.execute("INSERT INTO statement_scan_jobs (job_id, total_count, processed_count, scan_status, parser_version, updated_at) VALUES ('local_statements', ?, ?, 'running', ?, ?) ON CONFLICT(job_id) DO UPDATE SET total_count=excluded.total_count, processed_count=excluded.processed_count, scan_status='running', parser_version=excluded.parser_version, updated_at=excluded.updated_at", (len(pdf_paths), len(existing_hashes), PARSER_VERSION, _utc_now()))
+        existing_hashes.intersection_update(unique_paths)
+        processed_unique_count = len(existing_hashes)
+        conn.execute(
+            "INSERT INTO statement_scan_jobs (job_id, total_count, processed_count, detected_pdf_count, unique_pdf_count, processed_unique_count, duplicate_file_count, scan_status, parser_version, updated_at) VALUES ('local_statements', ?, ?, ?, ?, ?, ?, 'running', ?, ?) ON CONFLICT(job_id) DO UPDATE SET total_count=excluded.total_count, processed_count=excluded.processed_count, detected_pdf_count=excluded.detected_pdf_count, unique_pdf_count=excluded.unique_pdf_count, processed_unique_count=excluded.processed_unique_count, duplicate_file_count=excluded.duplicate_file_count, scan_status='running', parser_version=excluded.parser_version, updated_at=excluded.updated_at",
+            (detected_pdf_count, processed_unique_count + duplicate_file_count, detected_pdf_count, unique_pdf_count, processed_unique_count, duplicate_file_count, PARSER_VERSION, _utc_now()),
+        )
         conn.commit()
     try:
-        for sequence, pdf_path in enumerate(pdf_paths, start=1):
-            content = pdf_path.read_bytes()
-            source_hash = _hash_bytes(content)
+        for source_hash, (sequence, pdf_path) in unique_paths.items():
             if source_hash in existing_hashes:
                 continue
             if callable(on_document_started):
-                on_document_started(sequence, len(pdf_paths))
+                on_document_started(sequence, detected_pdf_count)
             try:
                 record = _parse_statement_document(pdf_path)
             except Exception:
@@ -242,19 +263,20 @@ def run_statement_scan(
             record["source_hash"] = source_hash
             with closing(sqlite3.connect(db_path)) as conn:
                 _save_scan_record(conn, record)
-                processed_count = conn.execute("SELECT COUNT(*) FROM statement_scan_preview").fetchone()[0]
-                conn.execute("UPDATE statement_scan_jobs SET processed_count=?, updated_at=? WHERE job_id='local_statements'", (processed_count, _utc_now()))
+                existing_hashes.add(source_hash)
+                processed_unique_count = len(existing_hashes)
+                conn.execute("UPDATE statement_scan_jobs SET processed_count=?, processed_unique_count=?, updated_at=? WHERE job_id='local_statements'", (processed_unique_count + duplicate_file_count, processed_unique_count, _utc_now()))
                 conn.commit()
             if callable(on_document_complete):
-                on_document_complete(sequence, len(pdf_paths), record)
+                on_document_complete(sequence, detected_pdf_count, record)
         with closing(sqlite3.connect(db_path)) as conn:
-            processed_count = conn.execute("SELECT COUNT(*) FROM statement_scan_preview").fetchone()[0]
-            conn.execute("UPDATE statement_scan_jobs SET processed_count=?, scan_status='completed', updated_at=? WHERE job_id='local_statements'", (processed_count, _utc_now()))
+            processed_unique_count = len(existing_hashes)
+            conn.execute("UPDATE statement_scan_jobs SET processed_count=?, processed_unique_count=?, scan_status='completed', updated_at=? WHERE job_id='local_statements'", (processed_unique_count + duplicate_file_count, processed_unique_count, _utc_now()))
             conn.commit()
     except BaseException:
         with closing(sqlite3.connect(db_path)) as conn:
-            processed_count = conn.execute("SELECT COUNT(*) FROM statement_scan_preview").fetchone()[0]
-            conn.execute("UPDATE statement_scan_jobs SET processed_count=?, scan_status='interrupted', updated_at=? WHERE job_id='local_statements'", (processed_count, _utc_now()))
+            processed_unique_count = len(existing_hashes)
+            conn.execute("UPDATE statement_scan_jobs SET processed_count=?, processed_unique_count=?, scan_status='interrupted', updated_at=? WHERE job_id='local_statements'", (processed_unique_count + duplicate_file_count, processed_unique_count, _utc_now()))
             conn.commit()
         raise
     return scan_state(db_path)

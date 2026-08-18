@@ -90,6 +90,34 @@ class StashStatementHistoryTests(unittest.TestCase):
             self.assertEqual(state["scan_status"], "completed")
             self.assertEqual(completed_counts, list(range(1, 62)))
 
+    def test_duplicate_files_are_accounted_for_without_duplicate_preview_records(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for index in range(61):
+                content = b"duplicate" if index in {0, 60} else f"unique-{index}".encode()
+                (root / f"synthetic-{index}.pdf").write_bytes(content)
+            db_path = root / "history.sqlite"
+            with patch("stash_history._parse_statement_document", return_value={"status": "valid", "warning": "Ready to import.", "statement_start_date": "2021-08-01", "statement_end_date": None, "portfolio_value": 100.0}):
+                state = run_statement_scan(root, db_path=db_path)
+            self.assertEqual(state["detected_pdf_count"], 61)
+            self.assertEqual(state["unique_pdf_count"], 60)
+            self.assertEqual(state["processed_unique_count"], 60)
+            self.assertEqual(state["duplicate_file_count"], 1)
+            self.assertEqual(state["processed_count"], 61)
+            self.assertEqual(len(state["records"]), 60)
+            self.assertEqual(state["scan_status"], "completed")
+            self.assertTrue(scan_can_import(state, 61))
+
+    def test_preview_warning_persists_after_reopening_database(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "synthetic.pdf").write_bytes(b"warning-source")
+            db_path = root / "history.sqlite"
+            with patch("stash_history._parse_statement_document", return_value={"status": "needs_review", "warning": "Statement ending date was not found."}):
+                run_statement_scan(root, db_path=db_path)
+            reopened = scan_state(db_path)
+            self.assertEqual(reopened["records"][0]["warning"], "Statement ending date was not found.")
+
     def test_interrupted_scan_resumes_without_duplicate_preview_records(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

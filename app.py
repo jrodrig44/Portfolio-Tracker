@@ -5352,7 +5352,7 @@ def _render_statement_history_import(total_value: float) -> None:
         summary = history_summary(STATEMENT_HISTORY_DB_PATH)
         state = scan_state(STATEMENT_HISTORY_DB_PATH)
         records = state["records"]
-        for label, value in (("Local statement folder", "Ready"), ("PDFs detected", pdf_count), ("Processed", f"{state['processed_count']} of {state['total_count'] or pdf_count}"), ("Remaining", max(pdf_count - state["processed_count"], 0)), ("Ready", state["ready"]), ("Needs review", state["needs_review"]), ("Unparseable", state["unparseable"]), ("Scan status", state["scan_status"]), ("Previously imported", summary["imported"])):
+        for label, value in (("Local statement folder", "Ready"), ("PDFs detected", state["detected_pdf_count"] or pdf_count), ("Unique PDFs", state["unique_pdf_count"]), ("Processed unique", f"{state['processed_unique_count']} of {state['unique_pdf_count']}"), ("Duplicate files", state["duplicate_file_count"]), ("Accounted for", f"{state['processed_count']} of {state['detected_pdf_count'] or pdf_count}"), ("Remaining", max((state["detected_pdf_count"] or pdf_count) - state["processed_count"], 0)), ("Ready", state["ready"]), ("Needs review", state["needs_review"]), ("Unparseable", state["unparseable"]), ("Scan status", state["scan_status"]), ("Previously imported", summary["imported"])):
             st.caption(f"{label}: {value}")
 
         def render_progress(sequence: int, total_count: int) -> None:
@@ -5361,7 +5361,7 @@ def _render_statement_history_import(total_value: float) -> None:
         def persist_progress(_sequence: int, total_count: int, _record: dict[str, object]) -> None:
             current = scan_state(STATEMENT_HISTORY_DB_PATH)
             progress_bar.progress(current["processed_count"] / total_count if total_count else 1.0)
-            progress_text.caption(f"Processed {current['processed_count']} of {total_count} | Remaining: {max(total_count - current['processed_count'], 0)} | Ready: {current['ready']} | Needs review: {current['needs_review']} | Unparseable: {current['unparseable']}")
+            progress_text.caption(f"Processed {current['processed_count']} of {total_count} | Remaining: {max(total_count - current['processed_count'], 0)} | Duplicates: {current['duplicate_file_count']} | Ready: {current['ready']} | Needs review: {current['needs_review']} | Unparseable: {current['unparseable']}")
             live_preview.dataframe(pd.DataFrame(_statement_preview_rows(current["records"])), width="stretch", hide_index=True)
 
         start_scan = st.button("Start Scan", key="start_local_statements")
