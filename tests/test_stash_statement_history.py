@@ -8,7 +8,7 @@ import pandas as pd
 import calendar
 
 import app
-from stash_history import _closing_value_from_row, _validate_record, classify_scan, clear_scan_preview, delete_imported_history, extract_statement_layout_values_from_pages, history_summary, import_validated_history, load_performance_history, load_statement_history, parse_statement_header_chars, parse_statement_header_words, parse_statement_text, prepare_history_database, run_statement_scan, scan_can_import, scan_state, upsert_live_portfolio_snapshot
+from stash_history import _closing_value_from_row, _validate_record, classify_scan, clear_scan_preview, delete_imported_history, extract_statement_layout_values_from_pages, history_summary, import_validated_history, load_manual_statement_reviews, load_performance_history, load_statement_history, parse_statement_header_chars, parse_statement_header_words, parse_statement_text, prepare_history_database, remove_manual_statement_review, run_statement_scan, save_manual_statement_review, scan_can_import, scan_state, upsert_live_portfolio_snapshot
 
 
 class StashStatementHistoryTests(unittest.TestCase):
@@ -194,6 +194,52 @@ class StashStatementHistoryTests(unittest.TestCase):
                 run_statement_scan(root, db_path=db_path)
             reopened = scan_state(db_path)
             self.assertEqual(reopened["diagnostics"], {"header_found": 0, "nearby_date_range_found": 0, "account_summary_found": 0, "balance_rows_found": 0})
+
+    def test_manual_review_validates_persists_edits_and_removes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "history.sqlite"
+            with self.assertRaises(ValueError):
+                save_manual_statement_review("2021-08", "2021-08-30", 10.0, 1.0, True, db_path=db_path)
+            with self.assertRaises(ValueError):
+                save_manual_statement_review("2021-08", "2021-08-31", -1.0, 1.0, True, db_path=db_path)
+            with self.assertRaises(ValueError):
+                save_manual_statement_review("2021-08", "2021-08-31", 10.0, 1.0, False, db_path=db_path)
+            manual_id = save_manual_statement_review("2021-08", "2021-08-31", 10.0, 1.5, True, db_path=db_path)
+            record = load_manual_statement_reviews(db_path)[0]
+            self.assertEqual(record["portfolio_value"], 11.5)
+            self.assertEqual(record["warning"], "Manually verified against the local statement.")
+            self.assertEqual(record["source_type"], "manual_statement_review")
+            with self.assertRaises(ValueError):
+                save_manual_statement_review("2021-08", "2021-08-31", 10.0, 1.5, True, db_path=db_path)
+            save_manual_statement_review("2021-08", "2021-08-31", 20.0, 2.0, True, manual_id=manual_id, db_path=db_path)
+            self.assertEqual(load_manual_statement_reviews(db_path)[0]["portfolio_value"], 22.0)
+            remove_manual_statement_review(manual_id, db_path)
+            self.assertEqual(load_manual_statement_reviews(db_path), [])
+
+    def test_manual_reviews_complete_continuity_and_preserve_source_type_on_import(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "history.sqlite"
+            year, month = 2021, 8
+            for _ in range(60):
+                ending = f"{year:04d}-{month:02d}-{calendar.monthrange(year, month)[1]:02d}"
+                save_manual_statement_review(f"{year:04d}-{month:02d}", ending, 10.0, 1.0, True, db_path=db_path)
+                year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+            state = scan_state(db_path)
+            self.assertTrue(state["monthly_continuity"]["complete"])
+            records = load_manual_statement_reviews(db_path)
+            result = import_validated_history(records, db_path)
+            self.assertEqual(result["imported"], 60)
+            with closing(sqlite3.connect(db_path)) as connection:
+                source_types = {row[0] for row in connection.execute("SELECT DISTINCT source_type FROM statement_portfolio_history")}
+            self.assertEqual(source_types, {"manual_statement_review"})
+
+    def test_unconfirmed_manual_record_is_not_imported(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "history.sqlite"
+            record = {"source_hash": "manual-unconfirmed", "statement_end_date": "2021-08-31", "portfolio_value": 10.0, "invested_value": 9.0, "cash_value": 1.0, "status": "valid", "source_type": "manual_statement_review", "confirmed": False}
+            result = import_validated_history([record], db_path)
+            self.assertEqual(result["imported"], 0)
+            self.assertEqual(result["needs_review"], 1)
 
     def test_matching_statement_dates_keep_one_canonical_preview_record(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

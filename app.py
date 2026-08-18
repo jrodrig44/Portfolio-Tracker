@@ -20,7 +20,7 @@ import yfinance as yf
 from ai_analysis_prompt import AI_ANALYSIS_TYPES, build_ai_analysis_markdown, build_ai_analysis_messages, format_ai_analysis_markdown
 from health_engine import compute_portfolio_health as compute_portfolio_health_engine
 from portfolio_intelligence import compute_portfolio_intelligence
-from stash_history import clear_scan_preview, delete_imported_history, history_summary, import_validated_history, load_performance_history, load_statement_history, run_statement_scan, scan_can_import, scan_state, upsert_live_portfolio_snapshot
+from stash_history import clear_scan_preview, delete_imported_history, history_summary, import_validated_history, load_performance_history, load_statement_history, remove_manual_statement_review, run_statement_scan, save_manual_statement_review, scan_can_import, scan_state, upsert_live_portfolio_snapshot
 from onemin_ai_client import (
     ONEMIN_AI_DEFAULT_BASE_URL,
     ONEMIN_AI_DEFAULT_CONNECT_TIMEOUT_SECONDS,
@@ -5389,6 +5389,42 @@ def _render_statement_history_import(total_value: float) -> None:
                 log_event(LOGGER, "statement_scan_completed", "Local statement scan completed", completed_count=final_state["processed_count"], failed_count=final_state["unparseable"], needs_review_count=final_state["needs_review"], duration_ms=round((time.perf_counter() - started_at) * 1000), parser_version="stash-pdf-v1", status=final_state["scan_status"])
         if records:
             st.dataframe(pd.DataFrame(_statement_preview_rows(records)).style.format({"Ending portfolio value": "${:,.2f}", "Invested value": "${:,.2f}", "Cash value": "${:,.2f}"}, na_rep="-"), width="stretch", hide_index=True)
+        with st.expander("Manual Statement Review", expanded=False):
+            missing_months = continuity["missing_months"]
+            st.caption("Missing months: " + (", ".join(missing_months) if missing_months else "None"))
+            manual_records = [record for record in records if record.get("source_type") == "manual_statement_review"]
+            if missing_months:
+                selected_month = st.selectbox("Missing month", missing_months, key="manual_statement_month")
+                ending_date = st.date_input("Statement ending date", key="manual_statement_ending_date")
+                invested_value = st.number_input("Closing Total Equity Holdings", min_value=0.0, value=0.0, step=0.01, format="%.2f", key="manual_statement_equity")
+                cash_value = st.number_input("Closing Net Account Balance", min_value=0.0, value=0.0, step=0.01, format="%.2f", key="manual_statement_cash")
+                st.caption(f"Calculated portfolio value: {_format_currency(invested_value + cash_value)}")
+                confirmed = st.checkbox("I verified these values against the original statement.", key="manual_statement_confirmed")
+                if st.button("Save Manual Review", key="save_manual_statement_review"):
+                    try:
+                        save_manual_statement_review(selected_month, ending_date.isoformat(), invested_value, cash_value, confirmed, db_path=STATEMENT_HISTORY_DB_PATH)
+                        st.rerun()
+                    except ValueError as exc:
+                        st.error(str(exc))
+            if manual_records:
+                st.dataframe(pd.DataFrame(_statement_preview_rows(manual_records)).style.format({"Ending portfolio value": "${:,.2f}", "Invested value": "${:,.2f}", "Cash value": "${:,.2f}"}, na_rep="-"), width="stretch", hide_index=True)
+                editable_months = {str(record["review_month"]): record for record in manual_records}
+                edit_month = st.selectbox("Edit manual review month", sorted(editable_months), key="edit_manual_statement_month")
+                edit_record = editable_months[edit_month]
+                edit_date = st.date_input("Edited statement ending date", value=datetime.fromisoformat(str(edit_record["statement_end_date"])).date(), key="edit_manual_statement_date")
+                edit_equity = st.number_input("Edited Closing Total Equity Holdings", min_value=0.0, value=float(edit_record["invested_value"]), step=0.01, format="%.2f", key="edit_manual_statement_equity")
+                edit_cash = st.number_input("Edited Closing Net Account Balance", min_value=0.0, value=float(edit_record["cash_value"]), step=0.01, format="%.2f", key="edit_manual_statement_cash")
+                edit_confirmed = st.checkbox("I verified these edited values against the original statement.", value=bool(edit_record["confirmed"]), key="edit_manual_statement_confirmed")
+                if st.button("Save Edited Manual Review", key="edit_manual_statement_review"):
+                    try:
+                        save_manual_statement_review(edit_month, edit_date.isoformat(), edit_equity, edit_cash, edit_confirmed, manual_id=str(edit_record["source_hash"]), db_path=STATEMENT_HISTORY_DB_PATH)
+                        st.rerun()
+                    except ValueError as exc:
+                        st.error(str(exc))
+                for record in manual_records:
+                    if st.button("Remove Manual Review", key=f"remove_manual_{record['source_hash']}"):
+                        remove_manual_statement_review(str(record["source_hash"]), STATEMENT_HISTORY_DB_PATH)
+                        st.rerun()
             import_enabled = scan_can_import(state, pdf_count)
             if st.button("Import Validated History", key="import_validated_history", disabled=not import_enabled):
                 started_at = time.perf_counter()

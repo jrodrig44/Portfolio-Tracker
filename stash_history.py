@@ -4,6 +4,7 @@ import hashlib
 import math
 import re
 import sqlite3
+import uuid
 from contextlib import closing
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -272,6 +273,7 @@ def ensure_history_schema(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> None:
             CREATE TABLE IF NOT EXISTS live_portfolio_snapshots (snapshot_date TEXT PRIMARY KEY, portfolio_value REAL NOT NULL, source_type TEXT NOT NULL DEFAULT 'live_portfolio_snapshot');
             CREATE TABLE IF NOT EXISTS statement_scan_jobs (job_id TEXT PRIMARY KEY, total_count INTEGER NOT NULL, processed_count INTEGER NOT NULL DEFAULT 0, detected_pdf_count INTEGER NOT NULL DEFAULT 0, unique_pdf_count INTEGER NOT NULL DEFAULT 0, processed_unique_count INTEGER NOT NULL DEFAULT 0, duplicate_file_count INTEGER NOT NULL DEFAULT 0, scan_status TEXT NOT NULL, parser_version TEXT NOT NULL, updated_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS statement_scan_preview (source_hash TEXT PRIMARY KEY, scan_status TEXT NOT NULL, statement_start_date TEXT, statement_end_date TEXT, portfolio_value REAL, invested_value REAL, cash_value REAL, cost_basis REAL, contribution_amount REAL, withdrawal_amount REAL, validation_status TEXT NOT NULL, warning TEXT NOT NULL DEFAULT '', header_found INTEGER NOT NULL DEFAULT 0, nearby_date_range_found INTEGER NOT NULL DEFAULT 0, account_summary_found INTEGER NOT NULL DEFAULT 0, balance_rows_found INTEGER NOT NULL DEFAULT 0, parser_version TEXT NOT NULL, updated_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS manual_statement_reviews (manual_id TEXT PRIMARY KEY, review_month TEXT NOT NULL UNIQUE, statement_end_date TEXT NOT NULL, portfolio_value REAL NOT NULL, invested_value REAL NOT NULL, cash_value REAL NOT NULL, confirmed INTEGER NOT NULL DEFAULT 0, validation_status TEXT NOT NULL, warning TEXT NOT NULL, updated_at TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS idx_statement_history_date ON statement_portfolio_history(history_date);
             CREATE INDEX IF NOT EXISTS idx_live_snapshot_date ON live_portfolio_snapshots(snapshot_date);
             CREATE INDEX IF NOT EXISTS idx_scan_preview_status ON statement_scan_preview(validation_status);
@@ -307,11 +309,58 @@ def load_scan_preview(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> list[dict[st
     return [dict(zip(keys, row)) for row in rows]
 
 
+def load_manual_statement_reviews(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> list[dict[str, Any]]:
+    prepare_history_database(db_path)
+    with closing(sqlite3.connect(db_path)) as conn:
+        rows = conn.execute("SELECT manual_id, review_month, statement_end_date, portfolio_value, invested_value, cash_value, confirmed, validation_status, warning FROM manual_statement_reviews ORDER BY review_month").fetchall()
+    return [{"source_hash": row[0], "review_month": row[1], "statement_start_date": None, "statement_end_date": row[2], "portfolio_value": float(row[3]), "invested_value": float(row[4]), "cash_value": float(row[5]), "confirmed": bool(row[6]), "status": row[7], "warning": row[8], "source_type": "manual_statement_review"} for row in rows]
+
+
+def missing_statement_months(records: list[dict[str, Any]]) -> list[str]:
+    expected = []
+    year, month = 2021, 8
+    while (year, month) <= (2026, 7):
+        expected.append(f"{year:04d}-{month:02d}")
+        year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+    represented = {str(record["statement_end_date"])[:7] for record in records if record.get("status") == "valid" and record.get("statement_end_date")}
+    return sorted(set(expected) - represented)
+
+
+def save_manual_statement_review(review_month: str, statement_end_date: str, invested_value: float, cash_value: float, confirmed: bool, *, manual_id: str | None = None, db_path: Path = STATEMENT_HISTORY_DB_PATH) -> str:
+    prepare_history_database(db_path)
+    month_date = _parse_date(f"{review_month}-01")
+    end_date = _parse_date(statement_end_date)
+    if month_date is None or end_date is None or end_date.strftime("%Y-%m") != review_month or end_date.day != __import__("calendar").monthrange(end_date.year, end_date.month)[1]:
+        raise ValueError("Statement ending date must be the final calendar day of the selected missing month.")
+    if not all(isinstance(value, (int, float)) and math.isfinite(float(value)) and float(value) >= 0 for value in (invested_value, cash_value)):
+        raise ValueError("Closing values must be finite and nonnegative.")
+    if not confirmed:
+        raise ValueError("Manual statement values require explicit confirmation.")
+    existing = load_scan_preview(db_path) + [record for record in load_manual_statement_reviews(db_path) if record["source_hash"] != manual_id]
+    existing.extend({"statement_end_date": row["history_date"], "status": "valid"} for row in load_statement_history(db_path))
+    if review_month not in missing_statement_months(existing):
+        raise ValueError("Selected month is already represented.")
+    manual_id = manual_id or f"manual-{uuid.uuid4().hex}"
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute("INSERT INTO manual_statement_reviews (manual_id, review_month, statement_end_date, portfolio_value, invested_value, cash_value, confirmed, validation_status, warning, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'valid', 'Manually verified against the local statement.', ?) ON CONFLICT(manual_id) DO UPDATE SET review_month=excluded.review_month, statement_end_date=excluded.statement_end_date, portfolio_value=excluded.portfolio_value, invested_value=excluded.invested_value, cash_value=excluded.cash_value, confirmed=excluded.confirmed, validation_status='valid', warning='Manually verified against the local statement.', updated_at=excluded.updated_at", (manual_id, review_month, statement_end_date, float(invested_value) + float(cash_value), float(invested_value), float(cash_value), int(confirmed), _utc_now()))
+        conn.commit()
+    return manual_id
+
+
+def remove_manual_statement_review(manual_id: str, db_path: Path = STATEMENT_HISTORY_DB_PATH) -> None:
+    prepare_history_database(db_path)
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute("DELETE FROM manual_statement_reviews WHERE manual_id=?", (manual_id,))
+        conn.commit()
+
+
 def scan_state(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> dict[str, Any]:
     state = _scan_job(db_path)
     if state["scan_status"] == "completed":
         reclassify_scan_preview(db_path)
-    records = load_scan_preview(db_path)
+    preview_records = load_scan_preview(db_path)
+    manual_records = load_manual_statement_reviews(db_path)
+    records = preview_records + manual_records
     state.update({
         "ready": sum(1 for record in records if record["status"] == "valid"),
         "needs_review": sum(1 for record in records if record["status"] == "needs_review"),
@@ -325,8 +374,8 @@ def scan_state(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> dict[str, Any]:
         year, month = (year + 1, 1) if month == 12 else (year, month + 1)
     valid_months = [str(record["statement_end_date"])[:7] for record in records if record["status"] == "valid" and record.get("statement_end_date")]
     duplicate_months = sorted({month for month in valid_months if valid_months.count(month) > 1})
-    state["monthly_continuity"] = {"complete": not (set(expected_months) - set(valid_months)) and not duplicate_months, "missing_month_count": len(set(expected_months) - set(valid_months)), "duplicate_month_count": len(duplicate_months)}
-    state["diagnostics"] = {"header_found": sum(int(record["header_found"]) for record in records), "nearby_date_range_found": sum(int(record["nearby_date_range_found"]) for record in records), "account_summary_found": sum(int(record["account_summary_found"]) for record in records), "balance_rows_found": sum(int(record["balance_rows_found"]) for record in records)}
+    state["monthly_continuity"] = {"complete": not (set(expected_months) - set(valid_months)) and not duplicate_months and all(record["confirmed"] for record in manual_records), "missing_month_count": len(set(expected_months) - set(valid_months)), "duplicate_month_count": len(duplicate_months), "missing_months": missing_statement_months(records)}
+    state["diagnostics"] = {"header_found": sum(int(record.get("header_found", 0)) for record in records), "nearby_date_range_found": sum(int(record.get("nearby_date_range_found", 0)) for record in records), "account_summary_found": sum(int(record.get("account_summary_found", 0)) for record in records), "balance_rows_found": sum(int(record.get("balance_rows_found", 0)) for record in records)}
     return state
 
 
@@ -493,10 +542,13 @@ def import_validated_history(records: list[dict[str, Any]], db_path: Path = STAT
                 if status in {"duplicate", "duplicate_statement"}: result["duplicates"] += 1; continue
                 if status == "unparseable": result["unparseable"] += 1; continue
                 if status != "valid": result["needs_review"] += 1; continue
+                if record.get("source_type") == "manual_statement_review" and not record.get("confirmed"):
+                    result["needs_review"] += 1
+                    continue
                 try:
                     conn.execute("SAVEPOINT statement_record")
                     cursor = conn.execute("INSERT INTO statement_imports (source_hash, statement_start_date, statement_end_date, imported_at, parser_version, status, warning_count) VALUES (?, ?, ?, ?, ?, ?, ?)", (record["source_hash"], record.get("statement_start_date"), record["statement_end_date"], datetime.now(timezone.utc).isoformat(timespec="seconds"), PARSER_VERSION, "imported", 0))
-                    conn.execute("INSERT INTO statement_portfolio_history (import_id, history_date, portfolio_value, invested_value, cash_value, cost_basis, contribution_amount, withdrawal_amount) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (cursor.lastrowid, record["statement_end_date"], record["portfolio_value"], record.get("invested_value"), record.get("cash_value"), record.get("cost_basis"), record.get("contribution_amount"), record.get("withdrawal_amount")))
+                    conn.execute("INSERT INTO statement_portfolio_history (import_id, history_date, portfolio_value, invested_value, cash_value, cost_basis, contribution_amount, withdrawal_amount, source_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (cursor.lastrowid, record["statement_end_date"], record["portfolio_value"], record.get("invested_value"), record.get("cash_value"), record.get("cost_basis"), record.get("contribution_amount"), record.get("withdrawal_amount"), record.get("source_type", "stash_statement")))
                     conn.execute("RELEASE SAVEPOINT statement_record")
                     result["imported"] += 1
                 except sqlite3.IntegrityError:
