@@ -97,7 +97,12 @@ class StashStatementHistoryTests(unittest.TestCase):
                 content = b"duplicate" if index in {0, 60} else f"unique-{index}".encode()
                 (root / f"synthetic-{index}.pdf").write_bytes(content)
             db_path = root / "history.sqlite"
-            with patch("stash_history._parse_statement_document", return_value={"status": "valid", "warning": "Ready to import.", "statement_start_date": "2021-08-01", "statement_end_date": None, "portfolio_value": 100.0}):
+            parsed_count = 0
+            def parse_unique_document(_path: Path) -> dict[str, object]:
+                nonlocal parsed_count
+                parsed_count += 1
+                return {"status": "valid", "warning": "Ready to import.", "statement_start_date": "2021-08-01", "statement_end_date": f"checkpoint-date-{parsed_count}", "portfolio_value": 100.0}
+            with patch("stash_history._parse_statement_document", side_effect=parse_unique_document):
                 state = run_statement_scan(root, db_path=db_path)
             self.assertEqual(state["detected_pdf_count"], 61)
             self.assertEqual(state["unique_pdf_count"], 60)
@@ -117,6 +122,55 @@ class StashStatementHistoryTests(unittest.TestCase):
                 run_statement_scan(root, db_path=db_path)
             reopened = scan_state(db_path)
             self.assertEqual(reopened["records"][0]["warning"], "Statement ending date was not found.")
+
+    def test_matching_statement_dates_keep_one_canonical_preview_record(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "first.pdf").write_bytes(b"first-content")
+            (root / "second.pdf").write_bytes(b"second-content")
+            db_path = root / "history.sqlite"
+            parsed = {"status": "valid", "warning": "Ready to import.", "statement_start_date": "2021-08-01", "statement_end_date": "2021-08-31", "portfolio_value": 100.0}
+            with patch("stash_history._parse_statement_document", return_value=parsed):
+                state = run_statement_scan(root, db_path=db_path)
+            self.assertEqual(sorted(record["status"] for record in state["records"]), ["duplicate_statement", "valid"])
+            self.assertTrue(scan_can_import(state, 2))
+
+    def test_conflicting_statement_dates_persist_as_review_without_arbitrary_winner(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "first.pdf").write_bytes(b"first-content")
+            (root / "second.pdf").write_bytes(b"second-content")
+            db_path = root / "history.sqlite"
+            parsed = [
+                {"status": "valid", "warning": "Ready to import.", "statement_start_date": "2021-08-01", "statement_end_date": "2021-08-31", "portfolio_value": 100.0},
+                {"status": "valid", "warning": "Ready to import.", "statement_start_date": "2021-08-01", "statement_end_date": "2021-08-31", "portfolio_value": 200.0},
+            ]
+            with patch("stash_history._parse_statement_document", side_effect=parsed):
+                state = run_statement_scan(root, db_path=db_path)
+            self.assertEqual({record["status"] for record in state["records"]}, {"needs_review"})
+            self.assertTrue(all(record["warning"] == "Multiple statements contain different values for this ending date." for record in state["records"]))
+            reopened = scan_state(db_path)
+            self.assertEqual({record["status"] for record in reopened["records"]}, {"needs_review"})
+            result = import_validated_history(reopened["records"], db_path)
+            self.assertEqual(result["imported"], 0)
+            self.assertEqual(history_summary(db_path)["history_records"], 0)
+
+    def test_imported_statement_date_matching_and_conflicting_values_are_classified(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            db_path = root / "history.sqlite"
+            imported = {"source_hash": "imported-source", "statement_start_date": "2021-08-01", "statement_end_date": "2021-08-31", "portfolio_value": 100.0, "status": "valid"}
+            import_validated_history([imported], db_path)
+            for name, content in (("match.pdf", b"matching"), ("conflict.pdf", b"conflicting")):
+                (root / name).write_bytes(content)
+            parsed = [
+                {"status": "valid", "warning": "Ready to import.", "statement_start_date": "2021-08-01", "statement_end_date": "2021-08-31", "portfolio_value": 100.0},
+                {"status": "valid", "warning": "Ready to import.", "statement_start_date": "2021-08-01", "statement_end_date": "2021-08-31", "portfolio_value": 200.0},
+            ]
+            with patch("stash_history._parse_statement_document", side_effect=parsed):
+                state = run_statement_scan(root, db_path=db_path)
+            statuses = sorted(record["status"] for record in state["records"])
+            self.assertEqual(statuses, ["duplicate", "needs_review"])
 
     def test_interrupted_scan_resumes_without_duplicate_preview_records(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

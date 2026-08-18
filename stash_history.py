@@ -188,6 +188,8 @@ def load_scan_preview(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> list[dict[st
 
 def scan_state(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> dict[str, Any]:
     state = _scan_job(db_path)
+    if state["scan_status"] == "completed":
+        reclassify_scan_preview(db_path)
     records = load_scan_preview(db_path)
     state.update({
         "ready": sum(1 for record in records if record["status"] == "valid"),
@@ -217,8 +219,47 @@ def clear_scan_preview(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> None:
 def _save_scan_record(conn: sqlite3.Connection, record: dict[str, Any]) -> None:
     conn.execute(
         "INSERT INTO statement_scan_preview (source_hash, scan_status, statement_start_date, statement_end_date, portfolio_value, invested_value, cash_value, cost_basis, contribution_amount, withdrawal_amount, validation_status, warning, parser_version, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source_hash) DO UPDATE SET scan_status=excluded.scan_status, statement_start_date=excluded.statement_start_date, statement_end_date=excluded.statement_end_date, portfolio_value=excluded.portfolio_value, invested_value=excluded.invested_value, cash_value=excluded.cash_value, cost_basis=excluded.cost_basis, contribution_amount=excluded.contribution_amount, withdrawal_amount=excluded.withdrawal_amount, validation_status=excluded.validation_status, warning=excluded.warning, parser_version=excluded.parser_version, updated_at=excluded.updated_at",
-        (record["source_hash"], "processed", record.get("statement_start_date"), record.get("statement_end_date"), record.get("portfolio_value"), record.get("invested_value"), record.get("cash_value"), record.get("cost_basis"), record.get("contribution_amount"), record.get("withdrawal_amount"), record["status"], str(record.get("warning") or ""), PARSER_VERSION, _utc_now()),
+        (record["source_hash"], str(record.get("status") or "unparseable"), record.get("statement_start_date"), record.get("statement_end_date"), record.get("portfolio_value"), record.get("invested_value"), record.get("cash_value"), record.get("cost_basis"), record.get("contribution_amount"), record.get("withdrawal_amount"), record["status"], str(record.get("warning") or ""), PARSER_VERSION, _utc_now()),
     )
+
+
+def reclassify_scan_preview(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> None:
+    """Apply durable cross-record date/value checks without exposing source identifiers."""
+    prepare_history_database(db_path)
+    with closing(sqlite3.connect(db_path)) as conn:
+        rows = conn.execute("SELECT source_hash, scan_status, statement_end_date, portfolio_value, validation_status, warning FROM statement_scan_preview ORDER BY source_hash").fetchall()
+        imported = {str(row[0]): float(row[1]) for row in conn.execute("SELECT history_date, portfolio_value FROM statement_portfolio_history")}
+        updates: dict[str, tuple[str, str]] = {}
+        candidates: dict[str, list[tuple[str, float]]] = {}
+        for source_hash, scan_status, statement_end_date, portfolio_value, validation_status, warning in rows:
+            base_status = str(validation_status) if str(scan_status) == "processed" else str(scan_status or validation_status)
+            if base_status not in {"valid", "processed"}:
+                updates[str(source_hash)] = (base_status, str(warning or ""))
+                continue
+            if not statement_end_date or portfolio_value is None:
+                updates[str(source_hash)] = ("needs_review", "Statement ending date or value is missing.")
+                continue
+            date_key = str(statement_end_date)
+            value = float(portfolio_value)
+            if date_key in imported:
+                if abs(imported[date_key] - value) <= 0.01:
+                    updates[str(source_hash)] = ("duplicate", "A matching statement date and value is already represented.")
+                else:
+                    updates[str(source_hash)] = ("needs_review", "Multiple statements contain different values for this ending date.")
+                continue
+            candidates.setdefault(date_key, []).append((str(source_hash), value))
+        for date_key, items in candidates.items():
+            values = {round(value, 2) for _, value in items}
+            if len(values) > 1:
+                for source_hash, _value in items:
+                    updates[source_hash] = ("needs_review", "Multiple statements contain different values for this ending date.")
+            else:
+                canonical_hash = min(source_hash for source_hash, _value in items)
+                for source_hash, _value in items:
+                    updates[source_hash] = ("valid", "Ready to import.") if source_hash == canonical_hash else ("duplicate_statement", "A matching statement date and value is already represented.")
+        for source_hash, (status, warning) in updates.items():
+            conn.execute("UPDATE statement_scan_preview SET validation_status=?, warning=?, updated_at=? WHERE source_hash=?", (status, warning, _utc_now(), source_hash))
+        conn.commit()
 
 
 def run_statement_scan(
@@ -318,7 +359,7 @@ def import_validated_history(records: list[dict[str, Any]], db_path: Path = STAT
             conn.execute("BEGIN")
             for record in records:
                 status = record.get("status")
-                if status == "duplicate": result["duplicates"] += 1; continue
+                if status in {"duplicate", "duplicate_statement"}: result["duplicates"] += 1; continue
                 if status == "unparseable": result["unparseable"] += 1; continue
                 if status != "valid": result["needs_review"] += 1; continue
                 try:
