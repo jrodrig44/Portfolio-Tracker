@@ -1765,16 +1765,16 @@ def _format_percent(value: float) -> str:
     return f"{value:,.2f}%"
 
 
-def _summarize_yahoo_historical_price_context(entry: dict[str, object]) -> str:
+def _derive_yahoo_historical_price_context(entry: dict[str, object]) -> dict[str, object] | None:
     ticker = str(entry.get("ticker", "UNKNOWN"))
     history = entry.get("historical_price_data") or []
     if not history:
-        return f"{ticker}: no supplemental Yahoo price history available."
+        return None
 
     try:
         records = [dict(item) for item in history]
         if not records:
-            return f"{ticker}: no supplemental Yahoo price history available."
+            return None
 
         closes = [float(item.get("close", 0.0) or 0.0) for item in records]
         starts = [float(item.get("open", 0.0) or 0.0) for item in records]
@@ -1784,10 +1784,13 @@ def _summarize_yahoo_historical_price_context(entry: dict[str, object]) -> str:
         end_date = str(entry.get("date_range", {}).get("end", "")) if isinstance(entry.get("date_range"), dict) else ""
         period_return = ((end_price / start_price) - 1) * 100 if start_price else 0.0
 
-        high_price = max(float(item.get("high", 0.0) or 0.0) for item in records) if records else 0.0
-        low_price = min(float(item.get("low", 0.0) or 0.0) for item in records) if records else 0.0
-        low_return = ((low_price / start_price) - 1) * 100 if start_price else 0.0
-        high_return = ((high_price / start_price) - 1) * 100 if start_price else 0.0
+        dated_records = [(pd.to_datetime(item.get("date"), errors="coerce"), item) for item in records]
+        valid_dates = [date for date, _ in dated_records if not pd.isna(date)]
+        latest_record_date = max(valid_dates) if valid_dates else None
+        trailing_year = [item for date, item in dated_records if latest_record_date is not None and not pd.isna(date) and date >= latest_record_date - pd.DateOffset(years=1)]
+        range_records = trailing_year or records
+        high_price = max(float(item.get("high", 0.0) or 0.0) for item in range_records)
+        low_price = min(float(item.get("low", 0.0) or 0.0) for item in range_records)
 
         if len(records) >= 2:
             returns = [
@@ -1813,17 +1816,38 @@ def _summarize_yahoo_historical_price_context(entry: dict[str, object]) -> str:
                 if current_drawdown < drawdown:
                     drawdown = current_drawdown
 
-        summary_parts = [
-            f"{ticker}: supplemental Yahoo history {start_date} to {end_date}" if start_date or end_date else f"{ticker}: supplemental Yahoo history",
-            f"start {start_price:.2f}, end {end_price:.2f}",
-            f"return {period_return:.2f}%",
-            f"52w high {high_price:.2f}, low {low_price:.2f}",
-            f"drawdown {drawdown:.2f}%",
-            f"volatility {volatility:.2f}%",
-        ]
-        return "; ".join(summary_parts)
+        return {
+            "ticker": ticker,
+            "start_date": start_date or None,
+            "end_date": end_date or None,
+            "start_price": round(start_price, 4),
+            "end_price": round(end_price, 4),
+            "return_pct": round(period_return, 4),
+            "52w_high": round(high_price, 4),
+            "52w_low": round(low_price, 4),
+            "drawdown": round(drawdown, 4),
+            "volatility": round(volatility, 4),
+            "source": "Yahoo Finance",
+            "history_type": "supplemental_per_security_price_history",
+        }
     except Exception:
-        return f"{ticker}: supplemental Yahoo history unavailable."
+        return None
+
+
+def _summarize_yahoo_historical_price_context(entry: dict[str, object]) -> str:
+    derived = _derive_yahoo_historical_price_context(entry)
+    ticker = str(entry.get("ticker", "UNKNOWN"))
+    if not derived:
+        return f"{ticker}: no supplemental Yahoo price history available."
+    summary_parts = [
+        f"{ticker}: supplemental Yahoo history {derived.get('start_date')} to {derived.get('end_date')}",
+        f"start {_safe_float(derived.get('start_price')):.2f}, end {_safe_float(derived.get('end_price')):.2f}",
+        f"period return {_safe_float(derived.get('return_pct')):.2f}%",
+        f"52w high {_safe_float(derived.get('52w_high')):.2f}, low {_safe_float(derived.get('52w_low')):.2f}",
+        f"drawdown {_safe_float(derived.get('drawdown')):.2f}%",
+        f"volatility {_safe_float(derived.get('volatility')):.2f}%",
+    ]
+    return "; ".join(summary_parts)
 
 
 def _detect_mobile_client() -> bool:
@@ -3001,6 +3025,28 @@ def _income_quality_snapshot(metrics: pd.DataFrame) -> list[dict[str, object]]:
     return rows
 
 
+def _historical_contract_records(historical_context_map: dict[str, dict[str, object]]) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for ticker, entry in historical_context_map.items():
+        price_trend = entry.get("price_trend", {}) if isinstance(entry.get("price_trend", {}), dict) else {}
+        records.append({
+            "ticker": ticker,
+            "change_3m_pct": _coerce_optional_number(price_trend.get("change_3m_pct")),
+            "change_1y_pct": _coerce_optional_number(price_trend.get("change_1y_pct")),
+            "start_price": _coerce_optional_number(entry.get("start_price")),
+            "end_price": _coerce_optional_number(entry.get("end_price")),
+            "period_return_pct": _coerce_optional_number(entry.get("return_pct")),
+            "52w_high": _coerce_optional_number(entry.get("52w_high")),
+            "52w_low": _coerce_optional_number(entry.get("52w_low")),
+            "volatility": _coerce_optional_number(entry.get("volatility")),
+            "drawdown": _coerce_optional_number(entry.get("drawdown")),
+            "source": str(entry.get("source", "Yahoo Finance")),
+            "history_type": str(entry.get("history_type", "supplemental_per_security_price_history")),
+            "supplemental_history_summary": str(entry.get("history_summary", "")),
+        })
+    return records
+
+
 def compute_full_portfolio_snapshot(
     df: pd.DataFrame,
     holdings: pd.DataFrame | None = None,
@@ -3121,17 +3167,7 @@ def compute_full_portfolio_snapshot(
             }
         )
 
-    historical_records = []
-    for ticker, entry in (historical_context_map or {}).items():
-        record = {
-            "ticker": ticker,
-            "change_3m_pct": float(entry.get("3m_change_pct", entry.get("return_pct", 0.0)) or 0.0),
-            "change_1y_pct": float(entry.get("1y_change_pct", entry.get("return_pct", 0.0)) or 0.0),
-            "volatility": float(entry.get("volatility", 0.0) or 0.0),
-            "drawdown": float(entry.get("drawdown", 0.0) or 0.0),
-            "supplemental_history_summary": str(entry.get("history_summary", "")),
-        }
-        historical_records.append(record)
+    historical_records = _historical_contract_records(historical_context_map or {})
 
     completeness = _build_data_completeness(metrics)
 
@@ -3289,7 +3325,11 @@ def generate_portfolio_export(snapshot: dict[str, object], include_alerts: bool 
     holdings_csv = holdings_df.to_csv(index=False) if not holdings_df.empty else ""
 
     historical_rows = historical.get("by_ticker", []) if isinstance(historical, dict) else []
-    historical_coverage = (len([row for row in historical_rows if isinstance(row, dict)]) / len(holdings_df) * 100.0) if len(holdings_df) > 0 else 100.0
+    available_history_rows = [
+        row for row in historical_rows
+        if isinstance(row, dict) and row.get("start_price") is not None and row.get("end_price") is not None
+    ]
+    historical_coverage = (len(available_history_rows) / len(holdings_df) * 100.0) if len(holdings_df) > 0 else 100.0
     income_rows = income.get("by_holding", []) if isinstance(income, dict) else []
     resolved_income_rows = [row for row in income_rows if isinstance(row, dict) and float(row.get("annual_income", 0.0) or 0.0) >= 0]
     income_resolution = (len(resolved_income_rows) / len(income_rows) * 100.0) if isinstance(income_rows, list) and len(income_rows) > 0 else 100.0
@@ -3360,7 +3400,7 @@ def generate_portfolio_export(snapshot: dict[str, object], include_alerts: bool 
         "- Snapshot completeness: 100%",
         f"- Sector resolution: {float(exposure.get('exposure_completeness_pct', 0.0) or 0.0):.1f}%",
         f"- Income resolution: {income_resolution:.1f}%",
-        f"- Historical coverage: {historical_coverage:.1f}%",
+        f"- Supplemental ticker-history coverage: {historical_coverage:.1f}% of holdings",
     ]
 
     return "\n".join(lines)
@@ -3978,6 +4018,7 @@ def _build_ai_export_payload(
         "portfolio_intelligence_layer": intelligence_layer_output,
         "intelligence_summary": {
             "income_quality_score": float(intelligence_layer_output.get("income_quality_score", 0.0) or 0.0),
+            "income_quality_score_label": "Portfolio Intelligence Income Score",
             "distribution_stability_score": float(intelligence_layer_output.get("distribution_stability_score", 0.0) or 0.0),
             "concentration_risk_score": float(intelligence_layer_output.get("concentration_risk_score", 0.0) or 0.0),
             "asset_type_risk_score": float(intelligence_layer_output.get("asset_type_risk_score", 0.0) or 0.0),
@@ -3992,6 +4033,11 @@ def _build_ai_export_payload(
             "context_summary": health_context_summary,
         },
         "income_quality": health.get("income_quality", {}) if isinstance(health, dict) else {},
+        "income_score_metadata": {
+            "portfolio_intelligence_income_score_label": "Portfolio Intelligence Income Score",
+            "income_quality_engine_score_label": "Income Quality Engine Score",
+            "methodologies_are_distinct": True,
+        },
         "asset_allocation": asset_allocation,
         "direct_sector_exposure": direct_sector_exposure,
         "direct_holdings_by_classification": direct_holdings_by_classification,
@@ -4067,6 +4113,46 @@ def _prepare_export_metrics(metrics: pd.DataFrame) -> pd.DataFrame:
     return export_metrics
 
 
+def _canonicalize_export_historical_context(payload: dict[str, object]) -> dict[str, object]:
+    supplemental = payload.get("supplemental_yahoo_historical_price_data", [])
+    if not isinstance(supplemental, list):
+        return payload
+    source_by_ticker = {
+        str(item.get("ticker", "")).strip().upper(): item
+        for item in supplemental
+        if isinstance(item, dict) and str(item.get("ticker", "")).strip()
+    }
+    canonical_by_ticker = {
+        ticker: derived
+        for ticker, item in source_by_ticker.items()
+        for derived in [_derive_yahoo_historical_price_context(item)]
+        if isinstance(derived, dict)
+    }
+    if not canonical_by_ticker:
+        return payload
+
+    existing_by_ticker = {
+        str(item.get("ticker", "")).strip().upper(): item
+        for item in payload.get("historical_context", [])
+        if isinstance(item, dict) and str(item.get("ticker", "")).strip()
+    }
+    for ticker, derived in canonical_by_ticker.items():
+        existing_by_ticker[ticker] = {
+            **existing_by_ticker.get(ticker, {}),
+            **derived,
+            "history_summary": _summarize_yahoo_historical_price_context(source_by_ticker[ticker]),
+        }
+
+    result = dict(payload)
+    result["historical_context"] = list(existing_by_ticker.values())
+    compatibility_historical = {"by_ticker": _historical_contract_records(existing_by_ticker)}
+    result["historical"] = compatibility_historical
+    unified_snapshot = result.get("unified_snapshot", {})
+    if isinstance(unified_snapshot, dict):
+        result["unified_snapshot"] = {**unified_snapshot, "historical": compatibility_historical}
+    return result
+
+
 def _build_ai_export_json(
     holdings: pd.DataFrame,
     metrics: pd.DataFrame,
@@ -4085,6 +4171,7 @@ def _build_ai_export_json(
         espp_purchase_frequency,
         espp_discount,
     )
+    payload = _canonicalize_export_historical_context(payload)
     unified_snapshot = payload.get("unified_snapshot", {}) if isinstance(payload, dict) else {}
     contract_payload = generate_portfolio_export_json(unified_snapshot) if isinstance(unified_snapshot, dict) else {}
     if isinstance(contract_payload, dict) and contract_payload:
@@ -4260,6 +4347,7 @@ def build_health_score_section(export_payload: dict[str, object]) -> list[str]:
         alert for alert in _dedupe_text_items(portfolio_health.get("alerts", []) if isinstance(portfolio_health, dict) else [])
         if alert != primary_alert
     ]
+    intelligence_summary = export_payload.get("intelligence_summary", {}) if isinstance(export_payload, dict) else {}
 
     lines = [
         "## Health Score",
@@ -4273,6 +4361,7 @@ def build_health_score_section(export_payload: dict[str, object]) -> list[str]:
         "",
         "## Portfolio Health and Alerts",
         f"- Health score: {_resolve_health_score_value(portfolio_health):.1f}/100",
+        f"- Portfolio Intelligence Income Score: {_safe_float(intelligence_summary.get('income_quality_score', 0.0)):.1f}",
         f"- Largest holding concentration: {str(portfolio_health.get('largest_holding', 'N/A'))} is {_safe_float(portfolio_health.get('largest_holding_weight', 0.0)):.1f}% of portfolio.",
     ]
     if alerts:
@@ -4294,6 +4383,15 @@ def build_data_completeness_section(export_payload: dict[str, object]) -> list[s
     fund_total = _safe_float(unresolved.get("fund_total_value", 0.0))
     unresolved_value = _safe_float(unresolved.get("unresolved_fund_exposure", 0.0))
     unresolved_pct = unresolved_value / fund_total * 100 if fund_total > 0 else 0.0
+    holdings = export_payload.get("holdings", []) if isinstance(export_payload.get("holdings", []), list) else []
+    supplemental_history = export_payload.get("supplemental_yahoo_historical_price_data", []) if isinstance(export_payload.get("supplemental_yahoo_historical_price_data", []), list) else []
+    available_history_tickers = {
+        str(item.get("ticker", "")).strip().upper()
+        for item in supplemental_history
+        if isinstance(item, dict) and _derive_yahoo_historical_price_context(item)
+    }
+    ticker_history_coverage = len(available_history_tickers) / len(holdings) * 100.0 if holdings else 100.0
+    validation = export_payload.get("snapshot_validation", {}) if isinstance(export_payload.get("snapshot_validation", {}), dict) else {}
 
     return [
         "## Data Completeness",
@@ -4308,6 +4406,10 @@ def build_data_completeness_section(export_payload: dict[str, object]) -> list[s
         "- Dividend yields may change over time and should not be interpreted as guaranteed future income.",
         "- Dividend payment schedules and future distribution amounts are not guaranteed.",
         *([f"- {str(issue)}" for issue in export_payload.get("data_quality_issues", [])] if export_payload.get("data_quality_issues", []) else ["- No obvious data-quality issues were detected."]),
+        "",
+        "## Export Integrity",
+        f"- Snapshot validation: {'valid' if validation.get('valid', True) else 'invalid'}",
+        f"- Supplemental ticker-history coverage: {ticker_history_coverage:.1f}% of holdings with usable Yahoo price history",
         "",
     ]
 
@@ -4434,7 +4536,7 @@ def build_income_quality_analysis_section(export_payload: dict[str, object]) -> 
 
     return [
         "## Income Quality Analysis",
-        f"- Income Quality Score: {_safe_float(income_quality.get('income_quality_score', 0.0)):.1f}",
+        f"- Income Quality Engine Score: {_safe_float(income_quality.get('income_quality_score', 0.0)):.1f}",
         f"- Distribution Stability Score: {_safe_float(income_quality.get('distribution_stability_score', 0.0)):.1f}",
         f"- Yield Sustainability Score: {_safe_float(income_quality.get('yield_sustainability_score', 0.0)):.1f}",
         f"- Payout Risk Score: {_safe_float(income_quality.get('payout_risk_score', 0.0)):.1f}",
@@ -4473,7 +4575,6 @@ def build_economic_exposure_section(export_payload: dict[str, object]) -> list[s
 
 
 def build_historical_context_section(export_payload: dict[str, object]) -> list[str]:
-    historical_context = export_payload.get("historical_context", []) if isinstance(export_payload, dict) else []
     supplemental_history = export_payload.get("supplemental_yahoo_historical_price_data", []) if isinstance(export_payload, dict) else []
 
     lines = [
@@ -4488,23 +4589,6 @@ def build_historical_context_section(export_payload: dict[str, object]) -> list[
     else:
         lines.append("(No data available)")
 
-    lines.extend(["", "## Historical Context"])
-    if isinstance(historical_context, list) and historical_context:
-        for entry in historical_context:
-            if not isinstance(entry, dict):
-                continue
-            lines.append(
-                "- "
-                + f"{str(entry.get('ticker', 'N/A'))}: start_price {_format_optional_metric(entry.get('start_price'))}, "
-                + f"end_price {_format_optional_metric(entry.get('end_price'))}, "
-                + f"return_pct {_format_optional_metric(entry.get('return_pct'), suffix='%')}, "
-                + f"52w_high {_format_optional_metric(entry.get('52w_high'))}, "
-                + f"52w_low {_format_optional_metric(entry.get('52w_low'))}, "
-                + f"drawdown {_format_optional_metric(entry.get('drawdown'), suffix='%')}, "
-                + f"volatility {_format_optional_metric(entry.get('volatility'), suffix='%')}"
-            )
-    else:
-        lines.append("(No data available)")
     lines.append("")
     return lines
 
@@ -4628,20 +4712,11 @@ def build_metadata_section(export_payload: dict[str, object]) -> list[str]:
         f"- methodology: {str(dividend_metadata.get('method', 'Current dividend yield used to estimate annualized income'))}",
         f"- verification_status: {str(dividend_metadata.get('verification_status', 'Not verified'))}",
         "",
-        "## Supplemental Fundamental Data",
-        *(fundamentals_lines if fundamentals_lines else ["(No data available)"]),
-        "",
         "## Supplemental Yahoo Finance Fundamental Data",
         *(fundamentals_lines if fundamentals_lines else ["(No data available)"]),
         "",
-        "## Supplemental Earnings Data",
-        *(earnings_lines if earnings_lines else ["(No data available)"]),
-        "",
         "## Supplemental Yahoo Finance Earnings and Estimates",
         *(earnings_lines if earnings_lines else ["(No data available)"]),
-        "",
-        "## Supplemental Fund Data",
-        *(fund_lines if fund_lines else ["(No data available)"]),
         "",
         "## Supplemental Yahoo Finance Fund Data",
         *(fund_lines if fund_lines else ["(No data available)"]),
@@ -4672,14 +4747,6 @@ def assemble_export(section_blocks: list[list[str]], export_payload: dict[str, o
             "- The export does not claim a verified payment schedule or known calendar of dividends.",
         ]
     )
-
-    unified_snapshot = export_payload.get("unified_snapshot", {}) if isinstance(export_payload, dict) else {}
-    if isinstance(unified_snapshot, dict) and unified_snapshot:
-        try:
-            validate_snapshot(unified_snapshot)
-        except ValueError as exc:
-            lines.extend(["", "## Snapshot Validation", f"- {exc}"])
-        lines.extend(["", "---", "", generate_portfolio_export(unified_snapshot, include_alerts=False)])
 
     return "\n".join(lines)
 
@@ -4740,6 +4807,7 @@ def _build_export_markdown(
         espp_purchase_frequency,
         espp_discount,
     )
+    payload = _canonicalize_export_historical_context(payload)
     return generate_export(payload)
 
 

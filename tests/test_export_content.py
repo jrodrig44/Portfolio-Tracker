@@ -92,6 +92,69 @@ class ExportMarkdownTests(unittest.TestCase):
         self.assertIn("AAPL", content)
         self.assertNotIn("## Projected Income Calendar", content)
 
+    def test_canonical_supplemental_history_is_consistent_and_not_duplicated(self) -> None:
+        yahoo_history = {
+            "ticker": "AAPL",
+            "date_range": {"start": "2024-01-02", "end": "2025-12-31"},
+            "historical_price_data": [
+                {"date": "2024-01-02", "open": 100, "high": 102, "low": 99, "close": 101},
+                {"date": "2025-01-02", "open": 120, "high": 125, "low": 118, "close": 123},
+                {"date": "2025-12-31", "open": 140, "high": 150, "low": 135, "close": 145},
+            ],
+        }
+        derived = app._derive_yahoo_historical_price_context(yahoo_history)
+        self.assertIsNotNone(derived)
+        self.assertEqual(derived["start_price"], 100.0)
+        self.assertEqual(derived["end_price"], 145.0)
+        self.assertEqual(derived["return_pct"], 45.0)
+
+        markdown = "\n".join(app.build_historical_context_section({"supplemental_yahoo_historical_price_data": [yahoo_history]}))
+        self.assertEqual(markdown.count("## Supplemental Yahoo Finance Historical Price Data"), 1)
+        self.assertNotIn("## Historical Context", markdown)
+        self.assertIn("start 100.00, end 145.00", markdown)
+        self.assertIn("period return 45.00%", markdown)
+
+        metrics = pd.DataFrame([{"ticker": "AAPL", "market_value": 145, "cost_basis": 100, "annual_income": 1, "asset_type": "Stock", "sector": "Technology"}])
+        snapshot = app.compute_full_portfolio_snapshot(metrics, historical_context_map={"AAPL": derived})
+        contract = app.generate_portfolio_export_json(snapshot)
+        row = contract["historical"]["by_ticker"][0]
+        self.assertEqual(row["period_return_pct"], 45.0)
+        self.assertIsNone(row["change_1y_pct"])
+
+    def test_unavailable_supplemental_history_is_honest(self) -> None:
+        markdown = "\n".join(app.build_historical_context_section({"supplemental_yahoo_historical_price_data": []}))
+        self.assertIn("(No data available)", markdown)
+        self.assertNotIn("return 0.00%", markdown)
+
+    def test_export_score_labels_coverage_and_markdown_deduplication(self) -> None:
+        payload = {
+            "export_version": "test",
+            "portfolio_snapshot": {"portfolio_value": 100, "holdings_count": 1},
+            "portfolio_health": {"health_score": 70, "income_quality": {"income_quality_score": 61}},
+            "intelligence_summary": {"income_quality_score": 77},
+            "income_quality": {"income_quality_score": 61},
+            "income_score_metadata": {
+                "portfolio_intelligence_income_score_label": "Portfolio Intelligence Income Score",
+                "income_quality_engine_score_label": "Income Quality Engine Score",
+                "methodologies_are_distinct": True,
+            },
+            "snapshot_validation": {"valid": True, "errors": []},
+            "holdings": [{"ticker": "AAPL"}],
+            "supplemental_yahoo_historical_price_data": [],
+            "investor_profile": {"primary_goal": "Income"},
+        }
+        markdown = app.generate_export(payload)
+        self.assertEqual(markdown.splitlines().count("## AI Context Summary"), 1)
+        self.assertEqual(markdown.splitlines().count("## Asset Allocation"), 1)
+        self.assertIn("Portfolio Intelligence Income Score: 77.0", markdown)
+        self.assertIn("Income Quality Engine Score: 61.0", markdown)
+        self.assertNotIn("Historical coverage:", markdown)
+        self.assertIn("Supplemental ticker-history coverage: 0.0% of holdings", markdown)
+        self.assertIn("## Investor Profile", markdown)
+        self.assertIn("## AI Analysis Instructions", markdown)
+        self.assertEqual(payload["intelligence_summary"]["income_quality_score"], 77)
+        self.assertEqual(payload["income_quality"]["income_quality_score"], 61)
+
     def test_hd_primary_alert_includes_espp_context(self) -> None:
         holdings = pd.DataFrame(
             [
@@ -390,8 +453,10 @@ class ExportMarkdownTests(unittest.TestCase):
             ]
         )
 
-        payload = json.loads(_build_ai_export_json(holdings, metrics))
-        markdown = _build_export_markdown(holdings, metrics)
+        unavailable_ticker = SimpleNamespace(history=lambda **kwargs: pd.DataFrame())
+        with patch("app.yf.Ticker", return_value=unavailable_ticker):
+            payload = json.loads(_build_ai_export_json(holdings, metrics))
+            markdown = _build_export_markdown(holdings, metrics)
 
         self.assertAlmostEqual(payload["concentration_context"]["largest_holding_income_weight_pct"], 28.5714, places=3)
         self.assertAlmostEqual(payload["concentration_context"]["largest_income_weight_pct"], 57.1429, places=3)
@@ -442,16 +507,17 @@ class ExportMarkdownTests(unittest.TestCase):
         holdings = pd.DataFrame([{"ticker": "SDIV", "shares": 1, "amount_invested": 100, "annual_div_per_share": 1.0, "sector": "Real Estate", "asset_type": "ETF"}])
         metrics = pd.DataFrame([{"ticker": "SDIV", "current_price": 100.0, "market_value": 100.0, "annual_income": 10.0, "portfolio_yield_pct": 10.0, "cost_basis": 100.0, "unrealized_gain": 0.0, "sector": "Real Estate", "asset_type": "ETF"}])
 
-        payload = json.loads(_build_ai_export_json(holdings, metrics))
-        markdown = _build_export_markdown(holdings, metrics)
+        unavailable_ticker = SimpleNamespace(history=lambda **kwargs: pd.DataFrame())
+        with patch("app.yf.Ticker", return_value=unavailable_ticker):
+            payload = json.loads(_build_ai_export_json(holdings, metrics))
+            markdown = _build_export_markdown(holdings, metrics)
 
         self.assertIsNone(payload["historical_context"][0]["start_price"])
         self.assertIsNone(payload["historical_context"][0]["end_price"])
         self.assertIsNone(payload["historical_context"][0]["return_pct"])
         self.assertNotRegex(markdown, r"\b(?:nan|NaN|Infinity|-Infinity)\b")
         self.assertNotRegex(json.dumps(payload), r"\b(?:nan|NaN|Infinity|-Infinity)\b")
-        self.assertIn("start_price Unavailable", markdown)
-        self.assertIn("return_pct Unavailable", markdown)
+        self.assertIn("(No data available)", markdown)
 
     def test_health_score_sections_match_and_concentration_alert_is_not_duplicated(self) -> None:
         holdings = pd.DataFrame(
@@ -497,11 +563,13 @@ class ExportMarkdownTests(unittest.TestCase):
         holdings = pd.DataFrame([{"ticker": "AAPL", "shares": 1, "amount_invested": 100, "annual_div_per_share": 1.0, "sector": "Technology", "asset_type": "Stock"}])
         metrics = pd.DataFrame([{"ticker": "AAPL", "current_price": 100.0, "market_value": 100.0, "annual_income": 10.0, "portfolio_yield_pct": 10.0, "cost_basis": 100.0, "unrealized_gain": 0.0, "sector": "Technology", "asset_type": "Stock"}])
 
-        payload = json.loads(_build_ai_export_json(holdings, metrics))
-        markdown = _build_export_markdown(holdings, metrics)
+        unavailable_ticker = SimpleNamespace(history=lambda **kwargs: pd.DataFrame())
+        with patch("app.yf.Ticker", return_value=unavailable_ticker):
+            payload = json.loads(_build_ai_export_json(holdings, metrics))
+            markdown = _build_export_markdown(holdings, metrics)
 
         self.assertIsNone(payload["historical_context"][0]["return_pct"])
-        self.assertIn("return_pct Unavailable", markdown)
+        self.assertIn("(No data available)", markdown)
         self.assertNotIn("return_pct 0.00%", markdown)
 
     def test_unresolved_fund_look_through_exposure_is_grouped_by_fund_type(self) -> None:
