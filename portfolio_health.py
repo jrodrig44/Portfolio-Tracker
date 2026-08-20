@@ -70,18 +70,17 @@ def build_portfolio_health(
         },
     )
     subscores = {name: max(0.0, min(float(value or 0.0), 100.0)) for name, value in engine.get("subscores", {}).items()}
-    scored = list(subscores.items())
-    priority = {"data_quality": 0, "income_stability": 1, "concentration": 2, "diversification": 3, "risk": 4, "dividend_growth_potential": 5, "total_return_potential": 6}
-    strongest = []
-    if "data_quality" in subscores:
-        strongest.append({"area": _area_name("data_quality"), "score": round(subscores["data_quality"], 1)})
-    for name, score in sorted(scored, key=lambda item: (-item[1], priority.get(item[0], 99), item[0])):
-        if name == "data_quality":
-            continue
-        strongest.append({"area": _area_name(name), "score": round(score, 1)})
-        if len(strongest) == 3:
-            break
-    weakest = [{"area": _area_name(name), "score": round(score, 1)} for name, score in sorted(scored, key=lambda item: (item[1], item[0]))[:3]]
+    area_keys = {_area_name(name): name for name in subscores}
+    def displayed_areas(engine_areas: Any) -> list[dict[str, Any]]:
+        output = []
+        for area in engine_areas if isinstance(engine_areas, list) else []:
+            label = str(area)
+            key = area_keys.get(label)
+            if key is not None:
+                output.append({"area": label, "score": round(subscores[key], 1)})
+        return output
+    strongest = displayed_areas(engine.get("strongest_areas", []))
+    weakest = displayed_areas(engine.get("weakest_areas", []))
     alerts = list(dict.fromkeys(str(item) for item in engine.get("alerts", [])))
     overall = max(0.0, min(float(engine.get("overall_score", 0.0) or 0.0), 100.0))
     return {

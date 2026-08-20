@@ -53,6 +53,28 @@ class NiceGuiPhase1CHealthTests(unittest.TestCase):
         self.assertEqual(len(result["strongest_areas"]),3)
         self.assertEqual(len(result["weakest_areas"]),3)
 
+    def test_strongest_and_weakest_areas_follow_engine_order_and_scores(self):
+        metrics=self.metrics()
+        for weights,data_quality_expected in (({},False),(self.fund_weights(),True)):
+            with self.subTest(data_quality_expected=data_quality_expected):
+                result=health_package(metrics,fund_weights=weights)
+                expected=compute_portfolio_health(
+                    df=metrics,
+                    exposure={"unresolved_exposure":{"unresolved_fund_exposure":0.0 if weights else 500.0,"fund_total_value":500.0}},
+                    income={"monthly_dividend_weights":{},"asset_type_map":{}},
+                    contributions={},
+                    espp_context={"employer_stock":True,"employer_ticker":"HD"},
+                    data_quality={"pct_unresolved_sector":5/7,"pct_missing_dividends":0.0,"pct_unresolved_lookthrough":0.0 if weights else 1.0},
+                )
+                strongest_labels=[row["area"] for row in result["strongest_areas"]]
+                weakest_labels=[row["area"] for row in result["weakest_areas"]]
+                self.assertEqual(strongest_labels,expected["strongest_areas"])
+                self.assertEqual(weakest_labels,expected["weakest_areas"])
+                self.assertEqual("Data Quality" in strongest_labels,data_quality_expected)
+                for row in result["strongest_areas"]:
+                    key=row["area"].lower().replace(" ","_")
+                    self.assertEqual(row["score"],round(result["subscores"][key],1))
+
     def test_unresolved_sector_and_fund_exposure_reduce_data_quality(self):
         complete=health_package(self.metrics(),fund_weights=self.fund_weights())
         unresolved=health_package(self.metrics(),fund_weights={})
