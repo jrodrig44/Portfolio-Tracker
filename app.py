@@ -6189,25 +6189,36 @@ def _build_compact_portfolio_history_summary(history: object) -> dict[str, objec
     earliest_date, earliest_value = points[0]
     latest_date, latest_value = points[-1]
 
-    def baseline(months: int) -> dict[str, object]:
+    def baseline(months: int, minimum_span_days: int, target_tolerance_days: int = 35) -> dict[str, object]:
+        # Require meaningful period coverage, then allow roughly one monthly
+        # statement interval around the calendar target. Values are never interpolated.
+        if (latest_date - earliest_date).days < minimum_span_days:
+            return {}
         target = latest_date - pd.DateOffset(months=months)
         baseline_date, baseline_value = min(points, key=lambda item: (abs((item[0] - target).days), item[0]))
+        if abs((baseline_date - target).days) > target_tolerance_days:
+            return {}
         return {
             "date": baseline_date.date().isoformat(),
             "value": round(baseline_value, 2),
             "nominal_change_pct": round((latest_value / baseline_value - 1.0) * 100.0, 2) if baseline_value else None,
         }
 
-    return {
+    summary = {
         "latest_date": latest_date.date().isoformat(),
         "latest_value": round(latest_value, 2),
         "earliest_date": earliest_date.date().isoformat(),
         "earliest_value": round(earliest_value, 2),
-        "one_year_baseline": baseline(12),
-        "three_month_baseline": baseline(3),
         "point_count": len(points),
         "interpretation": "Nominal account-value change includes contributions/withdrawals and is not investment return.",
     }
+    one_year = baseline(12, minimum_span_days=330)
+    three_month = baseline(3, minimum_span_days=75)
+    if one_year:
+        summary["one_year_baseline"] = one_year
+    if three_month:
+        summary["three_month_baseline"] = three_month
+    return summary
 
 
 def _build_compact_seasonality_summary(seasonality: object) -> dict[str, object]:
@@ -6457,19 +6468,30 @@ def _compact_analysis_context(
     summary = contribution["summary"]
     employer = contribution["employer_stock_concentration_context"]
     annual_total = float(summary.get("estimated_combined_annual_contributions") or 0.0)
+    annual_regular = float(summary.get("annual_regular_contributions") or 0.0)
     annual_employer = float(summary.get("annual_espp_contributions") or 0.0)
     if annual_total > 0:
-        employer_pct = annual_employer / annual_total * 100.0
-        current_pct = float(employer.get("primary_employer_capital_concentration_pct") or 0.0)
-        summary["employer_stock_contribution_pct"] = round(employer_pct, 2)
-        summary["non_employer_contribution_pct"] = round(100.0 - employer_pct, 2)
-        summary["concentration_direction"] = (
-            "increase employer-stock concentration"
-            if employer_pct > current_pct
-            else "dilute employer-stock concentration"
-            if employer_pct < current_pct
-            else "neutral"
-        )
+        employer_cash_pct = annual_employer / annual_total * 100.0
+        summary["employer_stock_contribution_pct"] = round(employer_cash_pct, 2)
+        summary["non_employer_contribution_pct"] = round(100.0 - employer_cash_pct, 2)
+        discount_pct = _normalize_percentage_value(summary.get("hd_espp_discount_pct"), default_pct=float("nan"))
+        current_pct = _coerce_finite_number(employer.get("primary_employer_capital_concentration_pct"))
+        if math.isfinite(discount_pct) and 0.0 <= discount_pct < 100.0 and current_pct is not None and 0.0 <= current_pct <= 100.0:
+            estimated_espp_market_value = annual_employer / (1.0 - discount_pct / 100.0)
+            estimated_new_market_value = annual_regular + estimated_espp_market_value
+            if estimated_new_market_value > 0:
+                employer_new_money_weight = estimated_espp_market_value / estimated_new_market_value * 100.0
+                summary["concentration_direction"] = (
+                    "increase employer-stock concentration"
+                    if employer_new_money_weight > current_pct
+                    else "dilute employer-stock concentration"
+                    if employer_new_money_weight < current_pct
+                    else "neutral"
+                )
+            else:
+                summary["concentration_direction"] = "indeterminate"
+        else:
+            summary["concentration_direction"] = "indeterminate"
     else:
         summary["concentration_direction"] = "indeterminate"
 

@@ -328,6 +328,91 @@ class PromptConversionTests(unittest.TestCase):
         self.assertEqual(summary["three_month_baseline"]["date"], "2026-01-01")
         self.assertEqual(summary["point_count"], 3)
 
+    def test_espp_discount_adjusts_only_concentration_direction(self) -> None:
+        def compact(discount: object) -> dict[str, object]:
+            return app._compact_analysis_context({
+                "portfolio_snapshot": {},
+                "contribution_context": {
+                    "summary": {
+                        "estimated_annual_regular_contributions": 700,
+                        "estimated_annual_espp_contributions": 300,
+                        "estimated_combined_annual_contributions": 1000,
+                        "hd_espp_discount_pct": discount,
+                    },
+                    "employer_stock_concentration_context": {
+                        "primary_employer_ticker": "HD",
+                        "primary_employer_capital_concentration_pct": 32,
+                    },
+                },
+            }, "Contribution Allocation Review", "")
+
+        discounted = compact(15)["contribution_context"]["summary"]
+        decimal_discount = compact(0.15)["contribution_context"]["summary"]
+        zero_discount = compact(0)["contribution_context"]["summary"]
+        self.assertEqual(discounted["employer_stock_contribution_pct"], 30.0)
+        self.assertEqual(discounted["non_employer_contribution_pct"], 70.0)
+        self.assertEqual(discounted["concentration_direction"], "increase employer-stock concentration")
+        self.assertEqual(decimal_discount["concentration_direction"], "increase employer-stock concentration")
+        self.assertEqual(zero_discount["concentration_direction"], "dilute employer-stock concentration")
+
+    def test_espp_invalid_or_missing_discount_makes_direction_indeterminate(self) -> None:
+        for discount in (None, "invalid", -1, 100, 125):
+            with self.subTest(discount=discount):
+                summary = app._compact_analysis_context({
+                    "portfolio_snapshot": {},
+                    "contribution_context": {
+                        "summary": {
+                            "estimated_annual_regular_contributions": 700,
+                            "estimated_annual_espp_contributions": 300,
+                            "estimated_combined_annual_contributions": 1000,
+                            "hd_espp_discount_pct": discount,
+                        },
+                        "employer_stock_concentration_context": {"primary_employer_capital_concentration_pct": 20},
+                    },
+                }, "Contribution Allocation Review", "")["contribution_context"]["summary"]
+                self.assertEqual(summary["concentration_direction"], "indeterminate")
+                self.assertEqual(summary["employer_stock_contribution_pct"], 30.0)
+        zero_summary = app._compact_analysis_context({
+            "portfolio_snapshot": {},
+            "contribution_context": {"summary": {"estimated_combined_annual_contributions": 0, "hd_espp_discount_pct": 15}},
+        }, "Contribution Allocation Review", "")["contribution_context"]["summary"]
+        self.assertEqual(zero_summary["concentration_direction"], "indeterminate")
+
+    def test_historical_baselines_require_sufficient_coverage(self) -> None:
+        short_year = app._build_compact_portfolio_history_summary([
+            {"history_date": "2025-01-01", "portfolio_value": 100},
+            {"history_date": "2025-10-01", "portfolio_value": 120},
+        ])
+        short_quarter = app._build_compact_portfolio_history_summary([
+            {"history_date": "2025-01-01", "portfolio_value": 100},
+            {"history_date": "2025-03-01", "portfolio_value": 110},
+        ])
+        sufficient = app._build_compact_portfolio_history_summary([
+            {"history_date": "2024-12-28", "portfolio_value": 90},
+            {"history_date": "2025-09-29", "portfolio_value": 110},
+            {"history_date": "2025-12-31", "portfolio_value": 120},
+        ])
+        self.assertNotIn("one_year_baseline", short_year)
+        self.assertNotIn("three_month_baseline", short_quarter)
+        self.assertEqual(sufficient["one_year_baseline"]["date"], "2024-12-28")
+        self.assertEqual(sufficient["three_month_baseline"]["date"], "2025-09-29")
+
+    def test_prompt_omits_unavailable_historical_periods(self) -> None:
+        history = app._build_compact_portfolio_history_summary([
+            {"history_date": "2025-01-01", "portfolio_value": 100},
+            {"history_date": "2025-03-01", "portfolio_value": 110},
+        ])
+        compact = app._compact_analysis_context(
+            {"portfolio_snapshot": {}, "contribution_context": {}},
+            "Long-Term Outlook",
+            "",
+            portfolio_history_summary=history,
+        )
+        prompt = messages_to_prompt(build_ai_analysis_messages(compact, "Long-Term Outlook", ""))
+        self.assertIn("2 actual points", prompt)
+        self.assertNotIn("one-year account-value change", prompt)
+        self.assertNotIn("three-month account-value change", prompt)
+
     def test_seasonality_is_analysis_specific_and_missing_timing_is_not_fabricated(self) -> None:
         full = {"portfolio_snapshot": {}, "contribution_context": {}}
         seasonality = {"highest_income_months": ["Jun"], "lowest_income_months": ["Jan"], "timing_coverage_pct": 90}
