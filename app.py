@@ -76,6 +76,8 @@ INVESTMENT_INTELLIGENCE_CACHE_TTL_SECONDS = 21600
 DIVIDEND_TIMING_CACHE_TTL_SECONDS = 86400
 HISTORICAL_CONTEXT_CACHE_TTL_SECONDS = 600
 FUND_SECTOR_WEIGHTS_CACHE_TTL_SECONDS = 3600
+HISTORY_RANGE_OPTIONS = ("1M", "3M", "1Y", "ALL")
+DEFAULT_HISTORY_RANGE = "ALL"
 ONEMIN_AI_RECOMMENDED_MODELS = [
     "gpt-4.1-mini",
     "gemini-2.5-flash",
@@ -5334,6 +5336,39 @@ def _statement_preview_rows(records: list[dict[str, object]]) -> list[dict[str, 
     return [{"Statement start date": row.get("statement_start_date") or "-", "Statement end date": row.get("statement_end_date") or "-", "Ending portfolio value": row.get("portfolio_value"), "Invested value": row.get("invested_value"), "Cash value": row.get("cash_value"), "Validation status": row.get("status"), "Warning": row.get("warning")} for row in records]
 
 
+def _filter_performance_history(
+    history: list[dict[str, object]],
+    selected_range: str = DEFAULT_HISTORY_RANGE,
+) -> list[dict[str, object]]:
+    if selected_range not in HISTORY_RANGE_OPTIONS:
+        raise ValueError(f"Unsupported history range: {selected_range}")
+    if not history:
+        return []
+
+    dated_records: list[tuple[pd.Timestamp, dict[str, object]]] = []
+    for record in history:
+        history_date = pd.to_datetime(record.get("history_date"), errors="coerce")
+        if pd.isna(history_date):
+            continue
+        dated_records.append((history_date.normalize(), dict(record)))
+
+    if not dated_records:
+        return []
+
+    dated_records.sort(key=lambda item: item[0])
+    if selected_range == "ALL":
+        return [record for _, record in dated_records]
+
+    latest_date = dated_records[-1][0]
+    offsets = {
+        "1M": pd.DateOffset(months=1),
+        "3M": pd.DateOffset(months=3),
+        "1Y": pd.DateOffset(years=1),
+    }
+    cutoff_date = latest_date - offsets[selected_range]
+    return [record for history_date, record in dated_records if history_date >= cutoff_date]
+
+
 def _persist_live_snapshot_if_ready(metrics: pd.DataFrame, total_value: float, *, db_path: Path = STATEMENT_HISTORY_DB_PATH, use_export_json_data: bool | None = None, strict_export_accuracy_mode: bool | None = None) -> bool:
     use_export_json_data = _use_export_json_data() if use_export_json_data is None else use_export_json_data
     strict_export_accuracy_mode = bool(st.session_state.get("strict_export_accuracy_mode", False)) if strict_export_accuracy_mode is None else strict_export_accuracy_mode
@@ -5455,8 +5490,17 @@ def _render_statement_history_import(total_value: float) -> None:
             st.success("Imported local statement history was deleted. Original PDFs were not changed.")
     history = load_performance_history(STATEMENT_HISTORY_DB_PATH)
     if history:
-        st.markdown("#### Overall Portfolio Performance")
-        st.line_chart(pd.DataFrame(history).sort_values("history_date").set_index("history_date")[["portfolio_value"]])
+        st.markdown("#### Historical Portfolio Value")
+        selected_range = st.radio(
+            "History range",
+            options=HISTORY_RANGE_OPTIONS,
+            index=HISTORY_RANGE_OPTIONS.index(DEFAULT_HISTORY_RANGE),
+            horizontal=True,
+            key="portfolio_history_range",
+            label_visibility="collapsed",
+        )
+        filtered_history = _filter_performance_history(history, selected_range)
+        st.line_chart(pd.DataFrame(filtered_history).set_index("history_date")[["portfolio_value"]])
         st.caption("Historical statement points are verified statement-ending values, not daily market values. Live points are local daily snapshots that update as prices change.")
 
 
