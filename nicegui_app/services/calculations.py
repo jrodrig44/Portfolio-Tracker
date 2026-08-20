@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 import pandas as pd
 
@@ -11,7 +12,17 @@ def _percentage(value: Any, default: float = 0.0) -> float:
         number = float(value)
     except (TypeError, ValueError):
         return default
+    if not math.isfinite(number):
+        return default
     return number * 100.0 if 0 < number <= 1 else number
+
+
+def _valid_positive(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and number > 0 else None
 
 
 def metrics_frame(
@@ -28,11 +39,15 @@ def metrics_frame(
         frame[column] = pd.to_numeric(source, errors="coerce").fillna(0.0)
     frame["ticker"] = frame["ticker"].fillna("").astype(str).str.strip().str.upper()
     if price_map is not None:
-        live_prices = pd.to_numeric(frame["ticker"].map(price_map), errors="coerce").fillna(0.0)
-        frame.loc[frame["current_price"].le(0) & live_prices.gt(0), "current_price"] = live_prices
+        live_prices = frame["ticker"].map(price_map).map(_valid_positive)
+        valid_prices = live_prices.notna()
+        if valid_prices.any():
+            frame.loc[valid_prices, "current_price"] = live_prices[valid_prices].astype(float)
     if yield_map is not None:
-        live_yields = pd.to_numeric(frame["ticker"].map(yield_map), errors="coerce").fillna(0.0)
-        frame.loc[frame["dividend_yield_pct"].le(0) & live_yields.gt(0), "dividend_yield_pct"] = live_yields
+        live_yields = frame["ticker"].map(yield_map).map(_valid_positive)
+        valid_yields = live_yields.notna()
+        if valid_yields.any():
+            frame.loc[valid_yields, "dividend_yield_pct"] = live_yields[valid_yields].astype(float)
     employer = frame["employer_stock"] if "employer_stock" in frame else pd.Series(False, index=frame.index)
     espp = frame["espp_enabled"] if "espp_enabled" in frame else pd.Series(False, index=frame.index)
     frame["employer_stock"] = employer.fillna(False).astype(bool)

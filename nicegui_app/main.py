@@ -276,14 +276,16 @@ async def index() -> None:
     async def refresh_data(force: bool = False) -> None:
         nonlocal holdings,history,metrics
         result = await run.io_bound(coordinator.refresh,force)
-        if not result.portfolio_changed and not result.history_changed:
+        if not result.portfolio_changed and not result.history_changed and not result.metrics_changed:
             return
         if result.portfolio_changed:
-            holdings=result.holdings or [];metrics=result.metrics
+            holdings=result.holdings or []
+        if result.metrics_changed:
+            metrics=result.metrics
             render_holdings()
             for name in ("Portfolio Analysis","Portfolio Insights","Portfolio Health"):
                 loaded[name]=False;areas[name].clear()
-                with areas[name]: ui.label("Portfolio data changed; this section will refresh when opened.").classes("text-gray-500")
+                with areas[name]: ui.label("Portfolio values changed; this section will refresh when opened.").classes("text-gray-500")
         if result.history_changed:
             history=result.history or []
             if loaded["History"]: render_history()
