@@ -136,7 +136,7 @@ The launcher:
 3. Runs `run.ps1` with an execution-policy bypass scoped only to that PowerShell process.
 4. Changes to the project directory.
 5. Creates `.venv` when needed.
-6. Installs or updates dependencies from `requirements.txt`.
+6. Installs dependencies when `.venv` is new or `requirements.txt` has changed; otherwise skips installation using a local requirements fingerprint.
 7. Starts the application through `start_streamlit.py`.
 8. Launches `app.py` through Streamlit.
 

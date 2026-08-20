@@ -23,6 +23,9 @@ data/stash_statement_history.sqlite-journal
 # Runtime logs
 data/app_access_log.jsonl
 
+# Local dependency-install fingerprint
+data/.requirements.sha256
+
 # Local rotating logs
 logs/
 *.log
