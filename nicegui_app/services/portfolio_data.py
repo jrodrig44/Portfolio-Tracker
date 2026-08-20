@@ -3,6 +3,7 @@ from __future__ import annotations
 import calendar
 import math
 import sqlite3
+from contextlib import closing
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -33,7 +34,7 @@ def _number(value: Any) -> float:
 
 def load_holdings(db_path: Path = PORTFOLIO_DB_PATH) -> list[dict[str, Any]]:
     """Read holdings without creating, migrating, or updating the portfolio DB."""
-    with _read_only_connection(db_path) as connection:
+    with closing(_read_only_connection(db_path)) as connection:
         table = connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'holdings'"
         ).fetchone()
@@ -99,7 +100,7 @@ def portfolio_summary(holdings: list[dict[str, Any]]) -> dict[str, Any]:
 
 def load_history(db_path: Path = HISTORY_DB_PATH) -> list[dict[str, Any]]:
     """Read the two production history sources without running schema preparation."""
-    with _read_only_connection(db_path) as connection:
+    with closing(_read_only_connection(db_path)) as connection:
         tables = {
             row[0]
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")

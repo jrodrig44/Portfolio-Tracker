@@ -1,6 +1,7 @@
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from nicegui_app.services.portfolio_data import filter_history, load_history, load_holdings, portfolio_summary
@@ -9,18 +10,20 @@ from nicegui_app.services.portfolio_data import filter_history, load_history, lo
 class NiceGuiReadOnlyPocTests(unittest.TestCase):
     def _portfolio_db(self, root: Path) -> Path:
         path = root / "portfolio.db"
-        with sqlite3.connect(path) as connection:
+        with closing(sqlite3.connect(path)) as connection:
             connection.execute("CREATE TABLE holdings (ticker TEXT, shares REAL, amount_invested REAL, current_price REAL, market_value REAL, annualized_income REAL, dividend_yield_pct REAL, asset_type TEXT, sector TEXT)")
             connection.execute("INSERT INTO holdings VALUES ('ABC', 2, 80, 50, 100, 5, 5, 'Stock', 'Tech')")
+            connection.commit()
         return path
 
     def _history_db(self, root: Path) -> Path:
         path = root / "history.sqlite"
-        with sqlite3.connect(path) as connection:
+        with closing(sqlite3.connect(path)) as connection:
             connection.execute("CREATE TABLE statement_portfolio_history (history_date TEXT, portfolio_value REAL, source_type TEXT)")
             connection.execute("CREATE TABLE live_portfolio_snapshots (snapshot_date TEXT, portfolio_value REAL, source_type TEXT)")
             connection.execute("INSERT INTO statement_portfolio_history VALUES ('2024-02-29', 100, 'stash_statement')")
             connection.execute("INSERT INTO live_portfolio_snapshots VALUES ('2024-05-31', 120, 'live_portfolio_snapshot')")
+            connection.commit()
         return path
 
     def test_portfolio_load_and_summary_use_existing_database(self) -> None:
@@ -53,6 +56,19 @@ class NiceGuiReadOnlyPocTests(unittest.TestCase):
             load_holdings(portfolio)
             load_history(history)
             self.assertEqual(before, [path.read_bytes() for path in (portfolio, history)])
+
+    def test_repeated_reads_release_database_files_immediately(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            portfolio = self._portfolio_db(root)
+            history = self._history_db(root)
+            for _ in range(3):
+                self.assertEqual(load_holdings(portfolio)[0]["ticker"], "ABC")
+                self.assertEqual(len(load_history(history)), 2)
+            portfolio.unlink()
+            history.unlink()
+            self.assertFalse(portfolio.exists())
+            self.assertFalse(history.exists())
 
     def test_main_configuration_and_forbidden_side_effects(self) -> None:
         source = (Path(__file__).parents[1] / "nicegui_app" / "main.py").read_text(encoding="utf-8")
