@@ -1,4 +1,4 @@
-# NiceGUI read-only proof of concept
+# NiceGUI read-only mirror
 
 Start alongside Streamlit with:
 
@@ -16,9 +16,14 @@ research, or worker functions. The overview uses the same stored/enriched
 holding fields and formulas as the Streamlit calculation path; it does not make
 Yahoo requests during page interaction.
 
-Architecture observation: the two database reads run concurrently once per
-client page load. Overview and Holdings reuse those in-memory results. Changing
-`1M`, `3M`, `1Y`, or `ALL` replaces only the chart component from already-loaded
-history, rather than rerunning the page script. Navigation switches client-side
-tab panels and does not recompute portfolio data. Initial load can still be
-affected by SQLite/OneDrive latency, but this POC adds no network pricing delay.
+The mirror includes Holdings, Portfolio Analysis, AI Analysis, Portfolio
+Insights, Portfolio Health, and History. Portfolio and history databases load
+once per browser session. Holdings renders immediately; Analysis, AI controls,
+Insights, Health, and History render when first visited. AI is never invoked
+until Analyze is clicked. Export payloads are generated only when a download is
+requested. Changing `1M`, `3M`, `1Y`, or `ALL` updates only the history chart.
+
+Use `Start NiceGUI Portfolio Tracker.bat` for normal startup. The launcher keeps
+Python attached, rejects duplicate port-8502 launches, and records its PID for a
+server watchdog so closing the launcher also stops NiceGUI. No service,
+scheduled task, startup entry, or automatic restart is installed.

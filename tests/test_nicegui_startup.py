@@ -55,6 +55,12 @@ class NiceGuiStartupTests(unittest.TestCase):
         self.assertIn('HOST = "0.0.0.0"', self.main)
         self.assertIn("PORT = 8502", self.main)
 
+    def test_launcher_rejects_duplicate_port_and_tracks_its_child_lifecycle(self) -> None:
+        self.assertIn("Get-NetTCPConnection -LocalPort 8502", self.script)
+        self.assertIn("NICEGUI_LAUNCHER_PID", self.script)
+        self.assertIn("& $venvPython $niceGuiMain", self.script)
+        self.assertNotIn("Start-Process", self.script)
+
     def test_production_startup_chain_still_targets_streamlit(self) -> None:
         production_batch = (ROOT / "Start Portfolio Tracker.bat").read_text(encoding="utf-8")
         production_script = (ROOT / "run.ps1").read_text(encoding="utf-8")

@@ -75,6 +75,18 @@ def load_holdings(db_path: Path = PORTFOLIO_DB_PATH) -> list[dict[str, Any]]:
                 "dividend_yield_pct": dividend_yield,
                 "asset_type": str(row.get("asset_type") or "Unclassified"),
                 "sector": str(row.get("sector") or "Unclassified"),
+                "amount_invested": amount_invested,
+                "annual_div_per_share": _number(row.get("annual_div_per_share")),
+                "effective_annual_div_per_share": _number(row.get("effective_annual_div_per_share")),
+                "annualized_income": annual_income,
+                "regular_biweekly_contribution": _number(row.get("regular_biweekly_contribution")),
+                "espp_biweekly_contribution": _number(row.get("espp_biweekly_contribution") or row.get("espp_contribution_biweekly")),
+                "special_contribution": _number(row.get("special_contribution")),
+                "employer_stock": bool(row.get("employer_stock")),
+                "espp_enabled": bool(row.get("espp_enabled") or row.get("is_espp")),
+                "espp_acquired_shares": _number(row.get("espp_acquired_shares")),
+                "espp_discount_pct": _number(row.get("espp_discount_pct") or row.get("espp_discount")),
+                "espp_purchase_frequency": str(row.get("espp_purchase_frequency") or ""),
             }
         )
     return sorted((row for row in holdings if row["ticker"]), key=lambda row: row["ticker"])

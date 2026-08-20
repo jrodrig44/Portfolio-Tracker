@@ -166,8 +166,31 @@ if (-not (Test-PythonCommand -PythonPath $venvPython)) {
     throw "Shared virtual-environment Python failed its final validation. NiceGUI was not started."
 }
 
+$existingListener = Get-NetTCPConnection -LocalPort 8502 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($null -ne $existingListener) {
+    $listenerDescription = "process ID $($existingListener.OwningProcess)"
+    try {
+        $commandLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($existingListener.OwningProcess)" -ErrorAction Stop).CommandLine
+        if ($commandLine -like '*nicegui_app*main.py*') {
+            $listenerDescription = "an existing Portfolio Tracker NiceGUI process (PID $($existingListener.OwningProcess))"
+        }
+    }
+    catch {
+        # The owner may not be inspectable; never kill or adopt an unknown process.
+    }
+    throw "Port 8502 is already in use by $listenerDescription. NiceGUI was not started. Close the existing listener and try again."
+}
+
 Write-Host "Starting NiceGUI Portfolio Tracker on http://localhost:8502..."
-& $venvPython $niceGuiMain
-if ($LASTEXITCODE -ne 0) {
-    throw "NiceGUI exited with code $LASTEXITCODE."
+$env:NICEGUI_LAUNCHER_PID = [string]$PID
+try {
+    # Direct invocation keeps Python in this console's process chain. The Python
+    # watchdog also exits the server if this launcher is closed unexpectedly.
+    & $venvPython $niceGuiMain
+    if ($LASTEXITCODE -ne 0) {
+        throw "NiceGUI exited with code $LASTEXITCODE."
+    }
+}
+finally {
+    Remove-Item Env:NICEGUI_LAUNCHER_PID -ErrorAction SilentlyContinue
 }
