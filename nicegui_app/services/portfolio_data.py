@@ -32,6 +32,12 @@ def _number(value: Any) -> float:
         return 0.0
 
 
+def _boolean(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y"}
+    return bool(value)
+
+
 def load_holdings(db_path: Path = PORTFOLIO_DB_PATH) -> list[dict[str, Any]]:
     """Read holdings without creating, migrating, or updating the portfolio DB."""
     with closing(_read_only_connection(db_path)) as connection:
@@ -82,8 +88,8 @@ def load_holdings(db_path: Path = PORTFOLIO_DB_PATH) -> list[dict[str, Any]]:
                 "regular_biweekly_contribution": _number(row.get("regular_biweekly_contribution")),
                 "espp_biweekly_contribution": _number(row.get("espp_biweekly_contribution") or row.get("espp_contribution_biweekly")),
                 "special_contribution": _number(row.get("special_contribution")),
-                "employer_stock": bool(row.get("employer_stock")),
-                "espp_enabled": bool(row.get("espp_enabled") or row.get("is_espp")),
+                "employer_stock": _boolean(row.get("employer_stock")),
+                "espp_enabled": _boolean(row.get("espp_enabled")) or _boolean(row.get("is_espp")),
                 "espp_acquired_shares": _number(row.get("espp_acquired_shares")),
                 "espp_discount_pct": _number(row.get("espp_discount_pct") or row.get("espp_discount")),
                 "espp_purchase_frequency": str(row.get("espp_purchase_frequency") or ""),

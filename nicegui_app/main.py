@@ -18,7 +18,7 @@ from nicegui_app.services.health import health_package
 from nicegui_app.services.insights import insights_package
 from nicegui_app.services.portfolio_data import DEFAULT_HISTORY_RANGE,HISTORY_RANGE_OPTIONS,filter_history,portfolio_summary
 from nicegui_app.services.refresh import ReadOnlyRefreshCoordinator
-from nicegui_app.services.yahoo import yahoo_intelligence_package
+from nicegui_app.services.yahoo import current_market_data,yahoo_intelligence_package
 
 HOST = "0.0.0.0"
 PORT = 8502
@@ -58,7 +58,7 @@ async def index() -> None:
     holdings: list[dict[str, Any]] = []
     history: list[dict[str, Any]] = []
     metrics = None
-    coordinator = ReadOnlyRefreshCoordinator()
+    coordinator = ReadOnlyRefreshCoordinator(market_loader=current_market_data)
     loaded = {name: False for name in NAVIGATION_AREAS}
 
     with ui.header().classes("items-center justify-between shadow-sm"):
@@ -80,14 +80,15 @@ async def index() -> None:
     def render_holdings() -> None:
         area = areas["Holdings"]
         area.clear()
-        summary = portfolio_summary(holdings)
+        display_holdings = metrics.to_dict(orient="records") if metrics is not None else holdings
+        summary = portfolio_summary(display_holdings)
         with area:
             ui.label("Holdings").classes("text-2xl font-semibold")
             ui.label("Current stored portfolio data. Editing is intentionally disabled.").classes("text-gray-500")
             metric_cards([("Portfolio value", currency(summary["portfolio_value"])), ("Cost basis", currency(summary["cost_basis"])), ("Unrealized gain/loss", currency(summary["unrealized_gain"])), ("Estimated annual income", currency(summary["annual_income"])), ("Weighted yield", percent(summary["weighted_yield_pct"])), ("Holdings", str(summary["holding_count"])), ("Largest holding", str(summary["largest_holding"])), ("Largest weight", percent(summary["largest_weight_pct"]))])
             fields = (("ticker", "Ticker"), ("shares", "Shares"), ("current_price", "Current Price"), ("market_value", "Market Value"), ("average_cost", "Average Cost"), ("cost_basis", "Cost Basis"), ("unrealized_gain", "Unrealized G/L"), ("dividend_yield_pct", "Dividend Yield %"), ("annual_income", "Annual Income"), ("asset_type", "Asset Type"), ("sector", "Sector"), ("regular_biweekly_contribution", "Regular Biweekly"), ("espp_biweekly_contribution", "ESPP Biweekly"), ("special_contribution", "Special Contribution"), ("employer_stock", "Employer Stock"), ("espp_enabled", "ESPP"))
             columns = [{"name": key, "label": label, "field": key, "sortable": True} for key, label in fields]
-            ui.table(columns=columns, rows=holdings, row_key="ticker", pagination=25).classes("w-full").props("dense flat bordered")
+            ui.table(columns=columns, rows=display_holdings, row_key="ticker", pagination=25).classes("w-full").props("dense flat bordered")
             ui.label("Read-only exports").classes("text-lg font-semibold mt-3")
             async def download_export(filename: str) -> None:
                 try:

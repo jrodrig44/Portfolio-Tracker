@@ -5,15 +5,52 @@ from typing import Any
 import pandas as pd
 import yfinance as yf
 
-from nicegui_app.services.configuration import YAHOO_CACHE_TTL_SECONDS
+from nicegui_app.services.configuration import PRICE_CACHE_TTL_SECONDS,YAHOO_CACHE_TTL_SECONDS,YAHOO_METADATA_CACHE_TTL_SECONDS
 
 _cache: dict[tuple[str,str],tuple[float,Any]]={}
 
 
-def _cached(key:tuple[str,str],loader):
+def _cached(key:tuple[str,str],loader,ttl:float=YAHOO_CACHE_TTL_SECONDS):
     now=time.monotonic(); existing=_cache.get(key)
-    if existing and now-existing[0]<YAHOO_CACHE_TTL_SECONDS:return existing[1]
+    if existing and now-existing[0]<ttl:return existing[1]
     value=loader();_cache[key]=(now,value);return value
+
+
+def current_market_data(tickers:list[str]|tuple[str,...])->tuple[dict[str,float],dict[str,float]]:
+    """Match Streamlit's batched current-price and Yahoo yield interpretation."""
+    normalized=tuple(sorted({str(t or "").strip().upper() for t in tickers if str(t or "").strip()}))
+    if not normalized:return {},{}
+    def prices_loader():
+        output={ticker:0.0 for ticker in normalized}
+        try:
+            history=yf.download(list(normalized),period="5d",interval="1d",auto_adjust=False,progress=False,group_by="column",threads=True)
+            if isinstance(history,pd.DataFrame) and not history.empty:
+                if isinstance(history.columns,pd.MultiIndex):
+                    for ticker in normalized:
+                        candidates=[column for column in history.columns if "CLOSE" in [str(part).upper() for part in column] and ticker in [str(part).upper() for part in column]]
+                        if candidates:
+                            values=pd.to_numeric(history[candidates[0]],errors="coerce").dropna()
+                            if not values.empty:output[ticker]=float(values.iloc[-1])
+                elif len(normalized)==1 and "Close" in history:
+                    values=pd.to_numeric(history["Close"],errors="coerce").dropna()
+                    if not values.empty:output[normalized[0]]=float(values.iloc[-1])
+        except Exception:
+            pass
+        return output
+    prices=_cached(("|".join(normalized),"prices"),prices_loader,PRICE_CACHE_TTL_SECONDS)
+    yields={}
+    for ticker in normalized:
+        try:
+            info=_cached((ticker,"info"),lambda t=ticker: yf.Ticker(t).info or {},YAHOO_METADATA_CACHE_TTL_SECONDS)
+            raw=info.get("trailingAnnualDividendYield")
+            fallback=info.get("dividendYield")
+            if raw is None or (raw in {0,0.0} and fallback not in {None,0,0.0}):raw=fallback
+            value=max(float(raw or 0.0),0.0)
+            if value<=1:value*=100.0
+            yields[ticker]=0.0 if value>50 else value
+        except Exception:
+            yields[ticker]=0.0
+    return dict(prices),yields
 
 
 def yahoo_intelligence_package(metrics:pd.DataFrame)->dict[str,Any]:
