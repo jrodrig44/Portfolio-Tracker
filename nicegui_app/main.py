@@ -229,7 +229,7 @@ async def index() -> None:
             area.clear()
             with area:
                 ui.label("Portfolio Health").classes("text-2xl font-semibold")
-                ui.label("Tracker-generated heuristics; not an objective investment rating.").classes("font-semibold text-amber-700")
+                ui.label(str(package.get("disclaimer", "Tracker-generated and not an objective investment rating."))).classes("font-semibold text-amber-700")
                 metric_cards([("Overall health score", f"{float(package.get('health_score', 0.0)):.1f}/100"), ("Largest holding", str(package.get("largest_holding", "N/A"))), ("Largest holding weight", percent(package.get("largest_holding_weight", 0.0)))])
                 records_table([{"component": key, "score": value} for key, value in package.get("subscores", {}).items()], "Component scores")
                 records_table(package.get("strongest_areas", []), "Strongest areas")
