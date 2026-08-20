@@ -1,4 +1,5 @@
 import unittest
+import math
 
 from income_quality_engine import OPTION_INCOME_ETFS
 from nicegui_app.services.analysis import analysis_package, analysis_with_fund_weights
@@ -65,6 +66,36 @@ class NiceGuiPhase1BAnalysisTests(unittest.TestCase):
         self.assertAlmostEqual(lookthrough["unresolved_value"],445.0)
         self.assertAlmostEqual(lookthrough["fund_lookthrough_completeness_pct"],11.0)
         self.assertAlmostEqual(package["data_completeness"]["overall_resolved_exposure_coverage_pct"],55.5)
+
+    def test_fund_lookthrough_bounds_partial_exact_and_overflow_weights(self):
+        metrics=metrics_frame([{"ticker":"FUND","shares":10,"current_price":100,"amount_invested":1000,"asset_type":"ETF"}])
+        cases=(
+            ({"Technology":.50,"Financials":30},800.0,200.0,80.0),
+            ({"Technology":.60,"Financials":40},1000.0,0.0,100.0),
+            ({"Technology":60,"Financials":50},1000.0,0.0,100.0),
+        )
+        for weights,resolved,unresolved,coverage in cases:
+            with self.subTest(weights=weights):
+                package=analysis_with_fund_weights(metrics,{"FUND":weights})
+                lookthrough=package["fund_lookthrough"]
+                self.assertAlmostEqual(lookthrough["resolved_value"],resolved)
+                self.assertAlmostEqual(lookthrough["unresolved_value"],unresolved)
+                self.assertAlmostEqual(lookthrough["fund_lookthrough_completeness_pct"],coverage)
+                self.assertLessEqual(lookthrough["resolved_value"],lookthrough["fund_total_value"])
+                self.assertGreaterEqual(lookthrough["unresolved_value"],0)
+                self.assertLessEqual(lookthrough["fund_lookthrough_completeness_pct"],100)
+                self.assertLessEqual(package["data_completeness"]["overall_resolved_exposure_coverage_pct"],100)
+        overflow=analysis_with_fund_weights(metrics,{"FUND":{"Technology":60,"Financials":50}})["fund_lookthrough"]
+        sectors={row["Sector"]:row["Market_Value"] for row in overflow["records"]}
+        self.assertAlmostEqual(sectors["Technology"],1000*60/110)
+        self.assertAlmostEqual(sectors["Financials"],1000*50/110)
+
+    def test_fund_lookthrough_ignores_invalid_nonpositive_weights(self):
+        metrics=metrics_frame([{"ticker":"FUND","shares":10,"current_price":100,"amount_invested":1000,"asset_type":"ETF"}])
+        lookthrough=analysis_with_fund_weights(metrics,{"FUND":{"Technology":.25,"BadNaN":math.nan,"BadInf":math.inf,"Zero":0,"Negative":-2}})["fund_lookthrough"]
+        self.assertAlmostEqual(lookthrough["resolved_value"],250.0)
+        self.assertAlmostEqual(lookthrough["unresolved_value"],750.0)
+        self.assertEqual([row["Sector"] for row in lookthrough["records"]],["Technology"])
 
 
 if __name__=="__main__":

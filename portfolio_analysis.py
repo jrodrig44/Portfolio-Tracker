@@ -77,21 +77,33 @@ def resolve_fund_lookthrough(metrics: pd.DataFrame, weights: dict[str,dict[str,f
         asset=canonical_asset_type(row.get("asset_type"));ticker=str(row.get("ticker","")).upper();value=finite(row.get("market_value"))
         if asset not in FUND_ASSET_TYPES or value<=0:continue
         fund_total+=value;resolved=0.0
+        valid_weights={}
         for sector,raw_weight in weights.get(ticker,{}).items():
-            weight=finite(raw_weight);weight=weight/100 if weight>1 else weight;weight=max(0,min(weight,1));amount=value*weight
+            weight=finite(raw_weight);weight=weight/100 if weight>1 else weight
+            if weight<=0:continue
+            label=normalize_sector(str(sector).replace("_"," ").title(),"Unresolved Fund Exposure")
+            valid_weights[label]=valid_weights.get(label,0.0)+weight
+        weight_total=sum(valid_weights.values())
+        scale=1.0/weight_total if weight_total>1.0 else 1.0
+        for label,weight in valid_weights.items():
+            amount=value*weight*scale
             if amount<=0:continue
-            label=normalize_sector(str(sector).replace("_"," ").title(),"Unresolved Fund Exposure");sector_values[label]=sector_values.get(label,0)+amount;sources.setdefault(label,set()).add(ticker);resolved+=amount
+            sector_values[label]=sector_values.get(label,0)+amount;sources.setdefault(label,set()).add(ticker);resolved+=amount
+        resolved=min(resolved,value)
         resolved_value+=resolved
         missing=max(value-resolved,0)
         if missing:unresolved.append({"Fund_Type":asset,"Holdings":ticker,"Market_Value":missing,"Portfolio_Weight":missing/total*100 if total else 0})
     records=[{"Sector":sector,"Source_Holdings":", ".join(sorted(sources[sector])),"Market_Value":value,"Portfolio_Weight":value/total*100 if total else 0} for sector,value in sorted(sector_values.items(),key=lambda item:item[1],reverse=True)]
-    return {"records":records,"unresolved_records":unresolved,"resolved_value":resolved_value,"unresolved_value":max(fund_total-resolved_value,0),"fund_total_value":fund_total,"fund_lookthrough_completeness_pct":resolved_value/fund_total*100 if fund_total else 100.0}
+    resolved_value=min(resolved_value,fund_total);coverage=resolved_value/fund_total*100 if fund_total else 100.0
+    return {"records":records,"unresolved_records":unresolved,"resolved_value":resolved_value,"unresolved_value":max(fund_total-resolved_value,0),"fund_total_value":fund_total,"fund_lookthrough_completeness_pct":max(0.0,min(coverage,100.0))}
 
 
 def build_analysis(metrics: pd.DataFrame, fund_weights: dict[str,dict[str,float]]|None=None, expected_return:float=.08, projection_biweekly:float=280.0, month_weights:dict[str,list[float]]|None=None) -> dict[str,Any]:
     df=metrics.copy()
     if df.empty:return {"totals":{},"summary":{},"snapshot":{},"concentration":{},"asset_allocation":[],"direct_sector":[],"income_quality":[],"income_quality_summary":compute_income_quality(df,{},{}),"contributions":contribution_context(df),"fund_lookthrough":resolve_fund_lookthrough(df,fund_weights)}
-    df["asset_type"]=df.get("asset_type","Stock").map(canonical_asset_type);df["sector"]=df.get("sector","").map(normalize_sector)
+    asset_types=df["asset_type"] if "asset_type" in df else pd.Series("Stock",index=df.index)
+    sectors=df["sector"] if "sector" in df else pd.Series("",index=df.index)
+    df["asset_type"]=asset_types.map(canonical_asset_type);df["sector"]=sectors.map(normalize_sector)
     for col in ("market_value","cost_basis","unrealized_gain","annual_income"):df[col]=pd.to_numeric(df.get(col,0),errors="coerce").fillna(0.0)
     value=float(df.market_value.sum());cost=float(df.cost_basis.sum());income=float(df.annual_income.sum());top=df.sort_values("market_value",ascending=False).iloc[0];top_income=df.sort_values("annual_income",ascending=False).iloc[0]
     assets=df.groupby("asset_type",dropna=False).agg(market_value=("market_value","sum"),annualized_income=("annual_income","sum")).reset_index();assets["allocation_pct"]=assets.market_value/value*100 if value else 0;assets["income_allocation_pct"]=assets.annualized_income/income*100 if income else 0
@@ -106,6 +118,7 @@ def build_analysis(metrics: pd.DataFrame, fund_weights: dict[str,dict[str,float]
     concentration={"largest_holding_by_value":top.ticker,"largest_holding_weight_pct":finite(top.market_value)/value*100 if value else 0,"largest_income_contributor":top_income.ticker,"largest_income_weight_pct":finite(top_income.annual_income)/income*100 if income else 0,"espp_concentration_flag":bool(employer),"employer_stock":employer,"guidance":"Employer-stock concentration detected. Apply ESPP-specific context." if employer else "Capital concentration and income concentration should be evaluated separately."}
     lookthrough=resolve_fund_lookthrough(df,fund_weights)
     direct_resolved=float(df[~df.asset_type.isin(FUND_ASSET_TYPES)&~df.sector.eq("Unresolved Direct Sector")].market_value.sum());direct_total=float(df[~df.asset_type.isin(FUND_ASSET_TYPES)].market_value.sum())
-    completeness={"direct_sector_classification_coverage_pct":direct_resolved/direct_total*100 if direct_total else 100,"fund_lookthrough_coverage_pct":lookthrough["fund_lookthrough_completeness_pct"],"overall_resolved_exposure_coverage_pct":(direct_resolved+lookthrough["resolved_value"])/value*100 if value else 0}
+    overall_coverage=(direct_resolved+lookthrough["resolved_value"])/value*100 if value else 0
+    completeness={"direct_sector_classification_coverage_pct":direct_resolved/direct_total*100 if direct_total else 100,"fund_lookthrough_coverage_pct":lookthrough["fund_lookthrough_completeness_pct"],"overall_resolved_exposure_coverage_pct":max(0.0,min(overall_coverage,100.0))}
     totals={"total_portfolio_value":value,"total_cost_basis":cost,"total_unrealized_gain":value-cost,"total_estimated_annual_income":income,"weighted_portfolio_yield":income/value*100 if value else 0,"largest_holding":top.ticker,"largest_holding_weight":finite(top.market_value)/value*100 if value else 0,"economic_exposure_allocation":econ.to_dict("records"),"income_allocation_by_asset_type":assets.to_dict("records")}
     return {"totals":totals,"summary":{"active_contributors":sum(r["total_contribution"]>0 for r in contributions["holdings"])},"snapshot":{"projected_10y_value":future_value(value,expected_return,projection_biweekly,10),"projected_20y_value":future_value(value,expected_return,projection_biweekly,20),"projection_contribution_note":"Projection calculations use the regular $280 biweekly contribution assumption and do not include ESPP contributions unless otherwise stated."},"concentration":concentration,"asset_allocation":assets.to_dict("records"),"direct_sector":direct.to_dict("records"),"income_quality":quality_rows,"income_quality_summary":quality,"contributions":contributions,"fund_lookthrough":lookthrough,"data_completeness":completeness}
