@@ -240,13 +240,134 @@ class PromptConversionTests(unittest.TestCase):
         self.assertIn("$25,000.00", prompt)
 
     def test_prompt_explains_contribution_dilution_and_markdown_currency_rules(self) -> None:
-        messages = build_ai_analysis_messages({}, "Contribution Allocation Review", "")
+        messages = build_ai_analysis_messages(
+            {"contribution_context": {"summary": {"annual_regular_contributions": 7280, "annual_espp_contributions": 2600}}},
+            "Contribution Allocation Review",
+            "",
+        )
         system_prompt = messages[0]["content"]
-        self.assertIn("$280 biweekly / $7,280 annually", system_prompt)
-        self.assertIn("$100 biweekly / $2,600 annually", system_prompt)
-        self.assertIn("$380 biweekly / $9,880 annually", system_prompt)
-        self.assertIn("naturally dilute HD's portfolio weight", system_prompt)
+        user_prompt = messages[1]["content"]
+        self.assertIn("Annualized regular contributions: $7,280.00", user_prompt)
+        self.assertIn("Annualized ESPP contributions: $2,600.00", user_prompt)
+        self.assertNotIn("$280 biweekly", system_prompt)
+        self.assertNotIn("15% employee discount", system_prompt)
         self.assertIn("escaped dollar values such as \\$1,234.56", system_prompt)
+
+    def test_compact_context_plumbing_and_summaries_reach_prompt(self) -> None:
+        full = {
+            "portfolio_snapshot": {"portfolio_value": 1000},
+            "calculated_metrics": [{"ticker": "HD", "market_value": 400, "espp_acquired_shares": 3.5}],
+            "supplemental_yahoo_financial_data": [{
+                "ticker": "HD",
+                "fundamental_metrics": {"trailing_pe": 21.5, "forward_pe": 19.0},
+                "earnings_and_estimates": {"earnings_growth": 0.08},
+                "analyst_targets": {"target_mean_price": 450, "recommendation_key": "hold"},
+            }],
+            "historical_context": [{"ticker": "HD", "return_pct": 4, "drawdown": -12, "volatility": 20, "52w_low": 300, "52w_high": 430, "raw_prices": [1, 2, 3]}],
+            "income_quality": {
+                "income_quality_score": 75,
+                "distribution_stability_score": 80,
+                "yield_sustainability_score": 70,
+                "payout_risk_score": 65,
+                "alerts": ["Review HD payout", "Second", "Third", "EXCESSIVE COMMENTARY"],
+                "holding_classifications": {"HD": {"notes": ["PRIVATE HOLDING NOTE"]}},
+            },
+            "contribution_context": {
+                "summary": {
+                    "total_regular_biweekly_contribution": 280,
+                    "total_espp_biweekly_contributions": 100,
+                    "estimated_annual_regular_contributions": 7280,
+                    "estimated_annual_espp_contributions": 2600,
+                    "estimated_combined_annual_contributions": 9880,
+                    "hd_espp_purchase_frequency": "quarterly",
+                    "hd_espp_discount_pct": 12,
+                },
+                "employer_stock_concentration_context": {"primary_employer_ticker": "HD", "primary_employer_capital_concentration_pct": 40},
+            },
+            "data_quality_issues": ["Material stale-price warning"],
+        }
+        compact = app._compact_analysis_context(
+            full,
+            "Comprehensive Portfolio Review",
+            "",
+            portfolio_history_summary=app._build_compact_portfolio_history_summary([
+                {"history_date": "2024-01-15", "portfolio_value": 700},
+                {"history_date": "2025-01-10", "portfolio_value": 900},
+                {"history_date": "2025-12-31", "portfolio_value": 1000},
+            ]),
+            dividend_seasonality_summary={"highest_income_months": ["Mar"], "lowest_income_months": ["Feb"], "timing_coverage_pct": 80, "uncovered_annual_income": 20},
+        )
+        prompt = messages_to_prompt(build_ai_analysis_messages(compact, "Comprehensive Portfolio Review", ""))
+        self.assertIn("Trailing PE 21.5", prompt)
+        self.assertIn("Material stale-price warning", prompt)
+        self.assertIn("52-week range $300.00 to $430.00", prompt)
+        self.assertNotIn("raw_prices", prompt)
+        self.assertIn("overall 75.0", prompt)
+        self.assertNotIn("PRIVATE HOLDING NOTE", prompt)
+        self.assertNotIn("EXCESSIVE COMMENTARY", prompt)
+        self.assertIn("Annualized regular contributions: $7,280.00", prompt)
+        self.assertIn("New contributions to employer stock: 26.32%", prompt)
+        self.assertIn("New contributions outside employer stock: 73.68%", prompt)
+        self.assertIn("espp_acquired_shares", prompt)
+        self.assertIn("quarterly", prompt)
+        self.assertIn("12.00%", prompt)
+        self.assertIn("2025-01-10", prompt)
+        self.assertIn("not investment return", prompt)
+        self.assertNotIn("portfolio_history", prompt)
+        self.assertIn("highest month(s) Mar", prompt)
+
+    def test_history_summary_uses_actual_unsorted_points_without_interpolation(self) -> None:
+        summary = app._build_compact_portfolio_history_summary([
+            {"history_date": "2026-03-31", "portfolio_value": 120},
+            {"history_date": "2025-04-02", "portfolio_value": 100},
+            {"history_date": "2026-01-01", "portfolio_value": 110},
+        ])
+        self.assertEqual(summary["earliest_date"], "2025-04-02")
+        self.assertEqual(summary["latest_date"], "2026-03-31")
+        self.assertEqual(summary["one_year_baseline"]["date"], "2025-04-02")
+        self.assertEqual(summary["three_month_baseline"]["date"], "2026-01-01")
+        self.assertEqual(summary["point_count"], 3)
+
+    def test_seasonality_is_analysis_specific_and_missing_timing_is_not_fabricated(self) -> None:
+        full = {"portfolio_snapshot": {}, "contribution_context": {}}
+        seasonality = {"highest_income_months": ["Jun"], "lowest_income_months": ["Jan"], "timing_coverage_pct": 90}
+        income = app._compact_analysis_context(full, "Income and Dividend Analysis", "", dividend_seasonality_summary=seasonality)
+        risk = app._compact_analysis_context(full, "Risk Analysis", "", dividend_seasonality_summary=seasonality)
+        missing = app._build_compact_seasonality_summary({"chart_available": False, "monthly_income": {"Jan": 0}})
+        self.assertIn("dividend_seasonality_summary", income)
+        self.assertNotIn("dividend_seasonality_summary", risk)
+        self.assertEqual(missing, {})
+
+    def test_missing_espp_shares_and_raw_portfolio_history_are_safe(self) -> None:
+        full = {
+            "portfolio_snapshot": {},
+            "calculated_metrics": [{"ticker": "HD", "market_value": 100}],
+            "contribution_context": {},
+            "statement_history": [{"history_date": "SECRET RAW DATE", "portfolio_value": 1}],
+        }
+        compact = app._compact_analysis_context(full, "Long-Term Outlook", "")
+        prompt = messages_to_prompt(build_ai_analysis_messages(compact, "Long-Term Outlook", ""))
+        self.assertNotIn("espp_acquired_shares", prompt)
+        self.assertNotIn("SECRET RAW DATE", prompt)
+        self.assertNotIn("statement_history", prompt)
+
+    def test_all_analysis_types_build_prompts_within_size_budget(self) -> None:
+        sample_path = Path(app.PROJECT_ROOT) / "data" / "sample_export.json"
+        with sample_path.open("r", encoding="utf-8") as handle:
+            full = json.load(handle)
+        history = app._build_compact_portfolio_history_summary([
+            {"history_date": "2024-01-01", "portfolio_value": 80000},
+            {"history_date": "2025-01-01", "portfolio_value": 90000},
+            {"history_date": "2025-12-31", "portfolio_value": 100000},
+        ])
+        seasonality = {"highest_income_months": ["Mar"], "lowest_income_months": ["Feb"], "timing_coverage_pct": 85, "uncovered_annual_income": 100}
+        for analysis_type in AI_ANALYSIS_TYPES:
+            with self.subTest(analysis_type=analysis_type):
+                compact = app._compact_analysis_context(full, analysis_type, "", history, seasonality)
+                compact_chars = len(json.dumps(compact, separators=(",", ":"), default=str))
+                prompt = messages_to_prompt(build_ai_analysis_messages(compact, analysis_type, ""))
+                self.assertLess(compact_chars, 8500)
+                self.assertLess(len(prompt), 9750)
 
     def test_currency_output_is_safe_for_streamlit_markdown(self) -> None:
         formatted = format_ai_analysis_markdown("Income is $1,234.56, not `$2,600`, and not $380$.")

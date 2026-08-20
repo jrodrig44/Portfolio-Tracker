@@ -53,12 +53,9 @@ def _build_system_prompt() -> str:
             "Distinguish tracker-generated scores and heuristics from objective financial ratings.",
             "If data is missing, stale, inconsistent, or unreliable, say so explicitly instead of inventing values.",
             "Treat the provided holdings and metrics as the source of truth for this app session.",
-            "The investor profile is: dividend growth and long-term income, about a 20-year time horizon, moderate risk tolerance, regular contributions of $280 biweekly, and a separate HD ESPP contribution of $100 biweekly.",
-            "For contribution analysis, distinguish regular contributions of $280 biweekly / $7,280 annually, HD ESPP contributions of $100 biweekly / $2,600 annually, and combined contributions of $380 biweekly / $9,880 annually.",
+            "Use the supplied investor profile and contribution context; do not substitute hard-coded contribution or ESPP facts.",
             "The user wants practical, portfolio-specific observations.",
-            "HD is employer stock acquired through The Home Depot ESPP: $100 biweekly contribution, 15% employee discount, purchases approximately every six months, and the holding has historically been retained for about two to three years.",
-            "Do not treat HD as an ordinary freely allocated portfolio contribution. Evaluate it in the context of employer concentration, the ESPP discount, tax considerations, and the user's holding strategy.",
-            "Regular non-ESPP contributions directed to other holdings naturally dilute HD's portfolio weight over time; the separate HD ESPP contribution offsets part of that dilution. Do not claim that there is no concentration-reduction allocation merely because regular contributions are directed away from HD.",
+            "Do not treat employer stock acquired through an ESPP as an ordinary freely allocated contribution. Evaluate it with employer concentration, the supplied ESPP terms, tax considerations, and holding strategy where supplied.",
             "When applicable, organize the answer with these sections: Executive Summary, Portfolio Strengths, Primary Risks, Income Quality and Sustainability, Diversification and Concentration, HD ESPP and Employer-Stock Considerations, Contribution Allocation Review, Long-Term Outlook, Potential Actions to Consider, and Data Limitations.",
             "For narrower analysis types, focus on the selected topic while still mentioning any closely related material risk.",
             "Use concise, direct markdown. Render currency as escaped dollar values such as \\$1,234.56; never wrap currency in math delimiters or inline-code markers.",
@@ -100,6 +97,7 @@ def _build_user_prompt(portfolio_payload: dict[str, Any], analysis_type: str, cu
 
 def _build_portfolio_context(portfolio_payload: dict[str, Any]) -> str:
     snapshot = _as_dict(portfolio_payload.get("portfolio_snapshot"))
+    investor_profile = _as_dict(portfolio_payload.get("investor_profile"))
     portfolio_health = _as_dict(portfolio_payload.get("portfolio_health"))
     health_context = _as_dict(portfolio_health.get("context_summary"))
     concentration_context = _as_dict(portfolio_payload.get("concentration_context"))
@@ -115,6 +113,9 @@ def _build_portfolio_context(portfolio_payload: dict[str, Any]) -> str:
     holdings = _as_list(portfolio_payload.get("calculated_metrics"))
     supplemental_financial = _as_list(portfolio_payload.get("supplemental_yahoo_financial_data"))
     historical_context = _as_list(portfolio_payload.get("historical_context"))
+    portfolio_history = _as_dict(portfolio_payload.get("portfolio_history_summary"))
+    income_quality = _as_dict(portfolio_payload.get("income_quality_summary"))
+    seasonality = _as_dict(portfolio_payload.get("dividend_seasonality_summary"))
     data_completeness = _as_dict(portfolio_payload.get("data_completeness"))
     unresolved_exposure = _as_dict(portfolio_payload.get("unresolved_exposure"))
     tracker_metadata = _as_dict(portfolio_payload.get("tracker_health_score_metadata"))
@@ -133,6 +134,9 @@ def _build_portfolio_context(portfolio_payload: dict[str, Any]) -> str:
         f"- Largest holding: {snapshot.get('top_holding', 'N/A')} ({_format_percent(snapshot.get('top_holding_weight_pct'))} of portfolio value)",
         f"- Tracker health score: {_safe_float(health_context.get('score', portfolio_health.get('health_score', 0.0))):.1f}/100",
         f"- Health score label: {health_context.get('score_label', 'Tracker-generated score')}",
+        f"- Investor objective: {investor_profile.get('primary_goal', 'N/A')}",
+        f"- Risk tolerance: {investor_profile.get('risk_tolerance', 'N/A')}",
+        f"- Investment horizon: {investor_profile.get('investment_horizon_years', 'N/A')} years",
         "",
         "2) Holdings snapshot",
         _format_table_block(
@@ -188,24 +192,32 @@ def _build_portfolio_context(portfolio_payload: dict[str, Any]) -> str:
         "4) Contribution allocation and ESPP",
         f"- Regular biweekly contributions: {_format_currency(contribution_context.get('summary', {}).get('total_regular_biweekly_contribution'))}",
         f"- ESPP biweekly contributions: {_format_currency(contribution_context.get('summary', {}).get('total_espp_biweekly_contributions'))}",
+        f"- Annualized regular contributions: {_format_currency(contribution_context.get('summary', {}).get('annual_regular_contributions'))}",
+        f"- Annualized ESPP contributions: {_format_currency(contribution_context.get('summary', {}).get('annual_espp_contributions'))}",
         f"- Total annual contributions: {_format_currency(contribution_context.get('summary', {}).get('estimated_combined_annual_contributions'))}",
-        f"- HD ESPP contribution per paycheck: {_format_currency(contribution_context.get('summary', {}).get('hd_espp_contribution_per_paycheck'))}",
-        f"- HD ESPP purchase frequency: {contribution_context.get('summary', {}).get('hd_espp_purchase_frequency', 'n/a')}",
-        f"- HD ESPP discount: {_format_percent(contribution_context.get('summary', {}).get('hd_espp_discount_pct'))}",
+        f"- New contributions to employer stock: {_format_percent(contribution_context.get('summary', {}).get('employer_stock_contribution_pct'))}",
+        f"- New contributions outside employer stock: {_format_percent(contribution_context.get('summary', {}).get('non_employer_contribution_pct'))}",
+        f"- Contribution concentration direction: {contribution_context.get('summary', {}).get('concentration_direction', 'indeterminate')}",
+        f"- Employer ticker: {contribution_context.get('employer_stock_concentration_context', {}).get('primary_employer_ticker', 'N/A')}",
+        f"- Current employer-stock weight: {_format_percent(contribution_context.get('employer_stock_concentration_context', {}).get('primary_employer_capital_concentration_pct'))}",
+        f"- ESPP purchase frequency: {contribution_context.get('summary', {}).get('hd_espp_purchase_frequency', 'n/a')}",
+        f"- ESPP discount: {_format_percent(contribution_context.get('summary', {}).get('hd_espp_discount_pct'))}",
         f"- Employer stock concentration alert: {contribution_context.get('employer_stock_concentration_context', {}).get('is_concentration_alert', False)}",
-        "- HD employer-stock context: The Home Depot ESPP, $100 biweekly contribution, 15% employee discount, purchases approximately every six months, and a 2-3 year historical holding pattern.",
         "",
         "5) Health score and methodology",
         f"- Health score components: {_format_health_components(portfolio_health.get('health_score_breakdown'))}",
         f"- Income quality explanation: {tracker_metadata.get('income_stability_explanation', '')}",
         f"- Data quality explanation: {tracker_metadata.get('data_quality_explanation', '')}",
         f"- Risk explanation: {tracker_metadata.get('risk_explanation', '')}",
+        *(_format_income_quality(income_quality) if income_quality else []),
+        *(_format_seasonality(seasonality) if seasonality else []),
         "",
         "6) Supplemental Yahoo Finance intelligence",
         *(_format_supplemental_intelligence(supplemental_financial) or ["- No supplemental Yahoo Finance intelligence available."]),
         "",
         "7) Historical context and projections",
         *(_format_historical_context(historical_context) or ["- No supplemental historical context available."]),
+        *(_format_portfolio_history(portfolio_history) if portfolio_history else []),
         f"- Projection note: {snapshot.get('projection_contribution_note', '')}",
         f"- 10-year projected value: {_format_currency(snapshot.get('projected_10y_value'))}",
         f"- 20-year projected value: {_format_currency(snapshot.get('projected_20y_value'))}",
@@ -254,40 +266,32 @@ def _format_supplemental_intelligence(items: list[dict[str, Any]]) -> list[str]:
         if not ticker:
             continue
         detail_parts: list[str] = []
-        fundamentals = _as_dict(item.get("fundamental_metrics"))
-        earnings = _as_dict(item.get("earnings_and_estimates"))
-        analyst_targets = _as_dict(item.get("analyst_targets"))
-        fund_data = _as_dict(item.get("fund_data"))
+        fundamentals = _as_dict(item.get("fundamentals"))
+        earnings = _as_dict(item.get("growth_and_estimates"))
+        analyst_targets = _as_dict(item.get("analyst_signal"))
+        fund_sector_weights = _as_list(item.get("fund_sector_weights"))
 
         if fundamentals:
-            if fundamentals.get("pe_ratio") not in [None, ""]:
-                detail_parts.append(f"PE {fundamentals.get('pe_ratio')}")
-            if fundamentals.get("price_to_book") not in [None, ""]:
-                detail_parts.append(f"PB {fundamentals.get('price_to_book')}")
+            if fundamentals.get("trailing_pe") not in [None, ""]:
+                detail_parts.append(f"Trailing PE {fundamentals.get('trailing_pe')}")
+            if fundamentals.get("forward_pe") not in [None, ""]:
+                detail_parts.append(f"Forward PE {fundamentals.get('forward_pe')}")
             if fundamentals.get("dividend_yield") not in [None, ""]:
                 detail_parts.append(f"Yield {fundamentals.get('dividend_yield')}")
         if earnings:
-            if earnings.get("avg_eps_estimate") not in [None, ""]:
-                detail_parts.append(f"EPS est {earnings.get('avg_eps_estimate')}")
-            if earnings.get("earnings_growth_pct") not in [None, ""]:
-                detail_parts.append(f"Earnings growth {earnings.get('earnings_growth_pct')}")
-            if earnings.get("revenue_growth_pct") not in [None, ""]:
-                detail_parts.append(f"Revenue growth {earnings.get('revenue_growth_pct')}")
+            if earnings.get("earnings_growth") not in [None, ""]:
+                detail_parts.append(f"Earnings growth {earnings.get('earnings_growth')}")
+            if earnings.get("revenue_growth") not in [None, ""]:
+                detail_parts.append(f"Revenue growth {earnings.get('revenue_growth')}")
         if analyst_targets:
             if analyst_targets.get("target_mean_price") not in [None, ""]:
                 detail_parts.append(f"Target {analyst_targets.get('target_mean_price')}")
-            if analyst_targets.get("recommendation_mean") not in [None, ""]:
-                detail_parts.append(f"Rec {analyst_targets.get('recommendation_mean')}")
-        if fund_data:
-            description = str(fund_data.get("description", "")).strip()
-            if description:
-                detail_parts.append(description)
-            sector_weightings = _as_dict(fund_data.get("sector_weightings"))
-            if sector_weightings:
-                weights = ", ".join(
-                    f"{str(sector).title()} {float(weight) * 100:.1f}%" for sector, weight in list(sector_weightings.items())[:4]
-                )
-                detail_parts.append(f"Sector weights: {weights}")
+            if analyst_targets.get("recommendation_key") not in [None, ""]:
+                detail_parts.append(f"Recommendation {analyst_targets.get('recommendation_key')}")
+        if fund_sector_weights:
+            weights = ", ".join(f"{row.get('sector')} {row.get('weight_pct')}%" for row in fund_sector_weights if isinstance(row, dict))
+            if weights:
+                detail_parts.append(f"Fund sectors: {weights}")
 
         lines.append(f"- {ticker}: " + ("; ".join(detail_parts) if detail_parts else "No supplemental intelligence available."))
     return lines
@@ -303,9 +307,44 @@ def _format_historical_context(items: list[dict[str, Any]]) -> list[str]:
             continue
         lines.append(
             "- "
-            + f"{ticker}: return {_format_percent(item.get('return_pct'))}, drawdown {_format_percent(item.get('drawdown'))}, volatility {_format_percent(item.get('volatility'))}, "
-            + f"start {_format_currency(item.get('start_price'))}, end {_format_currency(item.get('end_price'))}"
+            + f"{ticker}: period return {_format_percent(item.get('return_pct'))}, drawdown {_format_percent(item.get('drawdown'))}, volatility {_format_percent(item.get('volatility'))}, "
+            + f"52-week range {_format_currency(item.get('52w_low'))} to {_format_currency(item.get('52w_high'))}"
         )
+    return lines
+
+
+def _format_income_quality(summary: dict[str, Any]) -> list[str]:
+    lines = [
+        "- Tracker income-quality heuristics: "
+        + f"overall {_safe_float(summary.get('income_quality_score')):.1f}, distribution stability {_safe_float(summary.get('distribution_stability_score')):.1f}, "
+        + f"yield sustainability {_safe_float(summary.get('yield_sustainability_score')):.1f}, payout risk {_safe_float(summary.get('payout_risk_score')):.1f}.",
+    ]
+    for alert in _as_list(summary.get("alerts"))[:3]:
+        lines.append(f"- Income-quality alert: {alert}")
+    return lines
+
+
+def _format_seasonality(summary: dict[str, Any]) -> list[str]:
+    return [
+        "- Dividend timing summary: "
+        + f"highest month(s) {', '.join(summary.get('highest_income_months', [])) or 'N/A'}; "
+        + f"lowest month(s) {', '.join(summary.get('lowest_income_months', [])) or 'N/A'}; "
+        + f"timing coverage {_format_percent(summary.get('timing_coverage_pct'))}; "
+        + f"uncovered annual income {_format_currency(summary.get('uncovered_annual_income'))}."
+    ]
+
+
+def _format_portfolio_history(summary: dict[str, Any]) -> list[str]:
+    one_year = _as_dict(summary.get("one_year_baseline"))
+    three_month = _as_dict(summary.get("three_month_baseline"))
+    lines = [
+        f"- Portfolio account-value history: {summary.get('point_count', 0)} actual points; earliest {summary.get('earliest_date', 'N/A')} {_format_currency(summary.get('earliest_value'))}; latest {summary.get('latest_date', 'N/A')} {_format_currency(summary.get('latest_value'))}.",
+    ]
+    if one_year:
+        lines.append(f"- Nominal one-year account-value change: {_format_percent(one_year.get('nominal_change_pct'))} from actual point {one_year.get('date', 'N/A')} ({_format_currency(one_year.get('value'))}).")
+    if three_month:
+        lines.append(f"- Nominal three-month account-value change: {_format_percent(three_month.get('nominal_change_pct'))} from actual point {three_month.get('date', 'N/A')} ({_format_currency(three_month.get('value'))}).")
+    lines.append(f"- {summary.get('interpretation', 'Nominal account-value change includes contributions/withdrawals and is not investment return.')}")
     return lines
 
 
@@ -322,6 +361,8 @@ def _format_warnings(
         lines.append(f"- Snapshot validation: {issue}")
     for field_name in _as_list(warnings.get("missing_export_fields")):
         lines.append(f"- Missing export field: {field_name}")
+    for issue in _as_list(warnings.get("important")):
+        lines.append(f"- {issue}")
     if unresolved_exposure:
         lines.append(
             f"- Unresolved exposure: {_format_currency(unresolved_exposure.get('unresolved_fund_exposure'))} unresolved against {_format_currency(unresolved_exposure.get('fund_total_value'))} fund value."

@@ -6171,10 +6171,70 @@ def _summarize_supplemental_yahoo_data(
     return summarized
 
 
+def _build_compact_portfolio_history_summary(history: object) -> dict[str, object]:
+    if not isinstance(history, list):
+        return {}
+    points: list[tuple[pd.Timestamp, float]] = []
+    for row in history:
+        if not isinstance(row, dict):
+            continue
+        date_value = pd.to_datetime(row.get("history_date"), errors="coerce")
+        value = pd.to_numeric(row.get("portfolio_value"), errors="coerce")
+        if pd.isna(date_value) or pd.isna(value):
+            continue
+        points.append((date_value.normalize(), float(value)))
+    if not points:
+        return {}
+    points.sort(key=lambda item: item[0])
+    earliest_date, earliest_value = points[0]
+    latest_date, latest_value = points[-1]
+
+    def baseline(months: int) -> dict[str, object]:
+        target = latest_date - pd.DateOffset(months=months)
+        baseline_date, baseline_value = min(points, key=lambda item: (abs((item[0] - target).days), item[0]))
+        return {
+            "date": baseline_date.date().isoformat(),
+            "value": round(baseline_value, 2),
+            "nominal_change_pct": round((latest_value / baseline_value - 1.0) * 100.0, 2) if baseline_value else None,
+        }
+
+    return {
+        "latest_date": latest_date.date().isoformat(),
+        "latest_value": round(latest_value, 2),
+        "earliest_date": earliest_date.date().isoformat(),
+        "earliest_value": round(earliest_value, 2),
+        "one_year_baseline": baseline(12),
+        "three_month_baseline": baseline(3),
+        "point_count": len(points),
+        "interpretation": "Nominal account-value change includes contributions/withdrawals and is not investment return.",
+    }
+
+
+def _build_compact_seasonality_summary(seasonality: object) -> dict[str, object]:
+    if not isinstance(seasonality, dict) or not seasonality.get("chart_available"):
+        return {}
+    monthly = seasonality.get("monthly_income", {})
+    if not isinstance(monthly, dict) or not monthly:
+        return {}
+    usable = {str(month): float(value or 0.0) for month, value in monthly.items()}
+    highest = max(usable.values())
+    lowest = min(usable.values())
+    return {
+        "highest_income_months": [month for month, value in usable.items() if value == highest],
+        "lowest_income_months": [month for month, value in usable.items() if value == lowest],
+        "highest_month_income": round(highest, 2),
+        "lowest_month_income": round(lowest, 2),
+        "timing_coverage_pct": round(float(seasonality.get("coverage_pct", 0.0) or 0.0) * 100.0, 2),
+        "uncovered_annual_income": round(float(seasonality.get("uncovered_annual_income", 0.0) or 0.0), 2),
+    }
+
+
 def _compact_analysis_context(
     full_payload: dict[str, object],
     analysis_type: str,
     custom_question: str,
+    portfolio_history_summary: dict[str, object] | None = None,
+    dividend_seasonality_summary: dict[str, object] | None = None,
 ) -> dict[str, object]:
     selected_type = str(analysis_type or AI_ANALYSIS_TYPES[0]).strip()
     if selected_type not in AI_ANALYSIS_TYPES:
@@ -6240,6 +6300,7 @@ def _compact_analysis_context(
             "asset_type",
             "employer_stock",
             "espp_enabled",
+            "espp_acquired_shares",
         ],
         limit=profile["holdings_limit"],
         sort_by="market_value",
@@ -6280,12 +6341,11 @@ def _compact_analysis_context(
 
     historical_context = _compact_records(
         full_payload.get("historical_context", []),
-        ["ticker", "return_pct", "drawdown", "volatility", "history_summary", "52w_high", "52w_low"],
+        ["ticker", "return_pct", "drawdown", "volatility", "52w_high", "52w_low"],
         limit=profile["historical_limit"],
     )
 
     compact_payload: dict[str, object] = {
-        "analysis_type": selected_type,
         "portfolio_snapshot": _pick_non_empty_fields(
             snapshot,
             [
@@ -6302,17 +6362,7 @@ def _compact_analysis_context(
                 "projected_20y_value",
             ],
         ),
-        "investor_profile": _pick_non_empty_fields(
-            investor_profile,
-            [
-                "portfolio_strategy",
-                "primary_goal",
-                "risk_tolerance",
-                "investment_horizon_years",
-                "contribution_frequency",
-                "contribution_amount",
-            ],
-        ),
+        "investor_profile": _pick_non_empty_fields(investor_profile, ["primary_goal", "risk_tolerance", "investment_horizon_years"]),
         "calculated_metrics": holdings,
         "income_allocation_by_holding": income_by_holding,
         "asset_allocation": asset_allocation,
@@ -6351,15 +6401,19 @@ def _compact_analysis_context(
             full_payload.get("tracker_health_score_metadata", {}),
             ["income_stability_explanation", "data_quality_explanation", "risk_explanation"],
         ),
-        "health_methodology_warning": "Tracker health components and labels are methodology-based portfolio heuristics, not objective third-party ratings.",
+        "income_quality_summary": _pick_non_empty_fields(
+            full_payload.get("income_quality", {}),
+            ["income_quality_score", "distribution_stability_score", "yield_sustainability_score", "payout_risk_score", "alerts"],
+        ) if selected_type in {"Comprehensive Portfolio Review", "Income and Dividend Analysis"} else {},
         "contribution_context": {
             "summary": {
                 "total_regular_biweekly_contribution": contribution_summary.get("total_regular_biweekly_contribution"),
                 "total_espp_biweekly_contributions": contribution_summary.get("total_espp_biweekly_contributions"),
+                "annual_regular_contributions": contribution_summary.get("estimated_annual_regular_contributions"),
+                "annual_espp_contributions": contribution_summary.get("estimated_annual_espp_contributions"),
                 "estimated_combined_annual_contributions": contribution_summary.get("estimated_combined_annual_contributions"),
-                "hd_espp_contribution_per_paycheck": contribution_summary.get("hd_espp_contribution_per_paycheck", ESPP_CONTRIB_BIWEEKLY),
-                "hd_espp_purchase_frequency": contribution_summary.get("hd_espp_purchase_frequency", ESPP_PURCHASE_FREQUENCY),
-                "hd_espp_discount_pct": contribution_summary.get("hd_espp_discount_pct", ESPP_DISCOUNT * 100.0),
+                "hd_espp_purchase_frequency": contribution_summary.get("hd_espp_purchase_frequency"),
+                "hd_espp_discount_pct": contribution_summary.get("hd_espp_discount_pct"),
             },
             "employer_stock_concentration_context": _pick_non_empty_fields(
                 contribution_context.get("employer_stock_concentration_context", {}),
@@ -6370,13 +6424,6 @@ def _compact_analysis_context(
                     "is_concentration_alert",
                 ],
             ),
-            "hd_espp_facts": {
-                "biweekly_contribution_usd": 100,
-                "discount_pct": 15,
-                "purchase_cadence": "approximately every six months",
-                "historical_holding_pattern": "shares historically retained for approximately 2-3 years",
-                "employer_income_concentration_relationship": "Evaluate employer-stock concentration together with employment-income concentration.",
-            },
         },
         "data_completeness": _pick_non_empty_fields(
             full_payload.get("data_completeness", {}),
@@ -6392,10 +6439,39 @@ def _compact_analysis_context(
         ),
         "supplemental_yahoo_financial_data": supplemental_intelligence,
         "historical_context": historical_context,
+        "portfolio_history_summary": (portfolio_history_summary or {}) if (
+            selected_type in {"Comprehensive Portfolio Review", "Long-Term Outlook"}
+            or (selected_type == "Custom Question" and any(word in custom_lower for word in ["history", "historical", "outlook", "growth"]))
+        ) else {},
+        "dividend_seasonality_summary": dividend_seasonality_summary if selected_type in {"Comprehensive Portfolio Review", "Income and Dividend Analysis"} else {},
         "warnings": {
-            "important": _extract_data_quality_warnings(full_payload),
+            "important": _extract_data_quality_warnings(full_payload)[:8],
         },
     }
+
+    income_summary = compact_payload.get("income_quality_summary")
+    if isinstance(income_summary, dict) and isinstance(income_summary.get("alerts"), list):
+        income_summary["alerts"] = income_summary["alerts"][:3]
+
+    contribution = compact_payload["contribution_context"]
+    summary = contribution["summary"]
+    employer = contribution["employer_stock_concentration_context"]
+    annual_total = float(summary.get("estimated_combined_annual_contributions") or 0.0)
+    annual_employer = float(summary.get("annual_espp_contributions") or 0.0)
+    if annual_total > 0:
+        employer_pct = annual_employer / annual_total * 100.0
+        current_pct = float(employer.get("primary_employer_capital_concentration_pct") or 0.0)
+        summary["employer_stock_contribution_pct"] = round(employer_pct, 2)
+        summary["non_employer_contribution_pct"] = round(100.0 - employer_pct, 2)
+        summary["concentration_direction"] = (
+            "increase employer-stock concentration"
+            if employer_pct > current_pct
+            else "dilute employer-stock concentration"
+            if employer_pct < current_pct
+            else "neutral"
+        )
+    else:
+        summary["concentration_direction"] = "indeterminate"
 
     return _strip_empty_context_values(compact_payload) if isinstance(_strip_empty_context_values(compact_payload), dict) else compact_payload
 
@@ -6416,7 +6492,23 @@ def _build_ai_analysis_payload_with_diagnostics(
         espp_discount=float(st.session_state.get("analysis_espp_discount", ESPP_DISCOUNT)),
     )
 
-    compact_payload = _compact_analysis_context(full_payload, analysis_type, custom_question)
+    try:
+        portfolio_history_summary = _build_compact_portfolio_history_summary(load_performance_history(STATEMENT_HISTORY_DB_PATH))
+    except (OSError, sqlite3.Error):
+        portfolio_history_summary = {}
+    seasonality_summary: dict[str, object] = {}
+    selected_type = str(analysis_type or "")
+    if selected_type in {"Comprehensive Portfolio Review", "Income and Dividend Analysis"}:
+        tickers = _to_ticker_tuple(metrics.get("ticker", pd.Series(dtype=str))) if not metrics.empty else ()
+        weights = _latest_dividend_month_weights(tickers) if tickers else {}
+        seasonality_summary = _build_compact_seasonality_summary(_build_monthly_income_seasonality(metrics, weights))
+    compact_payload = _compact_analysis_context(
+        full_payload,
+        analysis_type,
+        custom_question,
+        portfolio_history_summary=portfolio_history_summary,
+        dividend_seasonality_summary=seasonality_summary,
+    )
 
     before_text = json.dumps(_sanitize_export_value(full_payload), default=str, separators=(",", ":"), allow_nan=False)
     after_text = json.dumps(_sanitize_export_value(compact_payload), default=str, separators=(",", ":"), allow_nan=False)
