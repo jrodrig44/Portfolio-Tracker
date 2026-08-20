@@ -6,6 +6,7 @@ import pandas as pd
 import yfinance as yf
 
 from nicegui_app.services.configuration import PRICE_CACHE_TTL_SECONDS,YAHOO_CACHE_TTL_SECONDS,YAHOO_METADATA_CACHE_TTL_SECONDS
+from portfolio_analysis import resolve_fund_lookthrough
 
 _cache: dict[tuple[str,str],tuple[float,Any]]={}
 
@@ -54,7 +55,7 @@ def current_market_data(tickers:list[str]|tuple[str,...])->tuple[dict[str,float]
 
 
 def yahoo_intelligence_package(metrics:pd.DataFrame)->dict[str,Any]:
-    intelligence=[]; historical=[]; lookthrough=[]; monthly={month:0.0 for month in ("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec")}
+    intelligence=[]; historical=[]; fund_weights={}; monthly={month:0.0 for month in ("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec")}
     for row in metrics.to_dict(orient="records"):
         ticker=str(row.get("ticker","")).upper(); proxy=yf.Ticker(ticker)
         info=_cached((ticker,"info"),lambda p=proxy: p.info or {})
@@ -67,9 +68,10 @@ def yahoo_intelligence_package(metrics:pd.DataFrame)->dict[str,Any]:
                 counts=dividends.groupby(dividends.index.month).sum(); total=float(counts.sum())
                 if total>0:
                     for month,value in counts.items():monthly[list(monthly)[int(month)-1]]+=float(row.get("annual_income",0) or 0)*float(value)/total
-        funds=info.get("sectorWeightings") or []
-        if isinstance(funds,list):
-            for entry in funds:
-                if isinstance(entry,dict):
-                    for sector,weight in entry.items():lookthrough.append({"ticker":ticker,"sector":sector,"weight":float(weight or 0)})
-    return {"investment_intelligence":intelligence,"lookthrough":lookthrough,"unresolved_lookthrough":[],"seasonality":{"monthly_income":monthly,"chart_available":any(monthly.values()),"message":"Estimated distribution of current annual portfolio income based on available historical dividend timing."},"historical_context":historical}
+        def load_fund_weights(p=proxy):
+            funds_data=getattr(p,"funds_data",None);raw=getattr(funds_data,"sector_weightings",None) if funds_data is not None else None
+            return dict(raw) if hasattr(raw,"items") else {}
+        weights=_cached((ticker,"fund_sector_weights"),load_fund_weights,3600.0)
+        if weights:fund_weights[ticker]=weights
+    resolved=resolve_fund_lookthrough(metrics,fund_weights)
+    return {"investment_intelligence":intelligence,"lookthrough":resolved["records"],"unresolved_lookthrough":resolved["unresolved_records"],"fund_lookthrough":resolved,"seasonality":{"monthly_income":monthly,"chart_available":any(monthly.values()),"message":"Estimated distribution of current annual portfolio income based on available historical dividend timing."},"historical_context":historical}

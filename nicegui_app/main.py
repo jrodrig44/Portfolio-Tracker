@@ -143,6 +143,8 @@ async def index() -> None:
                             intelligence = await run.io_bound(yahoo_intelligence_package, metrics)
                             yahoo_area.clear()
                             with yahoo_area:
+                                fund_context = intelligence.get("fund_lookthrough", {})
+                                metric_cards([("Fund look-through coverage", percent(fund_context.get("fund_lookthrough_completeness_pct", 0.0))), ("Resolved fund exposure", currency(fund_context.get("resolved_value", 0.0))), ("Unresolved fund exposure", currency(fund_context.get("unresolved_value", 0.0)))])
                                 records_table(intelligence["lookthrough"], "Fund look-through exposure")
                                 records_table(intelligence["unresolved_lookthrough"], "Unresolved fund exposure")
                                 records_table(intelligence["investment_intelligence"], "Investment intelligence")

@@ -21,6 +21,9 @@ import yfinance as yf
 from ai_analysis_prompt import AI_ANALYSIS_TYPES, build_ai_analysis_markdown, build_ai_analysis_messages, format_ai_analysis_markdown
 from health_engine import compute_portfolio_health as compute_portfolio_health_engine
 from portfolio_intelligence import compute_portfolio_intelligence
+from portfolio_analysis import canonical_asset_type as shared_canonical_asset_type
+from portfolio_analysis import future_value as shared_future_value
+from portfolio_analysis import normalize_sector as shared_normalize_sector
 from stash_history import clear_scan_preview, delete_imported_history, history_summary, import_validated_history, load_performance_history, load_statement_history, remove_manual_statement_review, run_statement_scan, save_manual_statement_review, scan_can_import, scan_state, upsert_live_portfolio_snapshot
 from onemin_ai_client import (
     ONEMIN_AI_DEFAULT_BASE_URL,
@@ -447,22 +450,7 @@ def _resolve_client_ip(headers: dict[str, str]) -> str:
 
 
 def _canonical_asset_type(value: str) -> str:
-    text = str(value).strip().lower()
-    if text in {"reit", "reits", "real estate", "real estate investment trust"}:
-        return "REIT"
-    if text in {"etf", "etfs"}:
-        return "ETF"
-    if text in {"stock", "stocks", "equity", "equities", "etf/stock"}:
-        return "Stock"
-    if text in {"cef", "cefs"}:
-        return "CEF"
-    if text in {"bdc", "bdcs"}:
-        return "BDC"
-    if text in {"bond", "bond fund", "bond funds"}:
-        return "Bond Fund"
-    if text in {"", "nan", "none"}:
-        return "Stock"
-    return "Other"
+    return shared_canonical_asset_type(value)
 
 
 def _infer_sector_from_info(info: dict) -> str:
@@ -1903,21 +1891,7 @@ def _future_value_with_contributions(
     biweekly_contribution: float,
     years: int,
 ) -> float:
-    periods = years * 26
-    if periods <= 0:
-        return current_value
-
-    annual_rate = float(annual_return_pct)
-    if annual_rate > 1:
-        annual_rate = annual_rate / 100.0
-
-    rate_per_period = annual_rate / 26
-    if rate_per_period == 0:
-        return current_value + (biweekly_contribution * periods)
-
-    grown_current = current_value * (1 + rate_per_period) ** periods
-    contribution_future = biweekly_contribution * (((1 + rate_per_period) ** periods - 1) / rate_per_period)
-    return grown_current + contribution_future
+    return shared_future_value(current_value, annual_return_pct, biweekly_contribution, years)
 
 
 def _years_to_income_target(current_income: float, target_income: float, annual_income_growth: float) -> float:
@@ -1970,13 +1944,7 @@ def _display_asset_type_label(asset_type: str) -> str:
 
 
 def _normalize_sector_label(value: object, unresolved_label: str = "Unresolved Direct Sector") -> str:
-    sector = str(value or "").strip()
-    if sector.lower() in {"", "nan", "none", "n/a"}:
-        return unresolved_label
-    alias = _normalize_sector_alias(sector)
-    if alias:
-        return alias
-    return sector
+    return shared_normalize_sector(value, unresolved_label)
 
 
 def _classification_label_for_holding(asset_type: str, sector: object) -> str:
