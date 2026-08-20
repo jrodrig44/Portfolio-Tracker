@@ -1,4 +1,3 @@
-import re
 import unittest
 from pathlib import Path
 
@@ -25,11 +24,22 @@ class NiceGuiStartupTests(unittest.TestCase):
 
     def test_shared_environment_and_executable_health_probe_are_used(self) -> None:
         self.assertIn('Join-Path $projectRoot ".venv"', self.script)
-        self.assertIn("function Test-VenvPython", self.script)
-        self.assertRegex(self.script, r'& \$PythonPath -c "import sys;')
-        self.assertIn("Test-VenvPython -PythonPath $venvPython", self.script)
+        self.assertIn("function Test-PythonCommand", self.script)
+        self.assertRegex(self.script, r'& \$PythonPath @PrefixArguments -c "import sys;')
+        self.assertIn("Test-PythonCommand -PythonPath $venvPython", self.script)
         self.assertIn("Remove-Item -LiteralPath $resolvedVenv -Recurse -Force", self.script)
-        self.assertIn("& py -3 -m venv $venvPath", self.script)
+        self.assertIn("& $basePython.Path @($basePython.Arguments) -m venv $venvPath", self.script)
+
+    def test_base_python_discovery_does_not_require_py_launcher(self) -> None:
+        self.assertIn("function Find-BasePython", self.script)
+        cfg_position = self.script.index("$homeLine = $configuration")
+        python_position = self.script.index("foreach ($commandName in @('python.exe', 'python3.exe'))")
+        py_position = self.script.index("Get-Command py.exe")
+        self.assertLess(cfg_position, python_position)
+        self.assertLess(python_position, py_position)
+        self.assertIn("StartsWith($resolvedVenvPrefix", self.script)
+        self.assertIn("Test-PythonCommand -PythonPath $candidate.Path", self.script)
+        self.assertNotIn("& py -3 -m venv", self.script)
 
     def test_dependency_fingerprint_is_compared_and_written_after_pip_success(self) -> None:
         self.assertIn('Join-Path $runtimeDataPath ".requirements.sha256"', self.script)

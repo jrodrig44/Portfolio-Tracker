@@ -11,15 +11,18 @@ $requirementsFingerprintPath = Join-Path $runtimeDataPath ".requirements.sha256"
 $niceGuiMain = Join-Path $projectRoot "nicegui_app\main.py"
 $environmentCreated = $false
 
-function Test-VenvPython {
-    param([Parameter(Mandatory = $true)][string]$PythonPath)
+function Test-PythonCommand {
+    param(
+        [Parameter(Mandatory = $true)][string]$PythonPath,
+        [string[]]$PrefixArguments = @()
+    )
 
     if (-not (Test-Path -LiteralPath $PythonPath -PathType Leaf)) {
         return $false
     }
 
     try {
-        & $PythonPath -c "import sys; raise SystemExit(0 if sys.version_info.major == 3 else 1)" 2>$null
+        & $PythonPath @PrefixArguments -c "import sys; raise SystemExit(0 if sys.version_info.major == 3 else 1)" 2>$null
         return $LASTEXITCODE -eq 0
     }
     catch {
@@ -27,7 +30,73 @@ function Test-VenvPython {
     }
 }
 
-if (-not (Test-VenvPython -PythonPath $venvPython)) {
+function Find-BasePython {
+    param(
+        [Parameter(Mandatory = $true)][string]$VirtualEnvironmentPath,
+        [Parameter(Mandatory = $true)][string]$ConfigurationPath
+    )
+
+    $candidates = [System.Collections.Generic.List[object]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+    function Add-PythonCandidate {
+        param([string]$Path, [string[]]$Arguments = @(), [string]$Source)
+        if ([string]::IsNullOrWhiteSpace($Path)) {
+            return
+        }
+        $key = "$Path|$($Arguments -join ' ')"
+        if ($seen.Add($key)) {
+            $candidates.Add([pscustomobject]@{ Path = $Path; Arguments = $Arguments; Source = $Source })
+        }
+    }
+
+    # Preserve the original base-interpreter hint before a broken environment is removed.
+    if (Test-Path -LiteralPath $ConfigurationPath -PathType Leaf) {
+        try {
+            $configuration = Get-Content -LiteralPath $ConfigurationPath -ErrorAction Stop
+            $homeLine = $configuration | Where-Object { $_ -match '^\s*home\s*=\s*(.+?)\s*$' } | Select-Object -First 1
+            if ($homeLine -match '^\s*home\s*=\s*(.+?)\s*$') {
+                $baseHome = $Matches[1].Trim()
+                foreach ($name in @('python.exe', 'python3.exe')) {
+                    Add-PythonCandidate -Path (Join-Path $baseHome $name) -Source 'pyvenv.cfg'
+                }
+            }
+        }
+        catch {
+            Write-Warning "Unable to inspect .venv\pyvenv.cfg: $($_.Exception.Message)"
+        }
+    }
+
+    $resolvedVenvPrefix = [System.IO.Path]::GetFullPath($VirtualEnvironmentPath).TrimEnd('\') + '\'
+    foreach ($commandName in @('python.exe', 'python3.exe')) {
+        foreach ($command in @(Get-Command $commandName -All -CommandType Application -ErrorAction SilentlyContinue)) {
+            $candidatePath = [System.IO.Path]::GetFullPath($command.Source)
+            if (-not $candidatePath.StartsWith($resolvedVenvPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                Add-PythonCandidate -Path $candidatePath -Source $commandName
+            }
+        }
+    }
+
+    $pyLauncher = Get-Command py.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -ne $pyLauncher) {
+        Add-PythonCandidate -Path $pyLauncher.Source -Arguments @('-3') -Source 'py -3'
+    }
+
+    foreach ($candidate in $candidates) {
+        if (Test-PythonCommand -PythonPath $candidate.Path -PrefixArguments $candidate.Arguments) {
+            return $candidate
+        }
+    }
+    return $null
+}
+
+if (-not (Test-PythonCommand -PythonPath $venvPython)) {
+    $pyvenvConfiguration = Join-Path $venvPath "pyvenv.cfg"
+    $basePython = Find-BasePython -VirtualEnvironmentPath $venvPath -ConfigurationPath $pyvenvConfiguration
+    if ($null -eq $basePython) {
+        throw "The shared .venv is missing or broken, and no usable base Python interpreter was found. Install or repair Python 3 and ensure python.exe, python3.exe, or the optional py launcher is available. NiceGUI was not started."
+    }
+
     if (Test-Path -LiteralPath $venvPath) {
         $resolvedProject = (Resolve-Path -LiteralPath $projectRoot).Path.TrimEnd('\')
         $resolvedVenv = (Resolve-Path -LiteralPath $venvPath).Path.TrimEnd('\')
@@ -40,13 +109,14 @@ if (-not (Test-VenvPython -PythonPath $venvPython)) {
     }
 
     Write-Host "Creating shared virtual environment..."
+    Write-Host "Using Python from $($basePython.Source): $($basePython.Path)"
     try {
-        & py -3 -m venv $venvPath
+        & $basePython.Path @($basePython.Arguments) -m venv $venvPath
     }
     catch {
         throw "Virtual environment creation failed. NiceGUI was not started. $($_.Exception.Message)"
     }
-    if ($LASTEXITCODE -ne 0 -or -not (Test-VenvPython -PythonPath $venvPython)) {
+    if ($LASTEXITCODE -ne 0 -or -not (Test-PythonCommand -PythonPath $venvPython)) {
         throw "Virtual environment creation or Python validation failed. NiceGUI was not started."
     }
     $environmentCreated = $true
@@ -92,7 +162,7 @@ else {
     Write-Host "Dependencies unchanged; skipping installation."
 }
 
-if (-not (Test-VenvPython -PythonPath $venvPython)) {
+if (-not (Test-PythonCommand -PythonPath $venvPython)) {
     throw "Shared virtual-environment Python failed its final validation. NiceGUI was not started."
 }
 
