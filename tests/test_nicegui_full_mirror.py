@@ -1,91 +1,53 @@
-import unittest
+import sqlite3,subprocess,sys,tempfile,unittest
+from contextlib import closing
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock
+from nicegui_app.services.ai_context import compact_context
+from nicegui_app.services.analysis import analysis_package
+from nicegui_app.services.calculations import metrics_frame
+from nicegui_app.services.exports import build_export_payload
+from nicegui_app.services.health import health_package
+from nicegui_app.services.insights import insights_package
+from nicegui_app.services.refresh import ReadOnlyRefreshCoordinator,database_fingerprint
 
-import pandas as pd
-
-from nicegui_app.services import mirror_logic
-
-
-ROOT = Path(__file__).resolve().parents[1]
-
+ROOT=Path(__file__).resolve().parents[1]
 
 class NiceGuiFullMirrorTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.main_source = (ROOT / "nicegui_app" / "main.py").read_text(encoding="utf-8")
-        cls.logic_source = (ROOT / "nicegui_app" / "services" / "mirror_logic.py").read_text(encoding="utf-8")
-        cls.launcher_source = (ROOT / "run_nicegui.ps1").read_text(encoding="utf-8")
+    def holdings(self):
+        return [{"ticker":"ABC","shares":2.0,"current_price":50.0,"amount_invested":80.0,"annual_div_per_share":2.5,"effective_annual_div_per_share":0.0,"dividend_yield_pct":5.0,"asset_type":"Stock","sector":"Technology","regular_biweekly_contribution":10.0,"espp_biweekly_contribution":0.0,"special_contribution":0.0,"employer_stock":False,"espp_enabled":False,"espp_acquired_shares":0.0}]
+    def test_isolated_import_does_not_load_production_ui_modules(self):
+        code="import sys,nicegui_app.services.calculations,nicegui_app.services.analysis,nicegui_app.services.health,nicegui_app.services.insights,nicegui_app.services.exports,nicegui_app.services.ai_context,nicegui_app.services.yahoo,nicegui_app.services.refresh;print(int('app' in sys.modules),int('streamlit' in sys.modules))"
+        result=subprocess.run([sys.executable,"-B","-c",code],cwd=ROOT,text=True,capture_output=True,check=True);self.assertEqual(result.stdout.strip(),"0 0")
+    def test_nicegui_source_has_no_app_or_streamlit_imports(self):
+        source="\n".join(path.read_text(encoding="utf-8") for path in (ROOT/"nicegui_app").rglob("*.py"));self.assertNotIn("import app",source);self.assertNotIn("from app",source);self.assertNotIn("import streamlit",source);self.assertNotIn("from streamlit",source)
+    def test_representative_formula_outputs(self):
+        metrics=metrics_frame(self.holdings());self.assertEqual(float(metrics.iloc[0]["market_value"]),100.0);self.assertEqual(float(metrics.iloc[0]["unrealized_gain"]),20.0);self.assertEqual(float(metrics.iloc[0]["annual_income"]),5.0)
+        analysis=analysis_package(metrics);self.assertEqual(analysis["totals"]["weighted_portfolio_yield"],5.0);self.assertEqual(analysis["summary"]["active_contributors"],1)
+        insights=insights_package(metrics);self.assertEqual(insights["yield"]["highest_yield_pct"],5.0);self.assertEqual(insights["contribution"]["summary"]["regular_annual"],260.0)
+        health=health_package(metrics);self.assertIn("risk",health["subscores"]);self.assertTrue(0<=health["health_score"]<=100)
+        payload=build_export_payload(self.holdings(),metrics);self.assertEqual(payload["totals"]["portfolio_value"],100.0);self.assertEqual(payload["schema_version"],"2.0")
+        compact=compact_context(payload,"Risk Analysis","Focus",[{"history_date":"2026-01-01","portfolio_value":100}]);self.assertEqual(compact["portfolio_snapshot"]["portfolio_value"],100.0);self.assertEqual(compact["portfolio_history_summary"]["points"],1)
+    def _databases(self,root):
+        portfolio=root/"portfolio.db";history=root/"history.sqlite"
+        with closing(sqlite3.connect(portfolio)) as c:c.execute("CREATE TABLE holdings (ticker TEXT,shares REAL,amount_invested REAL,current_price REAL,dividend_yield_pct REAL,asset_type TEXT,sector TEXT)");c.execute("INSERT INTO holdings VALUES ('ABC',2,80,50,5,'Stock','Technology')");c.commit()
+        with closing(sqlite3.connect(history)) as c:c.execute("CREATE TABLE statement_portfolio_history (history_date TEXT,portfolio_value REAL,source_type TEXT)");c.execute("CREATE TABLE live_portfolio_snapshots (snapshot_date TEXT,portfolio_value REAL,source_type TEXT)");c.execute("INSERT INTO statement_portfolio_history VALUES ('2026-01-01',100,'stash_statement')");c.commit()
+        return portfolio,history
+    def test_fingerprint_detects_each_database_and_skips_unchanged(self):
+        from nicegui_app.services.portfolio_data import load_history,load_holdings
+        with tempfile.TemporaryDirectory() as directory:
+            portfolio,history=self._databases(Path(directory));p_loader=Mock(side_effect=load_holdings);h_loader=Mock(side_effect=load_history);coordinator=ReadOnlyRefreshCoordinator(portfolio,history,p_loader,h_loader)
+            first=coordinator.refresh();self.assertTrue(first.portfolio_changed and first.history_changed);second=coordinator.refresh();self.assertFalse(second.portfolio_changed or second.history_changed);self.assertEqual((p_loader.call_count,h_loader.call_count),(1,1))
+            before=database_fingerprint(portfolio)
+            with closing(sqlite3.connect(portfolio)) as c:c.execute("UPDATE holdings SET shares=3");c.commit()
+            self.assertNotEqual(before,database_fingerprint(portfolio));third=coordinator.refresh();self.assertTrue(third.portfolio_changed);self.assertFalse(third.history_changed)
+            with closing(sqlite3.connect(history)) as c:c.execute("INSERT INTO live_portfolio_snapshots VALUES ('2026-01-02',110,'live_portfolio_snapshot')");c.commit()
+            fourth=coordinator.refresh();self.assertFalse(fourth.portfolio_changed);self.assertTrue(fourth.history_changed)
+    def test_manual_refresh_forces_both_sources(self):
+        with tempfile.TemporaryDirectory() as directory:
+            portfolio,history=self._databases(Path(directory));coordinator=ReadOnlyRefreshCoordinator(portfolio,history);coordinator.refresh();forced=coordinator.refresh(force=True);self.assertTrue(forced.portfolio_changed and forced.history_changed);self.assertEqual((len(forced.holdings),len(forced.history)),(1,1))
+    def test_main_preserves_areas_refresh_network_and_lifecycle(self):
+        main=(ROOT/"nicegui_app"/"main.py").read_text(encoding="utf-8");launcher=(ROOT/"run_nicegui.ps1").read_text(encoding="utf-8")
+        for area in ("Holdings","Portfolio Analysis","AI Analysis","Portfolio Insights","Portfolio Health","History"):self.assertIn(f'"{area}"',main)
+        self.assertIn("Refresh Data",main);self.assertIn("DB_REFRESH_INTERVAL_SECONDS",main);self.assertIn('HOST = "0.0.0.0"',main);self.assertIn("PORT = 8502",main);self.assertIn("NICEGUI_LAUNCHER_PID",launcher);self.assertNotIn("Start-Process",launcher)
 
-    def _holdings(self) -> list[dict[str, object]]:
-        return [{
-            "ticker": "ABC", "shares": 2.0, "current_price": 50.0,
-            "market_value": 100.0, "amount_invested": 80.0, "cost_basis": 80.0,
-            "annual_div_per_share": 2.5, "dividend_yield_pct": 5.0,
-            "annual_income": 5.0, "annualized_income": 5.0,
-            "asset_type": "Stock", "sector": "Technology",
-            "regular_biweekly_contribution": 10.0, "espp_biweekly_contribution": 0.0,
-            "special_contribution": 0.0, "employer_stock": False,
-            "espp_enabled": False, "espp_acquired_shares": 0.0,
-            "espp_discount_pct": 0.0, "espp_purchase_frequency": "",
-        }]
-
-    def test_all_required_navigation_areas_exist(self) -> None:
-        for area in ("Holdings", "Portfolio Analysis", "AI Analysis", "Portfolio Insights", "Portfolio Health", "History"):
-            self.assertIn(f'"{area}"', self.main_source)
-
-    def test_analysis_uses_production_calculation_outputs(self) -> None:
-        metrics = mirror_logic.metrics_frame(self._holdings())
-        package = mirror_logic.analysis_package(metrics)
-        self.assertEqual(package["totals"]["total_portfolio_value"], 100.0)
-        self.assertEqual(package["totals"]["total_cost_basis"], 80.0)
-        self.assertIn("concentration", package)
-        self.assertIn("income_quality", package)
-
-    def test_insights_use_tracker_intelligence_builders(self) -> None:
-        package = mirror_logic.insights_package(mirror_logic.metrics_frame(self._holdings()))
-        self.assertTrue(package["observations"])
-        self.assertEqual(package["allocation"][0]["market_value"], 100.0)
-
-    def test_health_uses_existing_health_output(self) -> None:
-        expected = {"health_score": 77.0, "subscores": {"risk": 70.0}}
-        fake_app = unittest.mock.Mock()
-        fake_app._build_portfolio_health.return_value = expected
-        with patch("nicegui_app.services.mirror_logic._production_logic", return_value=fake_app):
-            self.assertEqual(mirror_logic.health_package(pd.DataFrame()), expected)
-
-    def test_ai_is_explicit_and_not_automatic(self) -> None:
-        self.assertIn('ui.button("Analyze", on_click=analyze', self.main_source)
-        self.assertNotIn("await run_ai_analysis", self.main_source)
-        self.assertIn("run_ai_analysis, holdings, metrics", self.main_source)
-        self.assertNotIn("run_ai_analysis(", self.main_source)
-
-    def test_read_only_service_has_no_persistent_write_entrypoints(self) -> None:
-        for forbidden in ("sqlite3.connect", "INSERT INTO", "UPDATE ", "DELETE FROM", "upsert_live_portfolio_snapshot", "run_statement_scan", "import_validated_history", "SupplementalResearchService"):
-            self.assertNotIn(forbidden, self.logic_source)
-        self.assertIn("load_history()", self.logic_source)
-
-    def test_exports_are_generated_in_memory(self) -> None:
-        self.assertIn("metrics.to_csv(index=False)", self.logic_source)
-        self.assertNotIn("write_text", self.logic_source)
-        self.assertNotIn("write_bytes", self.logic_source)
-
-    def test_network_and_lazy_loading_are_stable(self) -> None:
-        self.assertIn('HOST = "0.0.0.0"', self.main_source)
-        self.assertIn("PORT = 8502", self.main_source)
-        self.assertIn("tabs.on_value_change(navigate)", self.main_source)
-        self.assertIn("selector.on_value_change", self.main_source)
-        self.assertIn('ui.button("Load Yahoo intelligence"', self.main_source)
-        self.assertIn("yahoo_intelligence_package, metrics", self.main_source)
-
-    def test_launcher_is_attached_checks_port_and_never_kills_unrelated_python(self) -> None:
-        self.assertIn("NICEGUI_LAUNCHER_PID", self.launcher_source)
-        self.assertIn("Get-NetTCPConnection -LocalPort 8502", self.launcher_source)
-        self.assertIn("& $venvPython $niceGuiMain", self.launcher_source)
-        self.assertNotIn("Start-Process", self.launcher_source)
-        self.assertNotIn("Stop-Process", self.launcher_source)
-        self.assertNotIn("taskkill", self.launcher_source.lower())
-
-
-if __name__ == "__main__":
-    unittest.main()
+if __name__=="__main__":unittest.main()

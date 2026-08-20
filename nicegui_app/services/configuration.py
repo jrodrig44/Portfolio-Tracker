@@ -1,0 +1,10 @@
+"""NiceGUI-owned parity configuration; values copied from production on 2026-08-20."""
+
+ESPP_DISCOUNT = 0.15
+ESPP_CONTRIB_BIWEEKLY = 100.0
+ESPP_PURCHASE_FREQUENCY = "6_months"
+DEFAULT_EXPECTED_RETURN = 0.08
+DEFAULT_PROJECTION_BIWEEKLY_CONTRIB = 280.0
+DB_REFRESH_INTERVAL_SECONDS = 20.0
+YAHOO_CACHE_TTL_SECONDS = 900.0
+ONEMIN_AI_RECOMMENDED_MODELS = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-4.1-mini", "gpt-4o-mini"]

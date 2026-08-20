@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import sys
 from pathlib import Path
 from typing import Any
@@ -11,8 +10,15 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from nicegui import run, ui
 from nicegui_app.process_lifecycle import start_launcher_watchdog
-from nicegui_app.services.mirror_logic import ai_options, analysis_package, export_package, health_package, insights_package, metrics_frame, run_ai_analysis, yahoo_intelligence_package
-from nicegui_app.services.portfolio_data import DEFAULT_HISTORY_RANGE, HISTORY_RANGE_OPTIONS, filter_history, load_history, load_holdings, portfolio_summary
+from nicegui_app.services.ai_context import ai_options,run_ai_analysis
+from nicegui_app.services.analysis import analysis_package
+from nicegui_app.services.configuration import DB_REFRESH_INTERVAL_SECONDS
+from nicegui_app.services.exports import export_package
+from nicegui_app.services.health import health_package
+from nicegui_app.services.insights import insights_package
+from nicegui_app.services.portfolio_data import DEFAULT_HISTORY_RANGE,HISTORY_RANGE_OPTIONS,filter_history,portfolio_summary
+from nicegui_app.services.refresh import ReadOnlyRefreshCoordinator
+from nicegui_app.services.yahoo import yahoo_intelligence_package
 
 HOST = "0.0.0.0"
 PORT = 8502
@@ -52,6 +58,7 @@ async def index() -> None:
     holdings: list[dict[str, Any]] = []
     history: list[dict[str, Any]] = []
     metrics = None
+    coordinator = ReadOnlyRefreshCoordinator()
     loaded = {name: False for name in NAVIGATION_AREAS}
 
     with ui.header().classes("items-center justify-between shadow-sm"):
@@ -61,6 +68,7 @@ async def index() -> None:
         with ui.row().classes("items-center"):
             spinner = ui.spinner(size="lg")
             status = ui.label("Loading portfolio and history from read-only databases…")
+            refresh_button = ui.button("Refresh Data", icon="refresh")
         with ui.tabs().classes("w-full") as tabs:
             tab_objects = {name: ui.tab(name) for name in NAVIGATION_AREAS}
         with ui.tab_panels(tabs, value=tab_objects["Holdings"]).classes("w-full"):
@@ -264,9 +272,26 @@ async def index() -> None:
         elif name == "History" and not loaded["History"]: render_history()
 
     tabs.on_value_change(navigate)
+    async def refresh_data(force: bool = False) -> None:
+        nonlocal holdings,history,metrics
+        result = await run.io_bound(coordinator.refresh,force)
+        if not result.portfolio_changed and not result.history_changed:
+            return
+        if result.portfolio_changed:
+            holdings=result.holdings or [];metrics=result.metrics
+            render_holdings()
+            for name in ("Portfolio Analysis","Portfolio Insights","Portfolio Health"):
+                loaded[name]=False;areas[name].clear()
+                with areas[name]: ui.label("Portfolio data changed; this section will refresh when opened.").classes("text-gray-500")
+        if result.history_changed:
+            history=result.history or []
+            if loaded["History"]: render_history()
+        status.set_text(f"Refreshed {len(holdings)} holdings and {len(history)} history points")
+    refresh_button.on_click(lambda: refresh_data(True))
+    ui.timer(DB_REFRESH_INTERVAL_SECONDS,lambda: refresh_data(False))
     try:
-        holdings, history = await asyncio.gather(run.io_bound(load_holdings), run.io_bound(load_history))
-        metrics = await run.io_bound(metrics_frame, holdings)
+        initial=await run.io_bound(coordinator.refresh,True)
+        holdings=initial.holdings or [];history=initial.history or [];metrics=initial.metrics
         render_holdings()
         status.set_text(f"Loaded {len(holdings)} holdings and {len(history)} history points")
     except Exception as exc:
