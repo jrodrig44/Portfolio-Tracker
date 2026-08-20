@@ -61,7 +61,7 @@ async def index() -> None:
             with ui.tab_panel(history_tab):
                 with ui.row().classes("items-center gap-3"):
                     ui.label("Range")
-                    range_select = ui.toggle(HISTORY_RANGE_OPTIONS, value=DEFAULT_HISTORY_RANGE)
+                    range_select = ui.toggle(list(HISTORY_RANGE_OPTIONS), value=DEFAULT_HISTORY_RANGE)
                 history_area = ui.column().classes("w-full")
 
     def render_overview() -> None:
