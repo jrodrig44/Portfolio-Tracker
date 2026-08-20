@@ -1834,8 +1834,35 @@ def _derive_yahoo_historical_price_context(entry: dict[str, object]) -> dict[str
         return None
 
 
-def _summarize_yahoo_historical_price_context(entry: dict[str, object]) -> str:
+def _canonical_supplemental_history_record(entry: object) -> dict[str, object] | None:
+    if not isinstance(entry, dict):
+        return None
     derived = _derive_yahoo_historical_price_context(entry)
+    if derived:
+        return {**entry, **derived}
+
+    ticker = str(entry.get("ticker", "")).strip().upper()
+    start_price = _coerce_finite_number(entry.get("start_price"))
+    end_price = _coerce_finite_number(entry.get("end_price"))
+    if not ticker or start_price is None or end_price is None or start_price <= 0 or end_price <= 0:
+        return None
+    return {
+        **entry,
+        "ticker": ticker,
+        "start_price": start_price,
+        "end_price": end_price,
+        "return_pct": _coerce_finite_number(entry.get("return_pct", entry.get("period_return_pct"))),
+        "52w_high": _coerce_finite_number(entry.get("52w_high")),
+        "52w_low": _coerce_finite_number(entry.get("52w_low")),
+        "drawdown": _coerce_finite_number(entry.get("drawdown")),
+        "volatility": _coerce_finite_number(entry.get("volatility")),
+        "source": str(entry.get("source", "Yahoo Finance") or "Yahoo Finance"),
+        "history_type": "supplemental_per_security_price_history",
+    }
+
+
+def _summarize_yahoo_historical_price_context(entry: dict[str, object]) -> str:
+    derived = _canonical_supplemental_history_record(entry)
     ticker = str(entry.get("ticker", "UNKNOWN"))
     if not derived:
         return f"{ticker}: no supplemental Yahoo price history available."
@@ -4117,33 +4144,44 @@ def _canonicalize_export_historical_context(payload: dict[str, object]) -> dict[
     supplemental = payload.get("supplemental_yahoo_historical_price_data", [])
     if not isinstance(supplemental, list):
         return payload
-    source_by_ticker = {
+    raw_by_ticker = {
         str(item.get("ticker", "")).strip().upper(): item
         for item in supplemental
         if isinstance(item, dict) and str(item.get("ticker", "")).strip()
     }
-    canonical_by_ticker = {
-        ticker: derived
-        for ticker, item in source_by_ticker.items()
-        for derived in [_derive_yahoo_historical_price_context(item)]
-        if isinstance(derived, dict)
-    }
-    if not canonical_by_ticker:
-        return payload
-
     existing_by_ticker = {
         str(item.get("ticker", "")).strip().upper(): item
         for item in payload.get("historical_context", [])
         if isinstance(item, dict) and str(item.get("ticker", "")).strip()
     }
+    holding_tickers = [
+        str(item.get("ticker", "")).strip().upper()
+        for item in payload.get("holdings", [])
+        if isinstance(item, dict) and str(item.get("ticker", "")).strip()
+    ]
+    ordered_tickers = list(dict.fromkeys([*holding_tickers, *raw_by_ticker, *existing_by_ticker]))
+    finalized_supplemental: list[dict[str, object]] = []
+    canonical_by_ticker: dict[str, dict[str, object]] = {}
+    for ticker in ordered_tickers:
+        raw = raw_by_ticker.get(ticker, {"ticker": ticker})
+        canonical = _canonical_supplemental_history_record(raw)
+        if canonical is None:
+            canonical = _canonical_supplemental_history_record(existing_by_ticker.get(ticker))
+        finalized = {**raw, **canonical} if canonical else raw
+        finalized["ticker"] = ticker
+        finalized_supplemental.append(finalized)
+        if canonical:
+            canonical_by_ticker[ticker] = canonical
+
     for ticker, derived in canonical_by_ticker.items():
         existing_by_ticker[ticker] = {
             **existing_by_ticker.get(ticker, {}),
             **derived,
-            "history_summary": _summarize_yahoo_historical_price_context(source_by_ticker[ticker]),
+            "history_summary": _summarize_yahoo_historical_price_context(derived),
         }
 
     result = dict(payload)
+    result["supplemental_yahoo_historical_price_data"] = finalized_supplemental
     result["historical_context"] = list(existing_by_ticker.values())
     compatibility_historical = {"by_ticker": _historical_contract_records(existing_by_ticker)}
     result["historical"] = compatibility_historical
@@ -4385,10 +4423,17 @@ def build_data_completeness_section(export_payload: dict[str, object]) -> list[s
     unresolved_pct = unresolved_value / fund_total * 100 if fund_total > 0 else 0.0
     holdings = export_payload.get("holdings", []) if isinstance(export_payload.get("holdings", []), list) else []
     supplemental_history = export_payload.get("supplemental_yahoo_historical_price_data", []) if isinstance(export_payload.get("supplemental_yahoo_historical_price_data", []), list) else []
+    exported_tickers = {
+        str(item.get("ticker", "")).strip().upper()
+        for item in holdings
+        if isinstance(item, dict) and str(item.get("ticker", "")).strip()
+    }
     available_history_tickers = {
         str(item.get("ticker", "")).strip().upper()
         for item in supplemental_history
-        if isinstance(item, dict) and _derive_yahoo_historical_price_context(item)
+        if isinstance(item, dict)
+        and str(item.get("ticker", "")).strip().upper() in exported_tickers
+        and _canonical_supplemental_history_record(item)
     }
     ticker_history_coverage = len(available_history_tickers) / len(holdings) * 100.0 if holdings else 100.0
     validation = export_payload.get("snapshot_validation", {}) if isinstance(export_payload.get("snapshot_validation", {}), dict) else {}

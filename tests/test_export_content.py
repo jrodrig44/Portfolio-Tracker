@@ -126,6 +126,60 @@ class ExportMarkdownTests(unittest.TestCase):
         self.assertIn("(No data available)", markdown)
         self.assertNotIn("return 0.00%", markdown)
 
+    def test_finalized_canonical_history_drives_json_markdown_and_coverage(self) -> None:
+        raw_available = {
+            "ticker": "AAPL",
+            "date_range": {"start": "2025-01-01", "end": "2025-12-31"},
+            "historical_price_data": [
+                {"date": "2025-01-01", "open": 100, "high": 101, "low": 99, "close": 100},
+                {"date": "2025-12-31", "open": 110, "high": 112, "low": 108, "close": 111},
+            ],
+        }
+        payload = {
+            "holdings": [{"ticker": "AAPL"}, {"ticker": "APLE"}, {"ticker": "NOPE"}],
+            "supplemental_yahoo_historical_price_data": [raw_available, {"ticker": "APLE"}, {"ticker": "NOPE"}],
+            "historical_context": [
+                {
+                    "ticker": "APLE",
+                    "start_date": "2025-01-01",
+                    "end_date": "2025-12-31",
+                    "start_price": 12.0,
+                    "end_price": 15.0,
+                    "return_pct": 25.0,
+                    "52w_high": 16.0,
+                    "52w_low": 10.0,
+                    "drawdown": -8.0,
+                    "volatility": 2.5,
+                    "source": "Yahoo Finance",
+                },
+                {"ticker": "NOPE", "start_price": None, "end_price": None},
+            ],
+            "unified_snapshot": {"historical": {"by_ticker": []}},
+            "snapshot_validation": {"valid": True},
+        }
+
+        with patch("app.yf.Ticker") as yahoo_ticker:
+            finalized = app._canonicalize_export_historical_context(payload)
+            markdown = app.generate_export(finalized)
+        yahoo_ticker.assert_not_called()
+
+        supplemental_by_ticker = {row["ticker"]: row for row in finalized["supplemental_yahoo_historical_price_data"]}
+        compatibility_by_ticker = {row["ticker"]: row for row in finalized["historical"]["by_ticker"]}
+        context_by_ticker = {row["ticker"]: row for row in finalized["historical_context"]}
+        unified_by_ticker = {row["ticker"]: row for row in finalized["unified_snapshot"]["historical"]["by_ticker"]}
+
+        self.assertEqual(supplemental_by_ticker["APLE"]["end_price"], 15.0)
+        self.assertIn("APLE: supplemental Yahoo history 2025-01-01 to 2025-12-31", markdown)
+        self.assertIn("NOPE: no supplemental Yahoo price history available.", markdown)
+        self.assertIn("Supplemental ticker-history coverage: 66.7% of holdings with usable Yahoo price history", markdown)
+        self.assertEqual(set(compatibility_by_ticker), set(context_by_ticker))
+        self.assertEqual(set(compatibility_by_ticker), set(unified_by_ticker))
+        self.assertEqual(
+            {ticker for ticker, row in supplemental_by_ticker.items() if app._canonical_supplemental_history_record(row)},
+            {"AAPL", "APLE"},
+        )
+        self.assertIsNone(compatibility_by_ticker["NOPE"]["start_price"])
+
     def test_export_score_labels_coverage_and_markdown_deduplication(self) -> None:
         payload = {
             "export_version": "test",
