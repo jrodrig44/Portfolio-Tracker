@@ -14,6 +14,7 @@ from nicegui_app.services.ai_context import AIAnalysisState,ai_options,run_ai_an
 from nicegui_app.services.analysis import analysis_package
 from nicegui_app.services.configuration import DB_REFRESH_INTERVAL_SECONDS
 from nicegui_app.services.exports import export_package
+from nicegui_app.services.formatting import FULL_WIDTH_CONTROL, RESPONSIVE_ACTIONS, RESPONSIVE_CARD_GRID, SCROLL_TABLE, format_count, format_currency, format_field_value, format_percentage, format_score, format_status, format_table_records, human_label
 from nicegui_app.services.health import health_package
 from nicegui_app.services.history import history_package
 from nicegui_app.services.insights import insights_package
@@ -26,20 +27,33 @@ PORT = 8502
 NAVIGATION_AREAS = ("Holdings", "Portfolio Analysis", "AI Analysis", "Portfolio Insights", "Portfolio Health", "History")
 
 
-def currency(value: float) -> str:
-    return f"${float(value or 0.0):,.2f}"
+def currency(value: Any) -> str:
+    return format_currency(value)
 
 
-def percent(value: float) -> str:
-    return f"{float(value or 0.0):,.2f}%"
+def percent(value: Any) -> str:
+    return format_percentage(value)
 
 
 def metric_cards(items: list[tuple[str, str]]) -> None:
-    with ui.row().classes("w-full gap-3"):
+    with ui.element("div").classes(RESPONSIVE_CARD_GRID):
         for label, value in items:
-            with ui.card().classes("min-w-48 grow"):
+            with ui.card().classes("w-full min-w-0"):
                 ui.label(label).classes("text-xs uppercase tracking-wide text-gray-500")
-                ui.label(value).classes("text-2xl font-semibold")
+                ui.label(value).classes("text-xl sm:text-2xl font-semibold break-words")
+
+
+def detail_cards(items: list[tuple[str, Any]]) -> None:
+    with ui.element("div").classes(RESPONSIVE_CARD_GRID):
+        for label, value in items:
+            with ui.card().classes("w-full min-w-0 py-3"):
+                ui.label(label).classes("text-xs uppercase tracking-wide text-gray-500")
+                ui.label(str(value)).classes("text-base font-medium break-words")
+
+
+def guidance_text(text: Any) -> None:
+    if str(text or "").strip():
+        ui.label(str(text).strip()).classes("w-full rounded-lg bg-blue-50 p-3 text-sm leading-relaxed text-blue-900")
 
 
 def records_table(records: list[dict[str, Any]], title: str | None = None) -> None:
@@ -48,9 +62,12 @@ def records_table(records: list[dict[str, Any]], title: str | None = None) -> No
     if not records:
         ui.label("No data available.").classes("text-gray-500")
         return
-    keys = list(records[0].keys())
-    columns = [{"name": key, "label": key.replace("_", " ").title(), "field": key, "sortable": True} for key in keys]
-    ui.table(columns=columns, rows=records, pagination=15).classes("w-full").props("dense flat bordered")
+    columns, rows = format_table_records(records)
+    if not columns:
+        ui.label("No displayable values are available.").classes("text-gray-500")
+        return
+    with ui.element("div").classes(SCROLL_TABLE):
+        ui.table(columns=columns, rows=rows, pagination=15).classes("w-full min-w-max").props("dense flat bordered")
 
 
 @ui.page("/")
@@ -63,15 +80,17 @@ async def index() -> None:
     coordinator = ReadOnlyRefreshCoordinator(market_loader=current_market_data)
     loaded = {name: False for name in NAVIGATION_AREAS}
 
-    with ui.header().classes("items-center justify-between shadow-sm"):
-        ui.label("Portfolio Tracker · NiceGUI Mirror").classes("text-xl font-semibold")
-        ui.label("Read only · Experimental").classes("rounded bg-white/20 px-3 py-1 text-sm")
-    with ui.column().classes("w-full max-w-screen-2xl mx-auto p-4 gap-4"):
-        with ui.row().classes("items-center"):
+    with ui.header().classes("flex-wrap items-center justify-between gap-2 shadow-sm px-3 sm:px-5"):
+        ui.label("Portfolio Tracker").classes("text-lg sm:text-xl font-semibold")
+        ui.label("Read only · NiceGUI").classes("rounded bg-white/20 px-3 py-1 text-xs sm:text-sm")
+    with ui.column().classes("w-full max-w-screen-2xl mx-auto p-2 sm:p-4 gap-4"):
+        with ui.row().classes("w-full flex-wrap items-center gap-2"):
             spinner = ui.spinner(size="lg")
-            status = ui.label("Loading portfolio and history from read-only databases…")
-            refresh_button = ui.button("Refresh Data", icon="refresh")
-        with ui.tabs().classes("w-full") as tabs:
+            status = ui.label("Loading portfolio and history from read-only databases…").classes("grow text-sm break-words")
+            refresh_button = ui.button("Refresh Data", icon="refresh").classes("min-h-11")
+        with ui.element("div").classes("w-full max-w-full overflow-x-auto"):
+            tabs = ui.tabs().classes("w-max min-w-full").props("mobile-arrows outside-arrows")
+        with tabs:
             tab_objects = {name: ui.tab(name) for name in NAVIGATION_AREAS}
         with ui.tab_panels(tabs, value=tab_objects["Holdings"]).classes("w-full"):
             areas: dict[str, Any] = {}
@@ -87,21 +106,27 @@ async def index() -> None:
         with area:
             ui.label("Holdings").classes("text-2xl font-semibold")
             ui.label("Current stored portfolio data. Editing is intentionally disabled.").classes("text-gray-500")
-            metric_cards([("Portfolio value", currency(summary["portfolio_value"])), ("Cost basis", currency(summary["cost_basis"])), ("Unrealized gain/loss", currency(summary["unrealized_gain"])), ("Estimated annual income", currency(summary["annual_income"])), ("Weighted yield", percent(summary["weighted_yield_pct"])), ("Holdings", str(summary["holding_count"])), ("Largest holding", str(summary["largest_holding"])), ("Largest weight", percent(summary["largest_weight_pct"]))])
+            metric_cards([("Portfolio value", currency(summary["portfolio_value"])), ("Cost basis", currency(summary["cost_basis"])), ("Unrealized gain/loss", currency(summary["unrealized_gain"])), ("Estimated annual income", currency(summary["annual_income"])), ("Weighted yield", percent(summary["weighted_yield_pct"])), ("Holdings", format_count(summary["holding_count"])), ("Largest holding", str(summary["largest_holding"])), ("Largest weight", percent(summary["largest_weight_pct"]))])
             fields = (("ticker", "Ticker"), ("shares", "Shares"), ("current_price", "Current Price"), ("market_value", "Market Value"), ("average_cost", "Average Cost"), ("cost_basis", "Cost Basis"), ("unrealized_gain", "Unrealized G/L"), ("dividend_yield_pct", "Dividend Yield %"), ("annual_income", "Annual Income"), ("asset_type", "Asset Type"), ("sector", "Sector"), ("regular_biweekly_contribution", "Regular Biweekly"), ("espp_biweekly_contribution", "ESPP Biweekly"), ("special_contribution", "Special Contribution"), ("employer_stock", "Employer Stock"), ("espp_enabled", "ESPP"))
-            columns = [{"name": key, "label": label, "field": key, "sortable": True} for key, label in fields]
-            ui.table(columns=columns, rows=display_holdings, row_key="ticker", pagination=25).classes("w-full").props("dense flat bordered")
+            selected_rows = [{key: row.get(key) for key, _ in fields} for row in display_holdings]
+            columns, rows = format_table_records(selected_rows)
+            labels = dict(fields)
+            for column in columns:
+                column["label"] = labels.get(column["name"], column["label"])
+            with ui.element("div").classes(SCROLL_TABLE):
+                ui.table(columns=columns, rows=rows, row_key="ticker", pagination=25).classes("w-full min-w-max").props("dense flat bordered")
             ui.label("Read-only exports").classes("text-lg font-semibold mt-3")
+            ui.label("Generate a fresh read-only snapshot, then download it in the format you need.").classes("text-sm text-gray-500")
             async def download_export(filename: str) -> None:
                 try:
                     package = await run.io_bound(export_package, holdings, metrics, history=history)
                     ui.download(package[filename].encode("utf-8"), filename)
                 except Exception as exc:
                     ui.notify(f"Export failed: {exc}", type="negative")
-            with ui.row().classes("gap-2"):
-                ui.button("Holdings CSV", on_click=lambda: download_export("holdings.csv"))
-                ui.button("Comprehensive Markdown", on_click=lambda: download_export("portfolio_export.md"))
-                ui.button("Structured JSON", on_click=lambda: download_export("portfolio_export.json"))
+            with ui.element("div").classes(RESPONSIVE_ACTIONS):
+                ui.button("Holdings CSV", icon="table_view", on_click=lambda: download_export("holdings.csv")).classes("w-full sm:w-auto min-h-11")
+                ui.button("Portfolio report", icon="description", on_click=lambda: download_export("portfolio_export.md")).classes("w-full sm:w-auto min-h-11")
+                ui.button("Structured data", icon="data_object", on_click=lambda: download_export("portfolio_export.json")).classes("w-full sm:w-auto min-h-11")
         loaded["Holdings"] = True
 
     async def render_analysis() -> None:
@@ -124,7 +149,18 @@ async def index() -> None:
                 with ui.expansion("Direct sector exposure").classes("w-full"):
                     records_table(package["direct_sector"])
                 with ui.expansion("Concentration and ESPP context").classes("w-full"):
-                    ui.json_editor({"content": {"json": package["concentration"]}}).props("read-only")
+                    concentration = package.get("concentration", {})
+                    employers = concentration.get("employer_stock", []) if isinstance(concentration, dict) else []
+                    employer = employers[0] if employers and isinstance(employers[0], dict) else {}
+                    detail_cards([
+                        ("Largest holding", f"{concentration.get('largest_holding_by_value', 'N/A')} — {percent(concentration.get('largest_holding_weight_pct'))}"),
+                        ("Largest income source", f"{concentration.get('largest_income_contributor', 'N/A')} — {percent(concentration.get('largest_income_weight_pct'))}"),
+                        ("Employer stock", employer.get("ticker", "None identified")),
+                        ("Capital concentration", percent(employer.get("capital_concentration_pct")) if employer else "Not applicable"),
+                        ("Income concentration", percent(employer.get("income_concentration_pct")) if employer else "Not applicable"),
+                        ("ESPP", format_status(bool(concentration.get("espp_concentration_flag")), enabled="Active", disabled="Not active")),
+                    ])
+                    guidance_text(concentration.get("guidance"))
                 with ui.expansion("Contribution allocation").classes("w-full"):
                     records_table(package["contributions"].get("holdings", []))
                 with ui.expansion("Income allocation and quality").classes("w-full"):
@@ -132,7 +168,7 @@ async def index() -> None:
                     records_table(package["income_quality"], "Income quality")
                 with ui.expansion("Projections and milestones").classes("w-full"):
                     snapshot = package["snapshot"]
-                    metric_cards([("Projected 10-year value", currency(snapshot["projected_10y_value"])), ("Projected 20-year value", currency(snapshot["projected_20y_value"])), ("Active contributors", str(summary.get("active_contributors", 0)))])
+                    metric_cards([("Projected 10-year value", currency(snapshot["projected_10y_value"])), ("Projected 20-year value", currency(snapshot["projected_20y_value"])), ("Active contributors", format_count(summary.get("active_contributors", 0)))])
                     ui.label(snapshot["projection_contribution_note"]).classes("text-gray-500")
                 with ui.expansion("Yahoo intelligence and supplemental historical context").classes("w-full"):
                     ui.label("Network-heavy Yahoo intelligence is demand-driven. No research refresh controls are exposed.")
@@ -161,7 +197,7 @@ async def index() -> None:
                             pending.set_text(f"Yahoo intelligence could not be loaded: {exc}")
                         finally:
                             yahoo_button.enable()
-                    yahoo_button = ui.button("Load Yahoo intelligence", on_click=load_yahoo_intelligence)
+                    yahoo_button = ui.button("Load Yahoo intelligence", on_click=load_yahoo_intelligence).classes("w-full sm:w-auto min-h-11")
         except Exception as exc:
             area.clear()
             with area:
@@ -178,12 +214,15 @@ async def index() -> None:
             ui.label("No request is sent until Analyze is clicked. Uses existing compact context and the 1min.AI provider.").classes("text-gray-500")
             if not options["configured"]:
                 ui.label("ONEMIN_AI_API_KEY is not configured in the local environment.").classes("text-amber-700")
-            analysis_type = ui.select(options["analysis_types"], value=options["analysis_types"][0], label="Analysis type").classes("w-full max-w-xl")
-            model = ui.select(options["models"], value=options["default_model"], label="Model").classes("w-full max-w-xl")
-            instructions = ui.textarea(label="Optional instructions").classes("w-full")
-            output = ui.markdown("").classes("w-full")
-            status = ui.label("").classes("text-gray-500")
-            context_size = ui.label("").classes("text-gray-500")
+            with ui.element("div").classes("w-full grid grid-cols-1 md:grid-cols-2 gap-3"):
+                analysis_type = ui.select(options["analysis_types"], value=options["analysis_types"][0], label="Analysis type").classes(FULL_WIDTH_CONTROL)
+                model = ui.select(options["models"], value=options["default_model"], label="Model").classes(FULL_WIDTH_CONTROL)
+            instructions = ui.textarea(label="Optional instructions").classes("w-full").props("autogrow")
+            with ui.card().classes("w-full min-h-32"):
+                ui.label("Latest analysis").classes("text-lg font-semibold")
+                output = ui.markdown("No analysis has been run yet.").classes("w-full max-w-none break-words")
+            status = ui.label("").classes("w-full text-sm text-gray-600 break-words")
+            context_size = ui.label("").classes("w-full text-xs text-gray-500 break-words")
             state = AIAnalysisState()
             request_active = {"value": False}
             async def analyze() -> None:
@@ -209,12 +248,13 @@ async def index() -> None:
                     button.enable()
             def clear_analysis() -> None:
                 state.clear()
-                output.set_content("")
+                output.set_content("No analysis has been run yet.")
                 status.set_text("")
                 context_size.set_text("")
-            button = ui.button("Analyze", on_click=analyze, color="primary")
-            ui.button("Clear Displayed Analysis", on_click=clear_analysis)
-            ui.button("Download AI Markdown", on_click=lambda: ui.download(state.result_markdown.encode("utf-8"), "ai_analysis.md"))
+            with ui.element("div").classes(RESPONSIVE_ACTIONS):
+                button = ui.button("Analyze", on_click=analyze, icon="auto_awesome", color="primary").classes("w-full sm:w-auto min-h-11")
+                ui.button("Clear analysis", icon="clear", on_click=clear_analysis).classes("w-full sm:w-auto min-h-11")
+                ui.button("Download Markdown", icon="download", on_click=lambda: ui.download(state.result_markdown.encode("utf-8"), "ai_analysis.md")).classes("w-full sm:w-auto min-h-11")
         loaded["AI Analysis"] = True
 
     async def render_insights() -> None:
@@ -236,14 +276,17 @@ async def index() -> None:
             with ui.expansion("Contribution observations").classes("w-full"):
                 records_table(package["contribution"]["rows"])
             with ui.expansion("Yield and income observations").classes("w-full"):
-                ui.json_editor({"content": {"json": package["yield"]}}).props("read-only")
+                yield_context = package.get("yield", {})
+                detail_cards([(human_label(key), format_field_value(key, value)) for key, value in yield_context.items() if not isinstance(value, (dict, list))])
                 records_table(package.get("income_allocation", []), "Income allocation by asset type")
                 records_table(package.get("income_quality", []), "Income quality")
             with ui.expansion("Fund look-through and completeness").classes("w-full"):
                 fund_context = package.get("fund_lookthrough", {})
                 records_table(fund_context.get("records", []), "Resolved fund exposure")
                 records_table(fund_context.get("unresolved_records", []), "Unresolved fund exposure")
-                ui.json_editor({"content": {"json": package.get("data_completeness", {})}}).props("read-only")
+                completeness = package.get("data_completeness", {})
+                ui.label("Data completeness").classes("text-lg font-semibold mt-3")
+                detail_cards([(human_label(key), format_field_value(key, value)) for key, value in completeness.items()])
         loaded["Portfolio Insights"] = True
 
     async def render_health() -> None:
@@ -259,7 +302,7 @@ async def index() -> None:
             with area:
                 ui.label("Portfolio Health").classes("text-2xl font-semibold")
                 ui.label(str(package.get("disclaimer", "Tracker-generated and not an objective investment rating."))).classes("font-semibold text-amber-700")
-                metric_cards([("Overall health score", f"{float(package.get('health_score', 0.0)):.1f}/100"), ("Largest holding", str(package.get("largest_holding", "N/A"))), ("Largest holding weight", percent(package.get("largest_holding_weight", 0.0)))])
+                metric_cards([("Overall health score", format_score(package.get("health_score"), out_of_100=True)), ("Largest holding", str(package.get("largest_holding", "N/A"))), ("Largest holding weight", percent(package.get("largest_holding_weight", 0.0)))])
                 records_table([{"component": key, "score": value} for key, value in package.get("subscores", {}).items()], "Component scores")
                 records_table(package.get("strongest_areas", []), "Strongest areas")
                 records_table(package.get("weakest_areas", []), "Weakest areas")
@@ -283,7 +326,8 @@ async def index() -> None:
         with area:
             ui.label("Historical Portfolio Value").classes("text-2xl font-semibold")
             ui.label("Nominal account value only—not investment return. No interpolation; monthly and live snapshot points are retained.").classes("text-gray-500")
-            selector = ui.toggle(list(HISTORY_RANGE_OPTIONS), value=selected_range)
+            with ui.element("div").classes("w-full max-w-full overflow-x-auto"):
+                selector = ui.toggle(list(HISTORY_RANGE_OPTIONS), value=selected_range).classes("min-w-max")
             chart_area = ui.column().classes("w-full")
             def update_chart(range_name: str) -> None:
                 nonlocal history_range
@@ -295,7 +339,7 @@ async def index() -> None:
                         ui.label("No historical values are available.")
                         return
                     summary = package["summary"]
-                    metric_cards([("Starting value", currency(summary["starting_portfolio_value"])), ("Ending value", currency(summary["ending_portfolio_value"])), ("Value change", currency(summary["absolute_change"])), ("Value change %", percent(summary["percentage_change"])), ("History points", str(summary["point_count"]))])
+                    metric_cards([("Starting value", currency(summary["starting_portfolio_value"])), ("Ending value", currency(summary["ending_portfolio_value"])), ("Value change", currency(summary["absolute_change"])), ("Value change %", percent(summary["percentage_change"])), ("History points", format_count(summary["point_count"]))])
                     ui.echart({"tooltip": {"trigger": "axis"}, "xAxis": {"type": "category", "data": package["series"]["dates"]}, "yAxis": {"type": "value", "scale": True, "axisLabel": {"formatter": "${value}"}}, "series": [{"name": "Portfolio value", "type": "line", "data": package["series"]["portfolio_values"], "areaStyle": {"opacity": 0.12}}]}).classes("w-full h-96")
             selector.on_value_change(lambda event: update_chart(str(event.value)))
             update_chart(selected_range)
