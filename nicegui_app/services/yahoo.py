@@ -5,7 +5,7 @@ from typing import Any
 import pandas as pd
 import yfinance as yf
 
-from nicegui_app.services.configuration import PRICE_CACHE_TTL_SECONDS,YAHOO_CACHE_TTL_SECONDS,YAHOO_METADATA_CACHE_TTL_SECONDS
+from nicegui_app.services.configuration import FUND_SECTOR_WEIGHTS_CACHE_TTL_SECONDS,PRICE_CACHE_TTL_SECONDS,YAHOO_CACHE_TTL_SECONDS,YAHOO_METADATA_CACHE_TTL_SECONDS
 from portfolio_analysis import resolve_fund_lookthrough
 
 _cache: dict[tuple[str,str],tuple[float,Any]]={}
@@ -71,7 +71,7 @@ def yahoo_intelligence_package(metrics:pd.DataFrame)->dict[str,Any]:
         def load_fund_weights(p=proxy):
             funds_data=getattr(p,"funds_data",None);raw=getattr(funds_data,"sector_weightings",None) if funds_data is not None else None
             return dict(raw) if hasattr(raw,"items") else {}
-        weights=_cached((ticker,"fund_sector_weights"),load_fund_weights,3600.0)
+        weights=_cached((ticker,"fund_sector_weights"),load_fund_weights,FUND_SECTOR_WEIGHTS_CACHE_TTL_SECONDS)
         if weights:fund_weights[ticker]=weights
     resolved=resolve_fund_lookthrough(metrics,fund_weights)
     return {"investment_intelligence":intelligence,"lookthrough":resolved["records"],"unresolved_lookthrough":resolved["unresolved_records"],"fund_lookthrough":resolved,"fund_weights":fund_weights,"seasonality":{"monthly_income":monthly,"chart_available":any(monthly.values()),"message":"Estimated distribution of current annual portfolio income based on available historical dividend timing."},"historical_context":historical}

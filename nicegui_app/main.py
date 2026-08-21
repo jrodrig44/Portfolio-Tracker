@@ -25,12 +25,13 @@ from nicegui_app.services.portfolio_data import DEFAULT_HISTORY_RANGE,HISTORY_RA
 from nicegui_app.services.refresh import ReadOnlyRefreshCoordinator
 from nicegui_app.services.yahoo import current_market_data,yahoo_intelligence_package
 from portfolio_holdings_write import ASSET_TYPES, HoldingsWriteService, summarize_contributions
+from portfolio_operations import format_interval, operational_status
 from portfolio_research import PortfolioResearchService, research_contexts
 from portfolio_statement_history import StatementHistoryService, statement_display_records
 
 HOST = "0.0.0.0"
 PORT = 8502
-NAVIGATION_AREAS = ("Holdings", "Portfolio Analysis", "AI Analysis", "Portfolio Insights", "Portfolio Health", "History", "Statement History", "Supplemental Research")
+NAVIGATION_AREAS = ("Holdings", "Portfolio Analysis", "AI Analysis", "Portfolio Insights", "Portfolio Health", "History", "Statement History", "Supplemental Research", "System")
 
 
 def currency(value: Any) -> str:
@@ -756,6 +757,49 @@ async def index() -> None:
             update_chart(selected_range)
         loaded["History"] = True
 
+    def render_system() -> None:
+        if loaded["System"]:
+            return
+        package = operational_status(
+            coordinator.portfolio_path,
+            statement_service.source_dir,
+            coordinator.history_path,
+            application_port=PORT,
+            database_refresh_interval_seconds=DB_REFRESH_INTERVAL_SECONDS,
+        )
+        portfolio_db = package["portfolio_database"]
+        storage = package["statement_storage"]
+        statement_folder = storage["folder"]
+        history_db = storage["history_database"]
+        application = package["application"]
+        area = areas["System"]
+        with area:
+            ui.label("System").classes("text-2xl font-semibold")
+            ui.label("Read-only application and local storage status. Use the global Refresh Data action to refresh portfolio data.").classes("text-gray-500")
+            ui.label("Runtime").classes("text-lg font-semibold mt-2")
+            detail_cards([
+                ("Application", application["framework"]),
+                ("Application port", application["port"]),
+                ("Database refresh interval", f'{application["database_refresh_interval_seconds"]} seconds'),
+            ])
+            ui.label("Portfolio database").classes("text-lg font-semibold mt-2")
+            detail_cards([
+                ("Status", portfolio_db["status"]),
+                ("Configured path", portfolio_db["path"]),
+            ])
+            ui.label("Statement storage").classes("text-lg font-semibold mt-2")
+            detail_cards([
+                ("Statements folder", statement_folder["status"]),
+                ("Statements folder path", statement_folder["path"]),
+                ("PDFs detected", format_count(statement_folder["pdf_count"])),
+                ("Statement history database", history_db["status"]),
+                ("Statement history database path", history_db["path"]),
+            ])
+            ui.label("Cache behavior").classes("text-lg font-semibold mt-2")
+            ui.label("These intervals are informational. Cache refreshes continue to use the application’s existing behavior.").classes("text-gray-500")
+            detail_cards([(name, format_interval(seconds)) for name, seconds in package["cache_intervals_seconds"].items()])
+        loaded["System"] = True
+
     async def navigate(event: Any) -> None:
         name = str(event.value)
         if name == "Portfolio Analysis": await render_analysis()
@@ -765,6 +809,7 @@ async def index() -> None:
         elif name == "History" and not loaded["History"]: render_history()
         elif name == "Statement History": await render_statement_history()
         elif name == "Supplemental Research": await render_supplemental_research()
+        elif name == "System": render_system()
 
     tabs.on_value_change(navigate)
     async def refresh_data(force: bool = False) -> None:
