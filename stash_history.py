@@ -380,21 +380,70 @@ def scan_state(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> dict[str, Any]:
         reclassify_scan_preview(db_path)
     preview_records = load_scan_preview(db_path)
     manual_records = load_manual_statement_reviews(db_path)
-    records = preview_records + manual_records
-    state.update({
-        "ready": sum(1 for record in records if record["status"] == "valid"),
-        "needs_review": sum(1 for record in records if record["status"] == "needs_review"),
-        "unparseable": sum(1 for record in records if record["status"] == "unparseable"),
-        "records": records,
-    })
+    imported_records = load_statement_history(db_path)
     expected_months = []
     year, month = 2021, 8
     while (year, month) <= (2026, 7):
         expected_months.append(f"{year:04d}-{month:02d}")
         year, month = (year + 1, 1) if month == 12 else (year, month + 1)
-    valid_months = [str(record["statement_end_date"])[:7] for record in records if record["status"] == "valid" and record.get("statement_end_date")]
-    duplicate_months = sorted({month for month in valid_months if valid_months.count(month) > 1})
-    state["monthly_continuity"] = {"complete": not (set(expected_months) - set(valid_months)) and not duplicate_months and all(record["confirmed"] for record in manual_records), "missing_month_count": len(set(expected_months) - set(valid_months)), "duplicate_month_count": len(duplicate_months), "missing_months": missing_statement_months(records)}
+    manual_months = {
+        str(record["statement_end_date"])[:7]
+        for record in manual_records
+        if record.get("status") == "valid" and record.get("confirmed") and record.get("statement_end_date")
+    }
+    imported_months = {
+        str(record["history_date"])[:7]
+        for record in imported_records
+        if record.get("history_date")
+    }
+    parsed_valid_months = {
+        str(record["statement_end_date"])[:7]
+        for record in preview_records
+        if record.get("status") == "valid" and record.get("statement_end_date")
+    }
+    verified_months = manual_months | imported_months | parsed_valid_months
+    verified_continuity_complete = not (set(expected_months) - verified_months)
+    reconciled_preview: list[dict[str, Any]] = []
+    for raw_record in preview_records:
+        record = dict(raw_record)
+        raw_status = str(record.get("status") or "unparseable")
+        statement_month = str(record.get("statement_end_date") or "")[:7]
+        resolved_by = None
+        if statement_month and statement_month in imported_months:
+            resolved_by = "imported_history"
+        elif statement_month and statement_month in manual_months:
+            resolved_by = "manual_review"
+        elif not statement_month and raw_status == "needs_review" and verified_continuity_complete:
+            resolved_by = "verified_history_coverage"
+        action_required = raw_status == "needs_review" and resolved_by is None
+        record.update({
+            "raw_status": raw_status,
+            "resolution_status": "already_imported" if resolved_by == "imported_history" else "manually_resolved" if resolved_by == "manual_review" else "covered_by_verified_history" if resolved_by == "verified_history_coverage" else "unresolved",
+            "resolved_by": resolved_by,
+            "action_required": action_required,
+            "effective_status": "needs_review" if action_required else "resolved" if resolved_by else raw_status,
+        })
+        reconciled_preview.append(record)
+    records = reconciled_preview + manual_records
+    ready_records = [
+        record for record in records
+        if record.get("status") == "valid"
+        and str(record.get("statement_end_date") or "")[:7] not in imported_months
+    ]
+    state.update({
+        "ready": len(ready_records),
+        "needs_review": sum(1 for record in reconciled_preview if record["action_required"]),
+        "manually_resolved": len(manual_months),
+        "previously_imported": sum(1 for record in reconciled_preview if record["resolution_status"] == "already_imported"),
+        "parser_review_flags": sum(1 for record in reconciled_preview if record["raw_status"] == "needs_review"),
+        "unparseable": sum(1 for record in reconciled_preview if record["raw_status"] == "unparseable"),
+        "records": records,
+    })
+    candidate_months = [str(record["statement_end_date"])[:7] for record in records if record["status"] == "valid" and record.get("statement_end_date") and str(record["statement_end_date"])[:7] not in imported_months]
+    represented_months = set(candidate_months) | imported_months
+    duplicate_months = sorted({month for month in candidate_months if candidate_months.count(month) > 1})
+    missing_months = sorted(set(expected_months) - represented_months)
+    state["monthly_continuity"] = {"complete": not missing_months and not duplicate_months and all(record["confirmed"] for record in manual_records), "missing_month_count": len(missing_months), "duplicate_month_count": len(duplicate_months), "missing_months": missing_months}
     state["diagnostics"] = {"header_found": sum(int(record.get("header_found", 0)) for record in records), "nearby_date_range_found": sum(int(record.get("nearby_date_range_found", 0)) for record in records), "nearby_account_marker_found": sum(int(record.get("nearby_account_marker_found", 0)) for record in records), "account_summary_found": sum(int(record.get("account_summary_found", 0)) for record in records), "balance_rows_found": sum(int(record.get("balance_rows_found", 0)) for record in records), "accounting_equation_passed": sum(int(record.get("accounting_equation_passed", 0)) for record in records)}
     return state
 

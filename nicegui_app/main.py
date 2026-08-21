@@ -113,185 +113,124 @@ async def index() -> None:
                     areas[name] = ui.column().classes("w-full gap-3")
 
     def render_holdings() -> None:
+        """Render the production-style single-grid holdings workflow."""
         area = areas["Holdings"]
         area.clear()
         display_holdings = metrics.to_dict(orient="records") if metrics is not None else holdings
         summary = portfolio_summary(display_holdings)
+        editable_fields = (
+            "ticker", "shares", "espp_acquired_shares", "amount_invested",
+            "annual_div_per_share", "regular_biweekly_contribution",
+            "espp_contribution_biweekly", "special_contribution", "is_espp",
+            "espp_discount", "espp_purchase_frequency_months", "sector", "asset_type",
+        )
+        editor_rows = []
+        for stored in holdings:
+            editor_rows.append({
+                "_holding_id": stored["_holding_id"],
+                "_grid_key": f"existing-{stored['_holding_id']}",
+                **{field: stored.get(field, "") for field in editable_fields},
+                "espp_contribution_biweekly": stored.get("espp_biweekly_contribution", stored.get("espp_contribution_biweekly", 0.0)),
+                "is_espp": bool(stored.get("espp_enabled", stored.get("is_espp", False))),
+            })
+        labels = {
+            "ticker": "Ticker", "shares": "Shares", "espp_acquired_shares": "ESPP-Acquired Shares",
+            "amount_invested": "Amount Invested", "annual_div_per_share": "Annual Div/Share (Manual Override)",
+            "regular_biweekly_contribution": "Regular Bi-Weekly Contribution",
+            "espp_contribution_biweekly": "ESPP Bi-Weekly Contribution", "special_contribution": "Special Contribution",
+            "is_espp": "ESPP Holding", "espp_discount": "ESPP Discount (decimal)",
+            "espp_purchase_frequency_months": "ESPP Purchase Frequency (months)", "sector": "Sector", "asset_type": "Asset Type",
+        }
+        numeric_fields = set(editable_fields) - {"ticker", "sector", "asset_type", "is_espp"}
+        column_defs = [{"field": "_holding_id", "hide": True}, {"field": "_grid_key", "hide": True}]
+        for field in editable_fields:
+            definition: dict[str, Any] = {"field": field, "headerName": labels[field], "editable": True, "minWidth": 145}
+            if field in numeric_fields:
+                definition["type"] = "numericColumn"
+                definition["valueParser"] = "Number(params.newValue)"
+            elif field == "is_espp":
+                definition.update({"cellDataType": "boolean", "cellEditor": "agCheckboxCellEditor", "cellRenderer": "agCheckboxCellRenderer"})
+            elif field == "asset_type":
+                definition.update({"cellEditor": "agSelectCellEditor", "cellEditorParams": {"values": sorted(ASSET_TYPES)}})
+            column_defs.append(definition)
         with area:
             ui.label("Holdings").classes("text-2xl font-semibold")
-            ui.label("Add, edit, or remove holdings. Other portfolio data remains read-only.").classes("text-gray-500")
-            def holding_form(dialog: Any, existing: dict[str, Any] | None = None) -> None:
-                source = existing or {}
-                ticker = ui.input("Ticker", value=source.get("ticker", "")).classes(FULL_WIDTH_CONTROL)
-                with ui.element("div").classes("w-full grid grid-cols-1 sm:grid-cols-2 gap-3"):
-                    shares = ui.number("Shares", value=source.get("shares", 0.0), min=0, step=0.000001, format="%.6f").classes(FULL_WIDTH_CONTROL)
-                    espp_shares = ui.number("ESPP-acquired shares", value=source.get("espp_acquired_shares", 0.0), min=0, step=0.000001, format="%.6f").classes(FULL_WIDTH_CONTROL)
-                    invested = ui.number("Amount invested", value=source.get("amount_invested", source.get("cost_basis", 0.0)), min=0, step=0.01).classes(FULL_WIDTH_CONTROL)
-                    annual_dividend = ui.number("Annual dividend per share", value=source.get("annual_div_per_share", 0.0), min=0, step=0.01).classes(FULL_WIDTH_CONTROL)
-                    regular = ui.number("Regular biweekly contribution", value=source.get("regular_biweekly_contribution", 0.0), min=0, step=0.01).classes(FULL_WIDTH_CONTROL)
-                    espp = ui.number("ESPP biweekly contribution", value=source.get("espp_biweekly_contribution", source.get("espp_contribution_biweekly", 0.0)), min=0, step=0.01).classes(FULL_WIDTH_CONTROL)
-                    special = ui.number("Special contribution", value=source.get("special_contribution", 0.0), min=0, step=0.01).classes(FULL_WIDTH_CONTROL)
-                    discount_pct = source.get("espp_discount", 0.0)
-                    if not discount_pct:
-                        raw_pct = float(source.get("espp_discount_pct", 0.0) or 0.0)
-                        discount_pct = raw_pct / 100.0 if raw_pct > 1 else raw_pct
-                    discount = ui.number("ESPP discount (decimal)", value=discount_pct, min=0, max=1, step=0.01).classes(FULL_WIDTH_CONTROL)
-                    frequency = ui.number("ESPP purchase frequency (months)", value=source.get("espp_purchase_frequency_months", 6.0) or 6.0, min=1, step=1).classes(FULL_WIDTH_CONTROL)
-                    asset_type = ui.select(sorted(ASSET_TYPES), value=source.get("asset_type", "Stock") if source.get("asset_type", "Stock") in ASSET_TYPES else "Other", label="Asset type").classes(FULL_WIDTH_CONTROL)
-                sector = ui.input("Sector", value=source.get("sector", "")).classes(FULL_WIDTH_CONTROL)
-                is_espp = ui.checkbox("ESPP holding", value=bool(source.get("espp_enabled", source.get("is_espp", False))))
-                hd_notice = ui.label("HD production rules enforce zero regular/special contributions, ESPP enabled, a 15% discount, and a six-month purchase cadence. A non-positive ESPP amount uses the $100 fallback.").classes("hidden w-full rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900")
-                def apply_hd_presentation(value: Any) -> None:
-                    forced = str(value or "").strip().upper() == "HD"
-                    controls = (regular, special, discount, frequency, is_espp)
-                    if forced:
-                        regular.set_value(0); special.set_value(0); discount.set_value(0.15); frequency.set_value(6); is_espp.set_value(True)
-                        for control in controls: control.disable()
-                        hd_notice.classes(remove="hidden")
-                    else:
-                        for control in controls: control.enable()
-                        hd_notice.classes(add="hidden")
-                ticker.on_value_change(lambda event: apply_hd_presentation(event.value))
-                apply_hd_presentation(ticker.value)
-                busy = {"value": False}
-                async def save() -> None:
-                    if busy["value"]:
-                        return
-                    busy["value"] = True
-                    save_button.disable()
-                    values = {"ticker": ticker.value, "shares": shares.value, "espp_acquired_shares": espp_shares.value, "amount_invested": invested.value, "annual_div_per_share": annual_dividend.value, "regular_biweekly_contribution": regular.value, "espp_contribution_biweekly": espp.value, "special_contribution": special.value, "is_espp": is_espp.value, "espp_discount": discount.value, "espp_purchase_frequency_months": frequency.value, "sector": sector.value, "asset_type": asset_type.value}
-                    try:
-                        token = uuid.uuid4().hex
-                        if existing:
-                            await run.io_bound(holdings_writer.edit, int(existing["_holding_id"]), values, submission_token=token)
-                        else:
-                            await run.io_bound(holdings_writer.add, values, submission_token=token)
-                        dialog.close()
-                        await refresh_after_holding_write()
-                        ui.notify(f"{str(values['ticker']).strip().upper()} saved.", type="positive")
-                    except Exception as exc:
-                        ui.notify(str(exc), type="negative", timeout=0)
-                    finally:
-                        busy["value"] = False
-                        save_button.enable()
-                with ui.element("div").classes(RESPONSIVE_ACTIONS):
-                    save_button = ui.button("Save Holding", icon="save", on_click=save).classes("w-full sm:w-auto min-h-11")
-                    ui.button("Cancel", on_click=dialog.close).props("flat").classes("w-full sm:w-auto min-h-11")
-            def open_holding_dialog(existing: dict[str, Any] | None = None) -> None:
-                with ui.dialog() as dialog, ui.card().classes(DIALOG_CARD):
-                    ui.label("Edit Holding" if existing else "Add Holding").classes("text-xl font-semibold")
-                    holding_form(dialog, existing)
-                dialog.open()
-            ui.button("Add Holding", icon="add", on_click=lambda: open_holding_dialog()).classes("w-full sm:w-auto min-h-11")
+            ui.label("Manage Holdings").classes("text-xl font-semibold")
+            ui.label("Add, edit, or remove rows, then click Save when finished.").classes("text-gray-500")
+            ui.label("HD rows are normalized on Save: regular/special contributions are zero, ESPP is enabled with a 15% discount and six-month cadence, and a non-positive ESPP contribution uses $100.").classes("w-full rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900")
+            grid = ui.aggrid({
+                "columnDefs": column_defs,
+                "rowData": editor_rows,
+                "defaultColDef": {"resizable": True, "sortable": True},
+                "rowSelection": {"mode": "multiRow"},
+                "stopEditingWhenCellsLoseFocus": True,
+            }).classes("w-full h-96")
+            saving = {"value": False}
+
+            def add_grid_row() -> None:
+                grid.options["rowData"].append({
+                    "_holding_id": None, "_grid_key": f"new-{uuid.uuid4().hex}", "ticker": "", "shares": 0.0, "espp_acquired_shares": 0.0,
+                    "amount_invested": 0.0, "annual_div_per_share": 0.0,
+                    "regular_biweekly_contribution": 0.0, "espp_contribution_biweekly": 0.0,
+                    "special_contribution": 0.0, "is_espp": False, "espp_discount": 0.0,
+                    "espp_purchase_frequency_months": 6.0, "sector": "", "asset_type": "Stock",
+                })
+                grid.update()
+
+            async def remove_grid_rows() -> None:
+                selected = await grid.get_selected_rows()
+                if not selected:
+                    ui.notify("Select one or more grid rows to remove.", type="warning")
+                    return
+                selected_keys = {row.get("_grid_key") for row in selected}
+                grid.options["rowData"] = [
+                    row for row in grid.options["rowData"]
+                    if row.get("_grid_key") not in selected_keys
+                ]
+                grid.update()
+
+            async def save_grid() -> None:
+                if saving["value"]:
+                    return
+                saving["value"] = True
+                save_button.disable()
+                try:
+                    await grid.get_client_data()
+                    result = await run.io_bound(
+                        holdings_writer.save_grid,
+                        list(grid.options["rowData"]),
+                        expected_rows=list(holdings),
+                        submission_token=uuid.uuid4().hex,
+                    )
+                    await refresh_after_holding_write()
+                    result = result or {"added": 0, "updated": 0, "deleted": 0}
+                    ui.notify(f"Holdings saved: {result['added']} added, {result['updated']} updated, {result['deleted']} removed.", type="positive")
+                except Exception as exc:
+                    ui.notify(str(exc), type="negative", timeout=0)
+                finally:
+                    saving["value"] = False
+                    save_button.enable()
+
+            with ui.element("div").classes(RESPONSIVE_ACTIONS):
+                ui.button("Add Row", icon="add", on_click=add_grid_row).classes("w-full sm:w-auto min-h-11")
+                ui.button("Remove Selected Rows", icon="delete", color="negative", on_click=remove_grid_rows).classes("w-full sm:w-auto min-h-11")
+                save_button = ui.button("Save Holdings", icon="save", on_click=save_grid).classes("w-full sm:w-auto min-h-11")
+
             metric_cards([("Portfolio value", currency(summary["portfolio_value"])), ("Cost basis", currency(summary["cost_basis"])), ("Unrealized gain/loss", currency(summary["unrealized_gain"])), ("Estimated annual income", currency(summary["annual_income"])), ("Weighted yield", percent(summary["weighted_yield_pct"])), ("Holdings", format_count(summary["holding_count"])), ("Largest holding", str(summary["largest_holding"])), ("Largest weight", percent(summary["largest_weight_pct"]))])
-            contribution_totals = summarize_contributions(holdings)
-            contribution_expansion = ui.expansion("Contribution Settings", value=ui_state.expansion_value("contributions")).classes("w-full")
-            contribution_expansion.on_value_change(lambda event: ui_state.set_expansion("contributions", event.value))
-            with contribution_expansion:
-                ui.label("Regular and ESPP amounts repeat across 26 pay periods each year. Special contributions are one-time amounts and are never annualized.").classes("w-full rounded-lg bg-blue-50 p-3 text-sm text-blue-900 break-words")
-                metric_cards([
-                    ("Regular biweekly", currency(contribution_totals["regular_biweekly"])),
-                    ("Regular annual", currency(contribution_totals["regular_annual"])),
-                    ("ESPP biweekly", currency(contribution_totals["espp_biweekly"])),
-                    ("ESPP annual", currency(contribution_totals["espp_annual"])),
-                    ("Combined recurring biweekly", currency(contribution_totals["combined_biweekly"])),
-                    ("Combined recurring annual", currency(contribution_totals["combined_annual"])),
-                    ("Special contributions", currency(contribution_totals["special_contribution"])),
-                ])
-                def open_contribution_dialog(stored: dict[str, Any]) -> None:
-                    with ui.dialog() as dialog, ui.card().classes(DIALOG_CARD):
-                        ticker_text = str(stored.get("ticker", ""))
-                        ui.label(f"Contribution Settings · {ticker_text}").classes("text-xl font-semibold")
-                        ui.label("Special contribution is a separate amount and is not annualized.").classes("text-sm text-gray-500")
-                        regular = ui.number("Regular biweekly contribution", value=stored.get("regular_biweekly_contribution", 0.0), min=0, step=0.01).classes(FULL_WIDTH_CONTROL)
-                        special = ui.number("Special contribution (not recurring)", value=stored.get("special_contribution", 0.0), min=0, step=0.01).classes(FULL_WIDTH_CONTROL)
-                        espp_amount = ui.number("ESPP biweekly contribution", value=stored.get("espp_biweekly_contribution", 0.0), min=0, step=0.01).classes(FULL_WIDTH_CONTROL)
-                        discount = ui.number("ESPP discount (%)", value=stored.get("espp_discount_pct", 0.0), min=0, max=100, step=0.01).classes(FULL_WIDTH_CONTROL)
-                        frequency = ui.number("ESPP purchase frequency (months)", value=stored.get("espp_purchase_frequency_months", 6.0), min=1, step=1).classes(FULL_WIDTH_CONTROL)
-                        is_espp = ui.checkbox("ESPP enabled", value=bool(stored.get("espp_enabled", stored.get("is_espp", False))))
-                        if ticker_text.strip().upper() == "HD":
-                            ui.label("HD always uses zero regular/special contributions, a 15% discount, and a six-month cadence. A non-positive ESPP amount uses the $100 production fallback.").classes("rounded bg-amber-50 p-3 text-sm text-amber-900")
-                            regular.set_value(0); special.set_value(0); discount.set_value(15); frequency.set_value(6); is_espp.set_value(True)
-                            for control in (regular, special, discount, frequency, is_espp): control.disable()
-                        busy = {"value": False}
-                        async def save_contributions() -> None:
-                            if busy["value"]:
-                                return
-                            busy["value"] = True
-                            save_button.disable()
-                            values = {"regular_biweekly_contribution": regular.value, "special_contribution": special.value, "espp_contribution_biweekly": espp_amount.value, "espp_discount": discount.value, "espp_purchase_frequency_months": frequency.value, "is_espp": is_espp.value}
-                            try:
-                                await run.io_bound(holdings_writer.update_contributions, int(stored["_holding_id"]), values, submission_token=uuid.uuid4().hex)
-                                dialog.close()
-                                await refresh_after_holding_write()
-                                ui.notify(f"{ticker_text} contributions saved.", type="positive")
-                            except Exception as exc:
-                                ui.notify(str(exc), type="negative", timeout=0)
-                            finally:
-                                busy["value"] = False
-                                save_button.enable()
-                        with ui.element("div").classes(RESPONSIVE_ACTIONS):
-                            save_button = ui.button("Save Contributions", icon="save", on_click=save_contributions).classes("w-full sm:w-auto min-h-11")
-                            ui.button("Cancel", on_click=dialog.close).props("flat").classes("w-full sm:w-auto min-h-11")
-                    dialog.open()
-                with ui.column().classes("w-full gap-0 divide-y divide-gray-200"):
-                    for stored in holdings:
-                        with ui.row().classes("w-full min-w-0 flex-wrap items-center gap-2 py-2"):
-                            ui.label(str(stored.get("ticker", ""))).classes("w-20 font-semibold break-words")
-                            ui.label(f"Regular {currency(stored.get('regular_biweekly_contribution', 0))} · ESPP {currency(stored.get('espp_biweekly_contribution', 0))} · Special {currency(stored.get('special_contribution', 0))} · ESPP {'Active' if stored.get('espp_enabled', stored.get('is_espp')) else 'Not active'}").classes("grow min-w-0 text-sm text-gray-600 break-words")
-                            ui.button("Edit Contributions", icon="payments", on_click=lambda row=stored: open_contribution_dialog(row)).props("flat dense").classes("w-full sm:w-auto min-h-11")
-                if not holdings:
-                    ui.label("Add a holding to configure recurring or special contributions.").classes(EMPTY_STATE)
-            fields = (("ticker", "Ticker"), ("shares", "Shares"), ("current_price", "Current Price"), ("market_value", "Market Value"), ("average_cost", "Average Cost"), ("cost_basis", "Cost Basis"), ("unrealized_gain", "Unrealized G/L"), ("dividend_yield_pct", "Dividend Yield %"), ("annual_income", "Annual Income"), ("asset_type", "Asset Type"), ("sector", "Sector"), ("regular_biweekly_contribution", "Regular Biweekly"), ("espp_biweekly_contribution", "ESPP Biweekly"), ("special_contribution", "Special Contribution"), ("employer_stock", "Employer Stock"), ("espp_enabled", "ESPP"))
-            selected_rows = [{key: row.get(key) for key, _ in fields} for row in display_holdings]
-            columns, rows = format_table_records(selected_rows)
-            labels = dict(fields)
-            for column in columns:
-                column["label"] = labels.get(column["name"], column["label"])
-            if rows:
+            ui.label("Live Calculated Fields").classes("text-xl font-semibold mt-3")
+            ui.label("Read-only market and portfolio calculations refresh after a successful Save.").classes("text-sm text-gray-500")
+            live_fields = (("ticker", "Ticker"), ("shares", "Shares"), ("current_price", "Current Price"), ("market_value", "Market Value"), ("average_cost", "Average Cost"), ("cost_basis", "Cost Basis"), ("unrealized_gain", "Unrealized G/L"), ("dividend_yield_pct", "Dividend Yield %"), ("annual_income", "Annual Income"), ("employer_stock", "Employer Stock"), ("espp_enabled", "ESPP"))
+            live_rows = [{key: row.get(key) for key, _label in live_fields} for row in display_holdings]
+            live_columns, formatted_live_rows = format_table_records(live_rows)
+            live_labels = dict(live_fields)
+            for column in live_columns:
+                column["label"] = live_labels.get(column["name"], column["label"])
+            if formatted_live_rows:
                 with ui.element("div").classes(SCROLL_TABLE):
-                    ui.table(columns=columns, rows=rows, row_key="ticker", pagination=25).classes("w-full min-w-max").props("dense flat bordered")
+                    ui.table(columns=live_columns, rows=formatted_live_rows, pagination=25).classes("w-full min-w-max").props("dense flat bordered")
             else:
-                ui.label("Your portfolio has no holdings yet. Use Add Holding to create the first one.").classes(EMPTY_STATE)
-            management_expansion = ui.expansion("Edit or delete a holding", value=ui_state.expansion_value("management")).classes("w-full")
-            management_expansion.on_value_change(lambda event: ui_state.set_expansion("management", event.value))
-            with management_expansion:
-                with ui.column().classes("w-full gap-0 divide-y divide-gray-200"):
-                    for stored in holdings:
-                        with ui.row().classes("w-full min-w-0 flex-wrap items-center gap-2 py-2"):
-                            ui.label(str(stored.get("ticker", ""))).classes("w-20 font-semibold break-words")
-                            ui.label(f"{format_field_value('shares', stored.get('shares'))} shares · {str(stored.get('asset_type') or 'Unclassified')} · {str(stored.get('sector') or 'Unclassified')}").classes("grow min-w-0 text-sm text-gray-600 break-words")
-                            with ui.row().classes("w-full sm:w-auto gap-2"):
-                                ui.button("Edit", icon="edit", on_click=lambda row=stored: open_holding_dialog(row)).props("flat dense").classes("grow sm:grow-0 min-h-11")
-                                def confirm_delete(row: dict[str, Any] = stored) -> None:
-                                    with ui.dialog() as confirm, ui.card().classes(CONFIRM_DIALOG_CARD):
-                                        ui.label(f"Delete {row.get('ticker', '')} from the portfolio?").classes("text-lg font-semibold")
-                                        ui.label("This removes only the current holding. Statement history is not changed.").classes("text-sm text-gray-600")
-                                        deleting = {"value": False}
-                                        async def remove() -> None:
-                                            if deleting["value"]:
-                                                return
-                                            deleting["value"] = True
-                                            delete_button.disable()
-                                            try:
-                                                await run.io_bound(holdings_writer.delete, int(row["_holding_id"]), confirmed=True, expected_ticker=str(row.get("ticker", "")), submission_token=uuid.uuid4().hex)
-                                                confirm.close()
-                                                await refresh_after_holding_write()
-                                                ui.notify(f"{row.get('ticker', '')} deleted.", type="positive")
-                                            except Exception as exc:
-                                                ui.notify(str(exc), type="negative", timeout=0)
-                                            finally:
-                                                deleting["value"] = False
-                                                delete_button.enable()
-                                        with ui.element("div").classes(RESPONSIVE_ACTIONS):
-                                            delete_button = ui.button("Delete Holding", icon="delete", color="negative", on_click=remove).classes("w-full sm:w-auto min-h-11")
-                                            ui.button("Cancel", on_click=confirm.close).props("flat").classes("w-full sm:w-auto min-h-11")
-                                    confirm.open()
-                                ui.button("Delete", icon="delete", color="negative", on_click=confirm_delete).props("flat dense").classes("grow sm:grow-0 min-h-11")
-                if not holdings:
-                    ui.label("There are no holdings to edit or delete.").classes(EMPTY_STATE)
+                ui.label("Your portfolio has no holdings. Add a row in Manage Holdings to begin.").classes(EMPTY_STATE)
             ui.label("Read-only exports").classes("text-lg font-semibold mt-3")
-            ui.label("Generate a fresh read-only snapshot, then download it in the format you need.").classes("text-sm text-gray-500")
             async def download_export(filename: str) -> None:
                 try:
                     package = await run.io_bound(export_package, holdings, metrics, history=history)
@@ -338,6 +277,7 @@ async def index() -> None:
                 ("Duplicate files", format_count(state["duplicate_file_count"])),
                 ("Ready", format_count(state["ready"])),
                 ("Needs review", format_count(state["needs_review"])),
+                ("Manually resolved", format_count(state["manually_resolved"])),
                 ("Unparseable", format_count(state["unparseable"])),
                 ("Missing months", format_count(continuity["missing_month_count"])),
                 ("Duplicate months", format_count(continuity["duplicate_month_count"])),
@@ -354,6 +294,7 @@ async def index() -> None:
                 ("Account summaries found", diagnostics["account_summary_found"]),
                 ("Balance rows found", diagnostics["balance_rows_found"]),
                 ("Accounting equations passed", diagnostics["accounting_equation_passed"]),
+                ("Parser review flags", state["parser_review_flags"]),
             ])
             action_busy = {"value": False}
             async def reload_statement_area() -> None:

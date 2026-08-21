@@ -4,7 +4,7 @@ import math
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 
 HOLDINGS_TABLE = "holdings"
@@ -271,6 +271,83 @@ class HoldingsWriteService:
                 raise
             finally:
                 connection.close()
+        return self._once(submission_token, operation)
+
+    def save_grid(
+        self,
+        rows: Sequence[Mapping[str, Any]],
+        *,
+        expected_rows: Sequence[Mapping[str, Any]],
+        submission_token: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Atomically apply a spreadsheet edit without rewriting unchanged rows."""
+        expected_by_id = {int(row["_holding_id"]): dict(row) for row in expected_rows}
+
+        def operation() -> dict[str, Any]:
+            connection = self._connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                columns = self._columns(connection)
+                submitted_ids: set[int] = set()
+                normalized_rows: list[tuple[int | None, dict[str, Any]]] = []
+                for values in rows:
+                    raw_id = values.get("_holding_id")
+                    holding_id = int(raw_id) if raw_id not in (None, "") else None
+                    if holding_id is not None:
+                        if holding_id in submitted_ids or holding_id not in expected_by_id:
+                            raise HoldingValidationError("The holdings grid contains an invalid or duplicate internal row reference.")
+                        submitted_ids.add(holding_id)
+                        current = self.get(holding_id, connection=connection)
+                        expected = expected_by_id[holding_id]
+                        expected_record = self._storage_values(normalize_holding_input(expected, existing=current), columns)
+                        if any(current.get(name) != value for name, value in expected_record.items()):
+                            raise HoldingNotFoundError("A holding changed after the grid loaded. Refresh and try again.")
+                        normalized_rows.append((holding_id, normalize_holding_input(values, existing=current)))
+                    else:
+                        normalized_rows.append((None, normalize_holding_input(values)))
+
+                removed_ids = set(expected_by_id) - submitted_ids
+                for holding_id in removed_ids:
+                    self.get(holding_id, connection=connection)
+
+                added = updated = unchanged = deleted = 0
+                for holding_id, normalized in normalized_rows:
+                    record = self._storage_values(normalized, columns)
+                    if holding_id is None:
+                        names = list(record)
+                        placeholders = ", ".join("?" for _ in names)
+                        connection.execute(
+                            f"INSERT INTO {HOLDINGS_TABLE} ({', '.join(names)}) VALUES ({placeholders})",
+                            [record[name] for name in names],
+                        )
+                        added += 1
+                        continue
+                    current = self.get(holding_id, connection=connection)
+                    changed = {name: value for name, value in record.items() if current.get(name) != value}
+                    if not changed:
+                        unchanged += 1
+                        continue
+                    assignments = ", ".join(f"{name}=?" for name in changed)
+                    cursor = connection.execute(
+                        f"UPDATE {HOLDINGS_TABLE} SET {assignments} WHERE rowid=?",
+                        [*changed.values(), holding_id],
+                    )
+                    if cursor.rowcount != 1:
+                        raise HoldingNotFoundError("A holding changed or no longer exists. Refresh and try again.")
+                    updated += 1
+                for holding_id in removed_ids:
+                    cursor = connection.execute(f"DELETE FROM {HOLDINGS_TABLE} WHERE rowid=?", (holding_id,))
+                    if cursor.rowcount != 1:
+                        raise HoldingNotFoundError("A holding changed or no longer exists. Refresh and try again.")
+                    deleted += 1
+                connection.commit()
+                return {"added": added, "updated": updated, "unchanged": unchanged, "deleted": deleted}
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
+
         return self._once(submission_token, operation)
 
     def get(self, holding_id: int, *, connection: sqlite3.Connection | None = None) -> dict[str, Any]:

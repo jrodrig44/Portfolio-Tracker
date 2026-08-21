@@ -155,12 +155,14 @@ class Phase2CContributionTests(unittest.TestCase):
         fields = ("regular_biweekly_contribution", "special_contribution", "espp_contribution_biweekly", "espp_biweekly_contribution", "is_espp", "espp_enabled", "espp_discount", "espp_discount_pct", "espp_purchase_frequency_months", "espp_purchase_frequency")
         self.assertEqual({key: current[key] for key in fields}, {key: other_row[key] for key in fields})
 
-    def test_ui_contract_has_dedicated_mobile_surface_and_invalidation(self) -> None:
+    def test_ui_contract_integrates_contributions_into_spreadsheet_and_invalidation(self) -> None:
         source = (Path(__file__).parents[1] / "nicegui_app" / "main.py").read_text(encoding="utf-8")
-        self.assertIn('ui.expansion("Contribution Settings"', source)
-        self.assertIn('ui.button("Edit Contributions"', source)
-        self.assertIn('ui.button("Save Contributions"', source)
-        self.assertIn("update_contributions", source)
+        self.assertIn("ui.aggrid", source)
+        self.assertIn('"regular_biweekly_contribution"', source)
+        self.assertIn('"espp_contribution_biweekly"', source)
+        self.assertIn('"special_contribution"', source)
+        self.assertIn('ui.button("Save Holdings"', source)
+        self.assertNotIn('ui.button("Edit Contributions"', source)
         self.assertIn("w-full sm:w-auto min-h-11", source)
         self.assertIn("refresh_after_holding_write", source)
         self.assertIn("prior prepared output is stale", source)

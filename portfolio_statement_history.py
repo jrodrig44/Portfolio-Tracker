@@ -29,7 +29,9 @@ def statement_display_records(records: list[dict[str, Any]]) -> list[dict[str, A
             "portfolio_value": row.get("portfolio_value"),
             "invested_value": row.get("invested_value"),
             "cash_value": row.get("cash_value"),
-            "status": row.get("status"),
+            "status": row.get("effective_status", row.get("status")),
+            "raw_parser_status": row.get("raw_status", row.get("status")),
+            "resolved_by": row.get("resolved_by") or "—",
             "warning": row.get("warning") or "",
         }
         for row in records

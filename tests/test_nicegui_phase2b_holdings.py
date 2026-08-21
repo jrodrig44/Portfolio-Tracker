@@ -165,12 +165,14 @@ class Phase2BHoldingsTests(unittest.TestCase):
         self.assertEqual(before, after)
         self.assertEqual(marker, "unchanged")
 
-    def test_ui_contract_has_mobile_actions_confirmation_and_invalidation(self) -> None:
+    def test_ui_contract_has_spreadsheet_actions_and_invalidation(self) -> None:
         source = (Path(__file__).parents[1] / "nicegui_app" / "main.py").read_text(encoding="utf-8")
-        self.assertIn('ui.button("Add Holding"', source)
-        self.assertIn('ui.button("Edit"', source)
-        self.assertIn('ui.button("Delete"', source)
-        self.assertIn("from the portfolio?", source)
+        self.assertIn("ui.aggrid", source)
+        self.assertIn('ui.button("Add Row"', source)
+        self.assertIn('ui.button("Remove Selected Rows"', source)
+        self.assertIn('ui.button("Save Holdings"', source)
+        self.assertNotIn('ui.button("Add Holding"', source)
+        self.assertNotIn("Edit or delete a holding", source)
         self.assertIn("w-full sm:w-auto min-h-11", source)
         self.assertIn("refresh_after_holding_write", source)
         self.assertIn('"AI Analysis"', source)
