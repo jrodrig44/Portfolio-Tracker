@@ -94,7 +94,7 @@ async def index() -> None:
             ui.label("Read-only exports").classes("text-lg font-semibold mt-3")
             async def download_export(filename: str) -> None:
                 try:
-                    package = await run.io_bound(export_package, holdings, metrics)
+                    package = await run.io_bound(export_package, holdings, metrics, history=history)
                     ui.download(package[filename].encode("utf-8"), filename)
                 except Exception as exc:
                     ui.notify(f"Export failed: {exc}", type="negative")
