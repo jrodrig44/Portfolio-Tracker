@@ -211,10 +211,19 @@ async def index() -> None:
                 ui.label(f"• {observation}")
             with ui.expansion("Allocation and diversification", value=True).classes("w-full"):
                 records_table(package["allocation"])
+                records_table(package.get("economic_exposure", []), "Economic exposure")
+                records_table(package.get("direct_sector", []), "Direct sector exposure")
             with ui.expansion("Contribution observations").classes("w-full"):
                 records_table(package["contribution"]["rows"])
             with ui.expansion("Yield and income observations").classes("w-full"):
                 ui.json_editor({"content": {"json": package["yield"]}}).props("read-only")
+                records_table(package.get("income_allocation", []), "Income allocation by asset type")
+                records_table(package.get("income_quality", []), "Income quality")
+            with ui.expansion("Fund look-through and completeness").classes("w-full"):
+                fund_context = package.get("fund_lookthrough", {})
+                records_table(fund_context.get("records", []), "Resolved fund exposure")
+                records_table(fund_context.get("unresolved_records", []), "Unresolved fund exposure")
+                ui.json_editor({"content": {"json": package.get("data_completeness", {})}}).props("read-only")
         loaded["Portfolio Insights"] = True
 
     async def render_health() -> None:
