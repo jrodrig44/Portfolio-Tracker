@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 import unittest
 
@@ -22,7 +23,7 @@ class NiceGUIPhase2HPolishTests(unittest.TestCase):
     def test_single_destination_mapping_drives_desktop_and_mobile_navigation(self) -> None:
         self.assertEqual(len(NAVIGATION_AREAS), 9)
         self.assertEqual(len(set(NAVIGATION_AREAS)), 9)
-        self.assertIn('ui.select(NAVIGATION_AREAS, value="Holdings", label="Current section")', MAIN)
+        self.assertIn('ui.select(list(NAVIGATION_AREAS), value="Holdings", label="Current section")', MAIN)
         self.assertIn('classes("w-full lg:hidden")', MAIN)
         self.assertIn('classes("hidden lg:block w-full max-w-full overflow-x-auto")', MAIN)
         self.assertNotIn('classes("w-full md:hidden")', MAIN)
@@ -30,6 +31,26 @@ class NiceGUIPhase2HPolishTests(unittest.TestCase):
         self.assertIn("mobile_navigation.on_value_change", MAIN)
         self.assertIn("mobile_navigation.set_value(name)", MAIN)
         self.assertNotIn("mobile-arrows", MAIN)
+
+    def test_mobile_select_converts_immutable_navigation_tuple_to_list_at_api_boundary(self) -> None:
+        tree = ast.parse(MAIN)
+        navigation_calls = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "ui"
+            and node.func.attr == "select"
+            and any(keyword.arg == "label" and isinstance(keyword.value, ast.Constant) and keyword.value.value == "Current section" for keyword in node.keywords)
+        ]
+        self.assertEqual(len(navigation_calls), 1)
+        options = navigation_calls[0].args[0]
+        self.assertIsInstance(options, ast.Call)
+        self.assertIsInstance(options.func, ast.Name)
+        self.assertEqual(options.func.id, "list")
+        self.assertEqual(len(options.args), 1)
+        self.assertIsInstance(options.args[0], ast.Name)
+        self.assertEqual(options.args[0].id, "NAVIGATION_AREAS")
 
     def test_hd_forced_controls_are_visible_disabled_and_transition_aware(self) -> None:
         form = MAIN.split("def holding_form", 1)[1].split("def open_holding_dialog", 1)[0]

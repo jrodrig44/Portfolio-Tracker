@@ -80,7 +80,7 @@ class NiceGuiPhase2APresentationTests(unittest.TestCase):
         source = (ROOT / "nicegui_app" / "main.py").read_text(encoding="utf-8")
         self.assertIn("RESPONSIVE_CARD_GRID", source)
         self.assertIn("SCROLL_TABLE", source)
-        self.assertIn('ui.select(NAVIGATION_AREAS, value="Holdings", label="Current section")', source)
+        self.assertIn('ui.select(list(NAVIGATION_AREAS), value="Holdings", label="Current section")', source)
         self.assertIn("w-full lg:hidden", source)
         self.assertIn("hidden lg:block", source)
         self.assertIn("w-full sm:w-auto min-h-11", source)
