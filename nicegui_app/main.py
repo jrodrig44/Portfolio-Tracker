@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sys
 import uuid
+import calendar
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -23,10 +25,11 @@ from nicegui_app.services.portfolio_data import DEFAULT_HISTORY_RANGE,HISTORY_RA
 from nicegui_app.services.refresh import ReadOnlyRefreshCoordinator
 from nicegui_app.services.yahoo import current_market_data,yahoo_intelligence_package
 from portfolio_holdings_write import ASSET_TYPES, HoldingsWriteService, summarize_contributions
+from portfolio_statement_history import StatementHistoryService, statement_display_records
 
 HOST = "0.0.0.0"
 PORT = 8502
-NAVIGATION_AREAS = ("Holdings", "Portfolio Analysis", "AI Analysis", "Portfolio Insights", "Portfolio Health", "History")
+NAVIGATION_AREAS = ("Holdings", "Portfolio Analysis", "AI Analysis", "Portfolio Insights", "Portfolio Health", "History", "Statement History")
 
 
 def currency(value: Any) -> str:
@@ -81,6 +84,7 @@ async def index() -> None:
     metrics = None
     coordinator = ReadOnlyRefreshCoordinator(market_loader=current_market_data)
     holdings_writer = HoldingsWriteService(coordinator.portfolio_path)
+    statement_service = StatementHistoryService(db_path=coordinator.history_path)
     loaded = {name: False for name in NAVIGATION_AREAS}
 
     with ui.header().classes("flex-wrap items-center justify-between gap-2 shadow-sm px-3 sm:px-5"):
@@ -265,6 +269,185 @@ async def index() -> None:
                 ui.button("Portfolio report", icon="description", on_click=lambda: download_export("portfolio_export.md")).classes("w-full sm:w-auto min-h-11")
                 ui.button("Structured data", icon="data_object", on_click=lambda: download_export("portfolio_export.json")).classes("w-full sm:w-auto min-h-11")
         loaded["Holdings"] = True
+
+    async def render_statement_history() -> None:
+        if loaded["Statement History"]:
+            return
+        area = areas["Statement History"]
+        area.clear()
+        with area:
+            ui.spinner(size="lg")
+            ui.label("Loading statement history status…")
+        try:
+            state = await run.io_bound(statement_service.state)
+        except Exception as exc:
+            area.clear()
+            with area:
+                ui.label("Statement history status could not be loaded.").classes("text-red-600")
+                ui.label(str(exc)).classes("text-sm text-gray-600 break-words")
+            loaded["Statement History"] = True
+            return
+        area.clear()
+        folder = state["folder"]
+        continuity = state["monthly_continuity"]
+        diagnostics = state["diagnostics"]
+        records = state["records"]
+        manual_records = [row for row in records if row.get("source_type") == "manual_statement_review"]
+        with area:
+            ui.label("Statement History").classes("text-2xl font-semibold")
+            ui.label("Scanning and importing occur only when explicitly requested. Original PDFs are never moved or deleted.").classes("text-gray-500")
+            metric_cards([
+                ("Folder", str(folder["status"])),
+                ("PDFs detected", format_count(state["detected_pdf_count"] or folder["pdf_count"])),
+                ("Unique PDFs", format_count(state["unique_pdf_count"])),
+                ("Processed unique", f"{state['processed_unique_count']} of {state['unique_pdf_count']}"),
+                ("Duplicate files", format_count(state["duplicate_file_count"])),
+                ("Ready", format_count(state["ready"])),
+                ("Needs review", format_count(state["needs_review"])),
+                ("Unparseable", format_count(state["unparseable"])),
+                ("Missing months", format_count(continuity["missing_month_count"])),
+                ("Duplicate months", format_count(continuity["duplicate_month_count"])),
+                ("Monthly continuity", "Complete" if continuity["complete"] else "Needs review"),
+                ("Previously imported", format_count(state["history_summary"]["imported"])),
+            ])
+            detail_cards([
+                ("Accounted for", f"{state['processed_count']} of {state['detected_pdf_count'] or folder['pdf_count']}"),
+                ("Remaining", max((state["detected_pdf_count"] or folder["pdf_count"]) - state["processed_count"], 0)),
+                ("Scan status", state["scan_status"]),
+                ("Header markers found", diagnostics["header_found"]),
+                ("Nearby date ranges found", diagnostics["nearby_date_range_found"]),
+                ("Nearby account markers found", diagnostics["nearby_account_marker_found"]),
+                ("Account summaries found", diagnostics["account_summary_found"]),
+                ("Balance rows found", diagnostics["balance_rows_found"]),
+                ("Accounting equations passed", diagnostics["accounting_equation_passed"]),
+            ])
+            action_busy = {"value": False}
+            async def reload_statement_area() -> None:
+                loaded["Statement History"] = False
+                await render_statement_history()
+            async def scan_statements(restart: bool) -> None:
+                if action_busy["value"]:
+                    return
+                action_busy["value"] = True
+                scan_button.disable()
+                resume_button.disable()
+                scan_status.set_text("Scanning statements…")
+                try:
+                    await run.io_bound(statement_service.scan, restart=restart)
+                    ui.notify("Statement scan completed.", type="positive")
+                    await reload_statement_area()
+                except Exception as exc:
+                    scan_status.set_text("The statement scan could not complete. Prior scan results were retained where production supports resume.")
+                    ui.notify(str(exc), type="negative", timeout=0)
+                finally:
+                    action_busy["value"] = False
+                    scan_button.enable()
+                    if state["scan_status"] in {"interrupted", "running"}:
+                        resume_button.enable()
+            with ui.element("div").classes(RESPONSIVE_ACTIONS):
+                scan_button = ui.button("Scan Statements", icon="document_scanner", on_click=lambda: scan_statements(True)).classes("w-full sm:w-auto min-h-11")
+                resume_button = ui.button("Resume Scan", icon="play_arrow", on_click=lambda: scan_statements(False)).classes("w-full sm:w-auto min-h-11")
+                if state["scan_status"] not in {"interrupted", "running"}:
+                    resume_button.disable()
+                async def clear_preview() -> None:
+                    await run.io_bound(statement_service.clear_scan)
+                    await reload_statement_area()
+                ui.button("Clear Scan Preview", icon="clear", on_click=clear_preview).classes("w-full sm:w-auto min-h-11")
+            scan_status = ui.label("").classes("text-sm text-gray-600")
+            if records:
+                records_table(statement_display_records(records), "Scan results")
+            else:
+                ui.label("No scan results yet.").classes("text-gray-500")
+
+            def review_dialog(existing: dict[str, Any] | None = None) -> None:
+                missing = list(continuity.get("missing_months", []))
+                existing_month = str(existing.get("review_month", "")) if existing else ""
+                options = sorted(set(missing + ([existing_month] if existing_month else [])))
+                if not options:
+                    ui.notify("There are no missing months available for manual review.", type="warning")
+                    return
+                selected_default = existing_month or options[0]
+                year, month = (int(part) for part in selected_default.split("-"))
+                default_date = str(existing.get("statement_end_date")) if existing else date(year, month, calendar.monthrange(year, month)[1]).isoformat()
+                with ui.dialog() as dialog, ui.card().classes("w-[min(96vw,42rem)] max-h-[90vh] overflow-y-auto"):
+                    ui.label("Edit Manual Statement Review" if existing else "Manual Statement Review").classes("text-xl font-semibold")
+                    ui.label("Enter only values verified against the original statement. Total Priced Portfolio plus Net Account Balance must equal Total Equity Holdings.").classes("text-sm text-gray-600")
+                    review_month = ui.select(options, value=selected_default, label="Missing month").classes(FULL_WIDTH_CONTROL)
+                    ending_date = ui.input("Statement ending date (YYYY-MM-DD)", value=default_date).classes(FULL_WIDTH_CONTROL)
+                    invested = ui.number("Closing Total Priced Portfolio", value=float(existing.get("invested_value", 0) if existing else 0), min=0, step=0.01).classes(FULL_WIDTH_CONTROL)
+                    cash = ui.number("Closing Net Account Balance", value=float(existing.get("cash_value", 0) if existing else 0), min=0, step=0.01).classes(FULL_WIDTH_CONTROL)
+                    total = ui.number("Closing Total Equity Holdings", value=float(existing.get("portfolio_value", 0) if existing else 0), min=0, step=0.01).classes(FULL_WIDTH_CONTROL)
+                    confirmed = ui.checkbox("I verified these values against the original statement.", value=bool(existing.get("confirmed", False)) if existing else False)
+                    saving = {"value": False}
+                    async def save_review() -> None:
+                        if saving["value"]:
+                            return
+                        saving["value"] = True
+                        save_button.disable()
+                        try:
+                            await run.io_bound(statement_service.save_review, str(review_month.value), str(ending_date.value), float(invested.value), float(cash.value), float(total.value), bool(confirmed.value), manual_id=str(existing["source_hash"]) if existing else None)
+                            dialog.close()
+                            ui.notify("Manual review saved as Ready.", type="positive")
+                            await reload_statement_area()
+                        except Exception as exc:
+                            ui.notify(str(exc), type="negative", timeout=0)
+                        finally:
+                            saving["value"] = False
+                            save_button.enable()
+                    with ui.element("div").classes(RESPONSIVE_ACTIONS):
+                        save_button = ui.button("Save Manual Review", icon="save", on_click=save_review).classes("w-full sm:w-auto min-h-11")
+                        ui.button("Cancel", on_click=dialog.close).props("flat").classes("w-full sm:w-auto min-h-11")
+                dialog.open()
+            with ui.expansion("Manual Statement Review").classes("w-full"):
+                missing_months = continuity.get("missing_months", [])
+                ui.label("Missing months: " + (", ".join(missing_months) if missing_months else "None")).classes("text-sm break-words")
+                ui.button("Add Manual Review", icon="fact_check", on_click=lambda: review_dialog()).classes("w-full sm:w-auto min-h-11")
+                for manual in manual_records:
+                    with ui.card().classes("w-full"):
+                        ui.label(str(manual.get("review_month", ""))).classes("font-semibold")
+                        ui.label(f"{currency(manual.get('portfolio_value'))} · {manual.get('warning', '')}").classes("text-sm text-gray-600 break-words")
+                        with ui.element("div").classes(RESPONSIVE_ACTIONS):
+                            ui.button("Edit Review", icon="edit", on_click=lambda row=manual: review_dialog(row)).classes("w-full sm:w-auto min-h-11")
+                            async def remove_review(row: dict[str, Any] = manual) -> None:
+                                await run.io_bound(statement_service.remove_review, str(row["source_hash"]))
+                                await reload_statement_area()
+                            ui.button("Remove Review", icon="delete", on_click=remove_review).classes("w-full sm:w-auto min-h-11")
+
+            async def import_ready() -> None:
+                if action_busy["value"]:
+                    return
+                action_busy["value"] = True
+                import_button.disable()
+                try:
+                    result = await run.io_bound(statement_service.import_ready, submission_token=uuid.uuid4().hex)
+                    await refresh_history_after_statement_write()
+                    ui.notify(f"Imported {int((result or {}).get('imported', 0))} statement history records.", type="positive")
+                    await reload_statement_area()
+                except Exception as exc:
+                    ui.notify(str(exc), type="negative", timeout=0)
+                finally:
+                    action_busy["value"] = False
+                    import_button.enable()
+            import_button = ui.button("Import Ready Statements", icon="publish", on_click=import_ready).classes("w-full sm:w-auto min-h-11")
+            if not state["can_import"]:
+                import_button.disable()
+                ui.label("Import remains disabled until the scan is complete, all PDFs are accounted for, and monthly continuity is complete.").classes("text-sm text-amber-700")
+
+            def confirm_delete_history() -> None:
+                with ui.dialog() as dialog, ui.card().classes("w-[min(94vw,30rem)]"):
+                    ui.label("Delete all imported statement history?").classes("text-lg font-semibold")
+                    ui.label("Original PDFs and holdings will not be changed. Live snapshots remain intact.").classes("text-sm text-gray-600")
+                    async def remove_imported() -> None:
+                        await run.io_bound(statement_service.delete_imported, confirmed=True)
+                        dialog.close()
+                        await refresh_history_after_statement_write()
+                        await reload_statement_area()
+                    with ui.element("div").classes(RESPONSIVE_ACTIONS):
+                        ui.button("Delete Imported History", icon="delete_forever", color="negative", on_click=remove_imported).classes("w-full sm:w-auto min-h-11")
+                        ui.button("Cancel", on_click=dialog.close).props("flat").classes("w-full sm:w-auto min-h-11")
+                dialog.open()
+            ui.button("Delete Imported History…", icon="delete", on_click=confirm_delete_history).classes("w-full sm:w-auto min-h-11")
+        loaded["Statement History"] = True
 
     async def render_analysis() -> None:
         if loaded["Portfolio Analysis"]:
@@ -489,6 +672,7 @@ async def index() -> None:
         elif name == "Portfolio Insights": await render_insights()
         elif name == "Portfolio Health": await render_health()
         elif name == "History" and not loaded["History"]: render_history()
+        elif name == "Statement History": await render_statement_history()
 
     tabs.on_value_change(navigate)
     async def refresh_data(force: bool = False) -> None:
@@ -516,6 +700,17 @@ async def index() -> None:
             areas[name].clear()
             with areas[name]:
                 ui.label("Holdings changed; prior prepared output is stale and this section will refresh when opened.").classes("text-gray-500")
+    async def refresh_history_after_statement_write() -> None:
+        """Reload only history-derived state; do not reload holdings or Yahoo data."""
+        nonlocal history
+        history = await run.io_bound(statement_service.performance_history)
+        if loaded["History"]:
+            render_history(history_range)
+        loaded["AI Analysis"] = False
+        areas["AI Analysis"].clear()
+        with areas["AI Analysis"]:
+            ui.label("Statement history changed; prior AI history context is stale and will refresh when opened.").classes("text-gray-500")
+        status.set_text(f"History refreshed with {len(history)} points; holdings were not reloaded")
     refresh_button.on_click(lambda: refresh_data(True))
     ui.timer(DB_REFRESH_INTERVAL_SECONDS,lambda: refresh_data(False))
     try:
