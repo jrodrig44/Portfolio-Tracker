@@ -1,19 +1,17 @@
 from __future__ import annotations
 
-import calendar
 import math
 import sqlite3
 from contextlib import closing
-from datetime import date
 from pathlib import Path
 from typing import Any
+
+from portfolio_history import DEFAULT_HISTORY_RANGE, HISTORY_RANGE_OPTIONS, filter_history_range
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PORTFOLIO_DB_PATH = PROJECT_ROOT / "data" / "portfolio.db"
 HISTORY_DB_PATH = PROJECT_ROOT / "data" / "stash_statement_history.sqlite"
-HISTORY_RANGE_OPTIONS = ("1M", "3M", "1Y", "ALL")
-DEFAULT_HISTORY_RANGE = "ALL"
 
 
 def _read_only_connection(path: Path) -> sqlite3.Connection:
@@ -131,35 +129,19 @@ def load_history(db_path: Path = HISTORY_DB_PATH) -> list[dict[str, Any]]:
             "UNION ALL SELECT snapshot_date, portfolio_value, source_type FROM live_portfolio_snapshots "
             "ORDER BY 1"
         ).fetchall()
-    return [
-        {"history_date": row[0], "portfolio_value": _number(row[1]), "source_type": row[2]}
-        for row in rows
-    ]
-
-
-def _subtract_months(value: date, months: int) -> date:
-    month_index = value.year * 12 + value.month - 1 - months
-    year, zero_based_month = divmod(month_index, 12)
-    month = zero_based_month + 1
-    return date(year, month, min(value.day, calendar.monthrange(year, month)[1]))
+    history: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            value = float(row[1])
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            history.append({"history_date": row[0], "portfolio_value": value, "source_type": row[2]})
+    return history
 
 
 def filter_history(
     history: list[dict[str, Any]], selected_range: str = DEFAULT_HISTORY_RANGE
 ) -> list[dict[str, Any]]:
-    """Match Streamlit's newest-record-anchored DateOffset range behavior."""
-    if selected_range not in HISTORY_RANGE_OPTIONS:
-        raise ValueError(f"Unsupported history range: {selected_range}")
-    dated: list[tuple[date, dict[str, Any]]] = []
-    for record in history:
-        try:
-            parsed = date.fromisoformat(str(record.get("history_date", ""))[:10])
-        except ValueError:
-            continue
-        dated.append((parsed, dict(record)))
-    dated.sort(key=lambda item: item[0])
-    if selected_range == "ALL" or not dated:
-        return [record for _, record in dated]
-    latest = dated[-1][0]
-    cutoff = _subtract_months(latest, {"1M": 1, "3M": 3, "1Y": 12}[selected_range])
-    return [record for history_date, record in dated if history_date >= cutoff]
+    """Backward-compatible alias for the shared production history filter."""
+    return filter_history_range(history, selected_range)

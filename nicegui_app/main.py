@@ -15,8 +15,9 @@ from nicegui_app.services.analysis import analysis_package
 from nicegui_app.services.configuration import DB_REFRESH_INTERVAL_SECONDS
 from nicegui_app.services.exports import export_package
 from nicegui_app.services.health import health_package
+from nicegui_app.services.history import history_package
 from nicegui_app.services.insights import insights_package
-from nicegui_app.services.portfolio_data import DEFAULT_HISTORY_RANGE,HISTORY_RANGE_OPTIONS,filter_history,portfolio_summary
+from nicegui_app.services.portfolio_data import DEFAULT_HISTORY_RANGE,HISTORY_RANGE_OPTIONS,portfolio_summary
 from nicegui_app.services.refresh import ReadOnlyRefreshCoordinator
 from nicegui_app.services.yahoo import current_market_data,yahoo_intelligence_package
 
@@ -57,6 +58,7 @@ async def index() -> None:
     ui.colors(primary="#1d4ed8", secondary="#0f766e", accent="#d97706")
     holdings: list[dict[str, Any]] = []
     history: list[dict[str, Any]] = []
+    history_range = DEFAULT_HISTORY_RANGE
     metrics = None
     coordinator = ReadOnlyRefreshCoordinator(market_loader=current_market_data)
     loaded = {name: False for name in NAVIGATION_AREAS}
@@ -256,6 +258,8 @@ async def index() -> None:
         loaded["Portfolio Health"] = True
 
     def render_history(selected_range: str = DEFAULT_HISTORY_RANGE) -> None:
+        nonlocal history_range
+        history_range = selected_range
         area = areas["History"]
         area.clear()
         with area:
@@ -264,13 +268,17 @@ async def index() -> None:
             selector = ui.toggle(list(HISTORY_RANGE_OPTIONS), value=selected_range)
             chart_area = ui.column().classes("w-full")
             def update_chart(range_name: str) -> None:
+                nonlocal history_range
+                history_range = range_name
                 chart_area.clear()
-                selected = filter_history(history, range_name)
+                package = history_package(history, range_name)
                 with chart_area:
-                    if not selected:
+                    if not package["records"]:
                         ui.label("No historical values are available.")
                         return
-                    ui.echart({"tooltip": {"trigger": "axis"}, "xAxis": {"type": "category", "data": [row["history_date"] for row in selected]}, "yAxis": {"type": "value", "scale": True, "axisLabel": {"formatter": "${value}"}}, "series": [{"name": "Portfolio value", "type": "line", "data": [row["portfolio_value"] for row in selected], "areaStyle": {"opacity": 0.12}}]}).classes("w-full h-96")
+                    summary = package["summary"]
+                    metric_cards([("Starting value", currency(summary["starting_portfolio_value"])), ("Ending value", currency(summary["ending_portfolio_value"])), ("Value change", currency(summary["absolute_change"])), ("Value change %", percent(summary["percentage_change"])), ("History points", str(summary["point_count"]))])
+                    ui.echart({"tooltip": {"trigger": "axis"}, "xAxis": {"type": "category", "data": package["series"]["dates"]}, "yAxis": {"type": "value", "scale": True, "axisLabel": {"formatter": "${value}"}}, "series": [{"name": "Portfolio value", "type": "line", "data": package["series"]["portfolio_values"], "areaStyle": {"opacity": 0.12}}]}).classes("w-full h-96")
             selector.on_value_change(lambda event: update_chart(str(event.value)))
             update_chart(selected_range)
         loaded["History"] = True
@@ -299,7 +307,7 @@ async def index() -> None:
                 with areas[name]: ui.label("Portfolio values changed; this section will refresh when opened.").classes("text-gray-500")
         if result.history_changed:
             history=result.history or []
-            if loaded["History"]: render_history()
+            if loaded["History"]: render_history(history_range)
         status.set_text(f"Refreshed {len(holdings)} holdings and {len(history)} history points")
     refresh_button.on_click(lambda: refresh_data(True))
     ui.timer(DB_REFRESH_INTERVAL_SECONDS,lambda: refresh_data(False))

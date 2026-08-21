@@ -24,6 +24,7 @@ from portfolio_intelligence import compute_portfolio_intelligence
 from portfolio_analysis import canonical_asset_type as shared_canonical_asset_type
 from portfolio_analysis import future_value as shared_future_value
 from portfolio_analysis import normalize_sector as shared_normalize_sector
+from portfolio_history import DEFAULT_HISTORY_RANGE, HISTORY_RANGE_OPTIONS, filter_history_range
 from stash_history import clear_scan_preview, delete_imported_history, history_summary, import_validated_history, load_performance_history, load_statement_history, remove_manual_statement_review, run_statement_scan, save_manual_statement_review, scan_can_import, scan_state, upsert_live_portfolio_snapshot
 from onemin_ai_client import (
     ONEMIN_AI_DEFAULT_BASE_URL,
@@ -79,8 +80,6 @@ INVESTMENT_INTELLIGENCE_CACHE_TTL_SECONDS = 21600
 DIVIDEND_TIMING_CACHE_TTL_SECONDS = 86400
 HISTORICAL_CONTEXT_CACHE_TTL_SECONDS = 600
 FUND_SECTOR_WEIGHTS_CACHE_TTL_SECONDS = 3600
-HISTORY_RANGE_OPTIONS = ("1M", "3M", "1Y", "ALL")
-DEFAULT_HISTORY_RANGE = "ALL"
 ONEMIN_AI_RECOMMENDED_MODELS = [
     "gpt-4.1-mini",
     "gemini-2.5-flash",
@@ -5421,33 +5420,7 @@ def _filter_performance_history(
     history: list[dict[str, object]],
     selected_range: str = DEFAULT_HISTORY_RANGE,
 ) -> list[dict[str, object]]:
-    if selected_range not in HISTORY_RANGE_OPTIONS:
-        raise ValueError(f"Unsupported history range: {selected_range}")
-    if not history:
-        return []
-
-    dated_records: list[tuple[pd.Timestamp, dict[str, object]]] = []
-    for record in history:
-        history_date = pd.to_datetime(record.get("history_date"), errors="coerce")
-        if pd.isna(history_date):
-            continue
-        dated_records.append((history_date.normalize(), dict(record)))
-
-    if not dated_records:
-        return []
-
-    dated_records.sort(key=lambda item: item[0])
-    if selected_range == "ALL":
-        return [record for _, record in dated_records]
-
-    latest_date = dated_records[-1][0]
-    offsets = {
-        "1M": pd.DateOffset(months=1),
-        "3M": pd.DateOffset(months=3),
-        "1Y": pd.DateOffset(years=1),
-    }
-    cutoff_date = latest_date - offsets[selected_range]
-    return [record for history_date, record in dated_records if history_date >= cutoff_date]
+    return filter_history_range(history, selected_range)
 
 
 def _persist_live_snapshot_if_ready(metrics: pd.DataFrame, total_value: float, *, db_path: Path = STATEMENT_HISTORY_DB_PATH, use_export_json_data: bool | None = None, strict_export_accuracy_mode: bool | None = None) -> bool:
