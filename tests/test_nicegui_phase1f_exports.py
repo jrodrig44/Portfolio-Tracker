@@ -91,6 +91,53 @@ class NiceGuiPhase1FExportTests(unittest.TestCase):
         self.assertEqual(payload["exposure"]["unresolved_fund_exposure"][0]["Market_Value"], 500.0)
         self.assertIn("External Yahoo enrichment was not supplied for this export.", payload["external_context"]["notes"])
 
+    def test_custom_projection_and_espp_assumptions_reach_shared_calculations(self):
+        holdings, metrics, history, weights, external = self.inputs()
+        default = build_export_payload(holdings, metrics, history=history, fund_weights=weights, external_context=external)
+        custom = build_export_payload(holdings, metrics, history=history, fund_weights=weights, external_context=external, projection_biweekly=350, projection_return_pct=7, espp_biweekly=125, espp_purchase_frequency="3_months", espp_discount=0.10)
+        self.assertNotEqual(custom["projections"]["projected_10y_value"], default["projections"]["projected_10y_value"])
+        self.assertNotEqual(custom["projections"]["projected_20y_value"], default["projections"]["projected_20y_value"])
+        self.assertIn("$350.00", custom["projections"]["projection_contribution_note"])
+        self.assertIn("7%", custom["projections"]["projection_contribution_note"])
+        self.assertEqual(custom["contributions"]["espp_biweekly"], 125.0)
+        self.assertEqual(custom["contributions"]["espp_context"], {"biweekly_contribution": 125.0, "purchase_frequency": "3_months", "discount_pct": 10.0})
+        hd = next(row for row in custom["contributions"]["distribution_by_holding"] if row["ticker"] == "HD")
+        self.assertEqual((hd["regular_biweekly_contribution"], hd["special_contribution"], hd["espp_biweekly_contribution"], hd["espp_discount_pct"]), (0.0, 0.0, 125.0, 10.0))
+        self.assertEqual(default["export_assumptions"]["projection_biweekly"], 280.0)
+        self.assertEqual(default["export_assumptions"]["projection_return_pct"], 8.0)
+
+    def test_streamlit_forwards_custom_assumptions_and_matches_nicegui(self):
+        import app
+
+        holdings, metrics, history, weights, external = self.inputs()
+        kwargs = {"history": history, "fund_weights": weights, "external_context": external, "generated_at": "2026-08-20T12:00:00", "projection_biweekly": 350, "projection_return_pct": 7, "espp_biweekly": 125, "espp_purchase_frequency": "3_months", "espp_discount": 0.10}
+        with unittest.mock.patch("app._use_export_json_data", return_value=False), unittest.mock.patch("app._strict_export_accuracy_mode", return_value=False):
+            streamlit_package = app._build_shared_production_export_package(pd.DataFrame(holdings), metrics, **kwargs)
+        nicegui_package = export_package(holdings, metrics, **kwargs)
+        self.assertEqual(json.loads(streamlit_package["portfolio_export.json"]), json.loads(nicegui_package["portfolio_export.json"]))
+        self.assertEqual(streamlit_package["portfolio_export.md"], nicegui_package["portfolio_export.md"])
+
+    def test_holdings_render_path_does_not_prepare_enrichment_without_request(self):
+        import app
+
+        holdings, metrics, _, _, _ = self.inputs()
+        with unittest.mock.patch("app._build_shared_production_export_package") as builder, unittest.mock.patch("app.load_performance_history") as history_loader, unittest.mock.patch("app._latest_fund_sector_weights") as weights_loader, unittest.mock.patch("app._latest_investment_intelligence") as intelligence_loader, unittest.mock.patch("app._resolved_historical_context") as context_loader:
+            result = app._prepare_shared_exports_on_demand(False, pd.DataFrame(holdings), metrics, projection_biweekly=350, projection_return_pct=7, espp_biweekly=125, espp_purchase_frequency="3_months", espp_discount=0.10)
+        self.assertIsNone(result)
+        for provider in (builder, history_loader, weights_loader, intelligence_loader, context_loader):
+            provider.assert_not_called()
+
+    def test_explicit_prepare_invokes_export_orchestration_once(self):
+        import app
+
+        holdings, metrics, history, _, _ = self.inputs()
+        expected = {"portfolio_export.md": "md", "portfolio_export.json": "json", "holdings.csv": "csv"}
+        with unittest.mock.patch("app.load_performance_history", return_value=history) as history_loader, unittest.mock.patch("app._build_shared_production_export_package", return_value=expected) as builder:
+            result = app._prepare_shared_exports_on_demand(True, pd.DataFrame(holdings), metrics, projection_biweekly=350, projection_return_pct=7, espp_biweekly=125, espp_purchase_frequency="3_months", espp_discount=0.10)
+        self.assertEqual(result, expected)
+        history_loader.assert_called_once()
+        builder.assert_called_once()
+
     def test_json_contains_current_summary_holdings_and_analysis_sections(self):
         holdings, metrics, history, weights, external = self.inputs()
         package = export_package(holdings, metrics, history=history, fund_weights=weights, external_context=external)

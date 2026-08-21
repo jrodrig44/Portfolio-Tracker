@@ -4832,6 +4832,11 @@ def _build_shared_production_export_package(
     fund_weights: dict[str, dict[str, float]] | None = None,
     external_context: dict[str, object] | None = None,
     generated_at: str | None = None,
+    projection_biweekly: float = DEFAULT_PROJECTION_BIWEEKLY_CONTRIB,
+    projection_return_pct: float = 8.0,
+    espp_biweekly: float = ESPP_CONTRIB_BIWEEKLY,
+    espp_purchase_frequency: str = ESPP_PURCHASE_FREQUENCY,
+    espp_discount: float = ESPP_DISCOUNT,
 ) -> dict[str, str]:
     """Canonical pure export used by the Streamlit and NiceGUI download paths.
 
@@ -4841,7 +4846,7 @@ def _build_shared_production_export_package(
     """
     records = holdings_df.to_dict(orient="records") if isinstance(holdings_df, pd.DataFrame) else []
     if fund_weights is None or external_context is None:
-        resolved_weights, resolved_context = _resolve_shared_export_enrichment(metrics_df)
+        resolved_weights, resolved_context = _resolve_shared_export_enrichment(metrics_df, biweekly_contribution=projection_biweekly)
         if fund_weights is None:
             fund_weights = resolved_weights
         if external_context is None:
@@ -4856,6 +4861,11 @@ def _build_shared_production_export_package(
         use_export_json_data=_use_export_json_data(),
         strict_export_accuracy=_strict_export_accuracy_mode(),
         current_live_export=not _strict_export_accuracy_mode(),
+        projection_biweekly=projection_biweekly,
+        projection_return_pct=projection_return_pct,
+        espp_biweekly=espp_biweekly,
+        espp_purchase_frequency=espp_purchase_frequency,
+        espp_discount=espp_discount,
     )
 
 
@@ -4922,6 +4932,32 @@ def _resolve_shared_export_enrichment(
     if not fund_weights and not intelligence_rows and not historical_rows:
         external_context["notes"] = ["External Yahoo enrichment was not supplied for this export."]
     return fund_weights, external_context
+
+
+def _prepare_shared_exports_on_demand(
+    requested: bool,
+    holdings_df: pd.DataFrame,
+    metrics_df: pd.DataFrame,
+    *,
+    projection_biweekly: float,
+    projection_return_pct: float,
+    espp_biweekly: float,
+    espp_purchase_frequency: str,
+    espp_discount: float,
+) -> dict[str, str] | None:
+    """Build comprehensive downloads only after the explicit prepare action."""
+    if not requested:
+        return None
+    return _build_shared_production_export_package(
+        holdings_df,
+        metrics_df,
+        history=load_performance_history(STATEMENT_HISTORY_DB_PATH),
+        projection_biweekly=projection_biweekly,
+        projection_return_pct=projection_return_pct,
+        espp_biweekly=espp_biweekly,
+        espp_purchase_frequency=espp_purchase_frequency,
+        espp_discount=espp_discount,
+    )
 
 
 def _normalize_espp_acquired_shares(holdings: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
@@ -5168,11 +5204,31 @@ def _render_holdings_tab(current_holdings: pd.DataFrame, mobile_mode: bool = Fal
     st.caption(_manual_input_data_note())
 
     export_metrics = _compute_metrics(persist_df, price_map, yield_map)
-    shared_exports = _build_shared_production_export_package(
-        persist_df,
-        export_metrics,
-        history=load_performance_history(STATEMENT_HISTORY_DB_PATH),
+    projection_biweekly = float(st.session_state.get("analysis_biweekly_contribution", DEFAULT_PROJECTION_BIWEEKLY_CONTRIB))
+    projection_return_pct = float(st.session_state.get("analysis_projection_return", 8.0))
+    espp_biweekly = float(st.session_state.get("analysis_espp_contrib_biweekly", ESPP_CONTRIB_BIWEEKLY))
+    espp_purchase_frequency = str(st.session_state.get("analysis_espp_purchase_frequency", ESPP_PURCHASE_FREQUENCY))
+    espp_discount = float(st.session_state.get("analysis_espp_discount", ESPP_DISCOUNT))
+    export_signature = (
+        export_metrics.to_json(orient="split", date_format="iso"), projection_biweekly,
+        projection_return_pct, espp_biweekly, espp_purchase_frequency, espp_discount,
+        _use_export_json_data(), _strict_export_accuracy_mode(),
     )
+    if st.session_state.get("shared_export_signature") != export_signature:
+        st.session_state.pop("shared_export_package", None)
+    prepare_exports = st.button("Prepare comprehensive exports", key="prepare_shared_exports")
+    prepared = _prepare_shared_exports_on_demand(
+        prepare_exports, persist_df, export_metrics,
+        projection_biweekly=projection_biweekly,
+        projection_return_pct=projection_return_pct,
+        espp_biweekly=espp_biweekly,
+        espp_purchase_frequency=espp_purchase_frequency,
+        espp_discount=espp_discount,
+    )
+    if prepared is not None:
+        st.session_state["shared_export_package"] = prepared
+        st.session_state["shared_export_signature"] = export_signature
+    shared_exports = st.session_state.get("shared_export_package")
     left, middle, right = st.columns([1, 1, 1])
     with left:
         st.download_button(
@@ -5182,18 +5238,11 @@ def _render_holdings_tab(current_holdings: pd.DataFrame, mobile_mode: bool = Fal
             mime="text/csv",
         )
     with middle:
-        st.download_button(
-            label="Export AI-friendly summary",
-            data=shared_exports["portfolio_export.md"].encode("utf-8"),
-            file_name="portfolio_export.md",
-            mime="text/markdown",
-        )
-        st.download_button(
-            label="Export AI JSON payload",
-            data=shared_exports["portfolio_export.json"].encode("utf-8"),
-            file_name="portfolio_export.json",
-            mime="application/json",
-        )
+        if isinstance(shared_exports, dict):
+            st.download_button(label="Export AI-friendly summary", data=shared_exports["portfolio_export.md"].encode("utf-8"), file_name="portfolio_export.md", mime="text/markdown")
+            st.download_button(label="Export AI JSON payload", data=shared_exports["portfolio_export.json"].encode("utf-8"), file_name="portfolio_export.json", mime="application/json")
+        else:
+            st.caption("Prepare comprehensive exports to resolve cached export enrichment and enable downloads.")
     with right:
         if st.button("Clear all holdings", type="secondary"):
             empty = pd.DataFrame(columns=REQUIRED_COLUMNS)

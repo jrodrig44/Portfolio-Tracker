@@ -27,26 +27,41 @@ def _sanitize(value: Any) -> Any:
     return str(value)
 
 
-def build_export_payload(holdings: list[dict[str, Any]], metrics: pd.DataFrame, *, history: list[dict[str, Any]] | None = None, fund_weights: dict[str, dict[str, float]] | None = None, external_context: dict[str, Any] | None = None, generated_at: str | None = None, use_export_json_data: bool = False, strict_export_accuracy: bool = False, current_live_export: bool = True) -> dict[str, Any]:
+def build_export_payload(holdings: list[dict[str, Any]], metrics: pd.DataFrame, *, history: list[dict[str, Any]] | None = None, fund_weights: dict[str, dict[str, float]] | None = None, external_context: dict[str, Any] | None = None, generated_at: str | None = None, use_export_json_data: bool = False, strict_export_accuracy: bool = False, current_live_export: bool = True, projection_biweekly: float = 280.0, projection_return_pct: float = 8.0, espp_biweekly: float = 100.0, espp_purchase_frequency: str = "6_months", espp_discount: float = 0.15) -> dict[str, Any]:
     """Build a comprehensive read-only export from the shared portfolio packages."""
-    analysis = build_analysis(metrics, fund_weights=fund_weights)
-    health = build_portfolio_health(metrics, fund_weights=fund_weights)
-    insights = build_portfolio_insights(metrics, fund_weights=fund_weights)
+    prepared_metrics = metrics.copy()
+    if not prepared_metrics.empty and "ticker" in prepared_metrics:
+        hd = prepared_metrics["ticker"].fillna("").astype(str).str.upper().eq("HD")
+        if hd.any():
+            prepared_metrics.loc[hd, "regular_biweekly_contribution"] = 0.0
+            prepared_metrics.loc[hd, "special_contribution"] = 0.0
+            prepared_metrics.loc[hd, "espp_biweekly_contribution"] = float(espp_biweekly)
+            prepared_metrics.loc[hd, "espp_discount_pct"] = float(espp_discount) * 100.0 if abs(float(espp_discount)) <= 1.0 else float(espp_discount)
+            prepared_metrics.loc[hd, "employer_stock"] = True
+            prepared_metrics.loc[hd, "espp_enabled"] = True
+    analysis = build_analysis(prepared_metrics, fund_weights=fund_weights, expected_return=projection_return_pct, projection_biweekly=projection_biweekly)
+    health = build_portfolio_health(prepared_metrics, fund_weights=fund_weights)
+    insights = build_portfolio_insights(prepared_metrics, fund_weights=fund_weights)
     historical = build_history_package(history or [], "ALL")
     totals = analysis.get("totals", {})
     contribution = insights["contribution"]
     summary = contribution["summary"]
+    contribution_rows = [dict(row) for row in contribution["rows"]]
+    selected_discount_pct = float(espp_discount) * 100.0 if abs(float(espp_discount)) <= 1.0 else float(espp_discount)
+    for row in contribution_rows:
+        if str(row.get("ticker", "")).strip().upper() == "HD":
+            row["espp_discount_pct"] = selected_discount_pct
     external = external_context or {"supplemental_investment_intelligence": [], "historical_security_context": [], "dividend_seasonality": {}, "yahoo_metadata": [], "notes": ["External Yahoo enrichment was not supplied for this export."]}
     data_quality = analysis.get("data_completeness", {})
     payload = {
         "snapshot_timestamp": generated_at or datetime.now().isoformat(timespec="seconds"), "currency": "USD", "export_version": "2.0", "schema_version": "2.0",
         "export_accuracy": {"use_export_json_data": bool(use_export_json_data), "strict_export_accuracy": bool(strict_export_accuracy), "current_live_export": bool(current_live_export), "market_data_resolution": "already_resolved_metrics"},
         "totals": {"portfolio_value": totals.get("total_portfolio_value", 0.0), "cost_basis": totals.get("total_cost_basis", 0.0), "unrealized_gain": totals.get("total_unrealized_gain", 0.0), "annual_income": totals.get("total_estimated_annual_income", 0.0), "weighted_yield_pct": totals.get("weighted_portfolio_yield", 0.0), "holdings_count": len(metrics.index), "largest_holding": totals.get("largest_holding", "N/A"), "largest_holding_weight_pct": totals.get("largest_holding_weight", 0.0)},
-        "holdings": metrics.to_dict(orient="records"),
+        "holdings": prepared_metrics.to_dict(orient="records"),
         "allocation": {"asset_type": analysis.get("asset_allocation", []), "economic_exposure": totals.get("economic_exposure_allocation", [])},
         "exposure": {"direct_sector_exposure": analysis.get("direct_sector", []), "look_through_exposure": analysis.get("fund_lookthrough", {}).get("records", []), "unresolved_fund_exposure": analysis.get("fund_lookthrough", {}).get("unresolved_records", []), "data_completeness": analysis.get("data_completeness", {})},
         "income": {"by_asset_type": totals.get("income_allocation_by_asset_type", []), "quality": analysis.get("income_quality", [])},
-        "contributions": {"regular_biweekly": summary["regular_biweekly"], "espp_biweekly": summary["espp_biweekly"], "combined_recurring_biweekly": summary["combined_biweekly"], "regular_annual": summary["regular_annual"], "espp_annual": summary["espp_annual"], "combined_recurring_annual": summary["combined_annual"], "special_contribution": summary.get("special_contribution", 0.0), "distribution_by_holding": contribution["rows"], "employer_stock_context": analysis.get("contributions", {}).get("employer_stock_rows", [])},
+        "contributions": {"regular_biweekly": summary["regular_biweekly"], "espp_biweekly": summary["espp_biweekly"], "combined_recurring_biweekly": summary["combined_biweekly"], "regular_annual": summary["regular_annual"], "espp_annual": summary["espp_annual"], "combined_recurring_annual": summary["combined_annual"], "special_contribution": summary.get("special_contribution", 0.0), "distribution_by_holding": contribution_rows, "employer_stock_context": analysis.get("contributions", {}).get("employer_stock_rows", []), "espp_context": {"biweekly_contribution": float(espp_biweekly), "purchase_frequency": str(espp_purchase_frequency), "discount_pct": selected_discount_pct}},
         "concentration": analysis.get("concentration", {}), "projections": analysis.get("snapshot", {}), "health_score": health, "alerts": {"health_alerts": health.get("alerts", [])}, "insights": {"observations": insights["observations"]}, "historical": historical,
         "external_context": external,
         "dividend_data_metadata": external.get("yahoo_metadata", []),
@@ -59,8 +74,11 @@ def build_export_payload(holdings: list[dict[str, Any]], metrics: pd.DataFrame, 
         "investor_profile": external.get("investor_profile", {}),
         "recommendation_constraints": external.get("recommendation_constraints", {}),
         "field_definitions": {"portfolio_value": "Current nominal market value from already-resolved metrics.", "weighted_yield_pct": "Estimated annual income divided by current portfolio value, expressed from 0 to 100.", "special_contribution": "Separate additional contribution excluded from recurring annual totals."},
+        "export_assumptions": {"projection_biweekly": float(projection_biweekly), "projection_return_pct": float(projection_return_pct), "espp_biweekly": float(espp_biweekly), "espp_purchase_frequency": str(espp_purchase_frequency), "espp_discount_pct": selected_discount_pct},
         "data_limitations": ["Historical portfolio values are nominal account values, not contribution-adjusted investment returns.", "Missing historical periods are not interpolated.", "Fund look-through is limited to supplied underlying sector weights."],
     }
+    if payload["projections"]:
+        payload["projections"]["projection_contribution_note"] = f"Projection calculations use the regular ${float(projection_biweekly):,.2f} biweekly contribution assumption at {float(projection_return_pct):g}% expected annual return and exclude ESPP contributions unless otherwise stated."
     return _sanitize(payload)
 
 
