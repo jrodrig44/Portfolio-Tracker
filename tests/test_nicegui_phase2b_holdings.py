@@ -69,7 +69,7 @@ class Phase2BHoldingsTests(unittest.TestCase):
         with sqlite3.connect(self.db) as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM holdings").fetchone()[0], 0)
 
-    def test_edit_updates_only_exposed_fields_and_preserves_hd_special_state(self) -> None:
+    def test_hd_to_hd_edit_preserves_defaults_and_unrelated_columns(self) -> None:
         row = self.service.add(valid("HD"))
         with sqlite3.connect(self.db) as connection:
             connection.execute("UPDATE holdings SET preserved_note='secret' WHERE rowid=?", (row["_holding_id"],))
@@ -85,13 +85,56 @@ class Phase2BHoldingsTests(unittest.TestCase):
         self.assertEqual(result["espp_enabled"], 1)
         self.assertEqual(result["espp_discount"], .15)
         self.assertEqual(result["espp_purchase_frequency_months"], 6)
+        self.assertEqual(result["espp_purchase_frequency"], "approximately_every_6_months")
         self.assertAlmostEqual(result["espp_acquired_shares"], 2.987654321)
 
-        ordinary = self.service.add(valid("ACME"))
+    def test_hd_to_non_hd_clears_only_hd_derived_metadata(self) -> None:
+        row = self.service.add(valid("HD"))
         with sqlite3.connect(self.db) as connection:
-            connection.execute("UPDATE holdings SET employer_stock=1 WHERE rowid=?", (ordinary["_holding_id"],))
-        preserved = self.service.edit(ordinary["_holding_id"], {**valid("ACME"), "shares": 3})
-        self.assertEqual(preserved["employer_stock"], 1)
+            connection.execute("UPDATE holdings SET preserved_note='still-here' WHERE rowid=?", (row["_holding_id"],))
+        changed = valid("SCHD")
+        changed.update({"is_espp": True, "espp_discount": 0.12, "espp_acquired_shares": 0.5, "espp_purchase_frequency_months": 3})
+        result = self.service.edit(row["_holding_id"], changed)
+        self.assertEqual(result["employer_stock"], 0)
+        self.assertEqual(result["espp_purchase_frequency"], "")
+        self.assertEqual(result["preserved_note"], "still-here")
+        self.assertEqual(result["is_espp"], 1)
+        self.assertEqual(result["espp_enabled"], 1)
+        self.assertEqual(result["espp_discount"], 0.12)
+        self.assertEqual(result["espp_discount_pct"], 12)
+        self.assertEqual(result["espp_acquired_shares"], 0.5)
+        self.assertEqual(result["espp_purchase_frequency_months"], 3)
+
+    def test_non_hd_to_hd_establishes_production_defaults(self) -> None:
+        row = self.service.add(valid("SCHD"))
+        changed = valid("HD")
+        changed.update({"shares": 4, "regular_biweekly_contribution": 280, "special_contribution": 500, "espp_contribution_biweekly": 0})
+        result = self.service.edit(row["_holding_id"], changed)
+        self.assertEqual(result["employer_stock"], 1)
+        self.assertEqual(result["espp_enabled"], 1)
+        self.assertEqual(result["is_espp"], 1)
+        self.assertEqual(result["regular_biweekly_contribution"], 0)
+        self.assertEqual(result["special_contribution"], 0)
+        self.assertEqual(result["espp_contribution_biweekly"], 100)
+        self.assertEqual(result["espp_discount"], 0.15)
+        self.assertEqual(result["espp_discount_pct"], 15)
+        self.assertEqual(result["espp_purchase_frequency_months"], 6)
+        self.assertEqual(result["espp_purchase_frequency"], "approximately_every_6_months")
+        self.assertEqual(result["espp_acquired_shares"], 4)
+
+    def test_non_hd_generic_espp_fields_survive_edit(self) -> None:
+        payload = valid("ACME")
+        payload.update({"is_espp": True, "espp_contribution_biweekly": 75, "espp_discount": 0.10, "espp_acquired_shares": 0.75, "espp_purchase_frequency_months": 3})
+        row = self.service.add(payload)
+        result = self.service.edit(row["_holding_id"], {**payload, "shares": 2})
+        self.assertEqual(result["employer_stock"], 0)
+        self.assertEqual(result["espp_purchase_frequency"], "")
+        self.assertEqual(result["is_espp"], 1)
+        self.assertEqual(result["espp_enabled"], 1)
+        self.assertEqual(result["espp_contribution_biweekly"], 75)
+        self.assertEqual(result["espp_discount"], 0.10)
+        self.assertEqual(result["espp_acquired_shares"], 0.75)
+        self.assertEqual(result["espp_purchase_frequency_months"], 3)
 
     def test_delete_requires_confirmation_and_removes_only_stable_row(self) -> None:
         first = self.service.add(valid("SCHD"))

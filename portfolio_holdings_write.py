@@ -113,7 +113,7 @@ class HoldingsWriteService:
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 columns = self._columns(connection)
-                record = self._storage_values(normalized, columns, include_defaults=True)
+                record = self._storage_values(normalized, columns)
                 names = list(record)
                 placeholders = ", ".join("?" for _ in names)
                 cursor = connection.execute(
@@ -138,7 +138,7 @@ class HoldingsWriteService:
                 columns = self._columns(connection)
                 current = self.get(holding_id, connection=connection)
                 normalized = normalize_holding_input(values, existing=current)
-                record = self._storage_values(normalized, columns, include_defaults=False)
+                record = self._storage_values(normalized, columns)
                 assignments = ", ".join(f"{name}=?" for name in record)
                 cursor = connection.execute(
                     f"UPDATE {HOLDINGS_TABLE} SET {assignments} WHERE rowid=?",
@@ -192,18 +192,18 @@ class HoldingsWriteService:
                 connection.close()
 
     @staticmethod
-    def _storage_values(values: Mapping[str, Any], columns: set[str], *, include_defaults: bool) -> dict[str, Any]:
+    def _storage_values(values: Mapping[str, Any], columns: set[str]) -> dict[str, Any]:
         record = {key: values[key] for key in EDITABLE_FIELDS if key in columns and key in values}
         if "espp_biweekly_contribution" in columns:
             record["espp_biweekly_contribution"] = values["espp_contribution_biweekly"]
-        if "employer_stock" in columns and (include_defaults or values["ticker"] == "HD"):
+        if "employer_stock" in columns:
             record["employer_stock"] = int(values["ticker"] == "HD")
         if "espp_enabled" in columns:
             record["espp_enabled"] = int(bool(values["is_espp"]))
         if "espp_discount_pct" in columns:
             record["espp_discount_pct"] = values["espp_discount"] * 100.0
-        if "espp_purchase_frequency" in columns and values["ticker"] == "HD":
-            record["espp_purchase_frequency"] = "approximately_every_6_months"
+        if "espp_purchase_frequency" in columns:
+            record["espp_purchase_frequency"] = "approximately_every_6_months" if values["ticker"] == "HD" else ""
         return record
 
 
