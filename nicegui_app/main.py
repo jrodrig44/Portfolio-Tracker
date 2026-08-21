@@ -23,6 +23,7 @@ from nicegui_app.services.history import history_package
 from nicegui_app.services.insights import insights_package
 from nicegui_app.services.portfolio_data import DEFAULT_HISTORY_RANGE,HISTORY_RANGE_OPTIONS,portfolio_summary
 from nicegui_app.services.refresh import ReadOnlyRefreshCoordinator
+from nicegui_app.services.ui_state import PageUIState
 from nicegui_app.services.yahoo import current_market_data,yahoo_intelligence_package
 from portfolio_holdings_write import ASSET_TYPES, HoldingsWriteService, summarize_contributions
 from nicegui_app.services.operations import format_interval, operational_status
@@ -84,7 +85,8 @@ async def index() -> None:
     ui.query("body").classes("overflow-x-hidden")
     holdings: list[dict[str, Any]] = []
     history: list[dict[str, Any]] = []
-    history_range = DEFAULT_HISTORY_RANGE
+    ui_state = PageUIState(history_range=DEFAULT_HISTORY_RANGE)
+    history_range = ui_state.history_range
     metrics = None
     coordinator = ReadOnlyRefreshCoordinator(market_loader=current_market_data)
     holdings_writer = HoldingsWriteService(coordinator.portfolio_path)
@@ -100,12 +102,11 @@ async def index() -> None:
             spinner = ui.spinner(size="lg")
             status = ui.label("Loading portfolio and history from read-only databases…").classes("grow text-sm break-words")
             refresh_button = ui.button("Refresh Data", icon="refresh").classes("min-h-11")
-        mobile_navigation = ui.select(list(NAVIGATION_AREAS), value="Holdings", label="Current section").classes("w-full lg:hidden").props("outlined options-dense")
-        with ui.element("nav").classes("hidden lg:block w-full max-w-full overflow-x-auto").props('aria-label="Portfolio sections"'):
-            tabs = ui.tabs().classes("w-max min-w-full").props("outside-arrows")
+        with ui.element("nav").classes("w-full max-w-full overflow-x-auto").props('aria-label="Portfolio sections"'):
+            tabs = ui.tabs().classes("w-max min-w-full").props("mobile-arrows outside-arrows")
         with tabs:
             tab_objects = {name: ui.tab(name) for name in NAVIGATION_AREAS}
-        with ui.tab_panels(tabs, value=tab_objects["Holdings"]).classes("w-full"):
+        with ui.tab_panels(tabs, value=tab_objects[ui_state.selected_navigation]).classes("w-full"):
             areas: dict[str, Any] = {}
             for name in NAVIGATION_AREAS:
                 with ui.tab_panel(tab_objects[name]):
@@ -184,7 +185,9 @@ async def index() -> None:
             ui.button("Add Holding", icon="add", on_click=lambda: open_holding_dialog()).classes("w-full sm:w-auto min-h-11")
             metric_cards([("Portfolio value", currency(summary["portfolio_value"])), ("Cost basis", currency(summary["cost_basis"])), ("Unrealized gain/loss", currency(summary["unrealized_gain"])), ("Estimated annual income", currency(summary["annual_income"])), ("Weighted yield", percent(summary["weighted_yield_pct"])), ("Holdings", format_count(summary["holding_count"])), ("Largest holding", str(summary["largest_holding"])), ("Largest weight", percent(summary["largest_weight_pct"]))])
             contribution_totals = summarize_contributions(holdings)
-            with ui.expansion("Contribution Settings", value=True).classes("w-full"):
+            contribution_expansion = ui.expansion("Contribution Settings", value=ui_state.expansion_value("contributions")).classes("w-full")
+            contribution_expansion.on_value_change(lambda event: ui_state.set_expansion("contributions", event.value))
+            with contribution_expansion:
                 ui.label("Regular and ESPP amounts repeat across 26 pay periods each year. Special contributions are one-time amounts and are never annualized.").classes("w-full rounded-lg bg-blue-50 p-3 text-sm text-blue-900 break-words")
                 metric_cards([
                     ("Regular biweekly", currency(contribution_totals["regular_biweekly"])),
@@ -231,12 +234,12 @@ async def index() -> None:
                             save_button = ui.button("Save Contributions", icon="save", on_click=save_contributions).classes("w-full sm:w-auto min-h-11")
                             ui.button("Cancel", on_click=dialog.close).props("flat").classes("w-full sm:w-auto min-h-11")
                     dialog.open()
-                with ui.element("div").classes("w-full grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3"):
+                with ui.column().classes("w-full gap-0 divide-y divide-gray-200"):
                     for stored in holdings:
-                        with ui.card().classes("w-full"):
-                            ui.label(str(stored.get("ticker", ""))).classes("text-lg font-semibold")
-                            ui.label(f"Regular {currency(stored.get('regular_biweekly_contribution', 0))} · ESPP {currency(stored.get('espp_biweekly_contribution', 0))} · Special {currency(stored.get('special_contribution', 0))}").classes("text-sm text-gray-600")
-                            ui.button("Edit Contributions", icon="payments", on_click=lambda row=stored: open_contribution_dialog(row)).classes("w-full sm:w-auto min-h-11")
+                        with ui.row().classes("w-full min-w-0 flex-wrap items-center gap-2 py-2"):
+                            ui.label(str(stored.get("ticker", ""))).classes("w-20 font-semibold break-words")
+                            ui.label(f"Regular {currency(stored.get('regular_biweekly_contribution', 0))} · ESPP {currency(stored.get('espp_biweekly_contribution', 0))} · Special {currency(stored.get('special_contribution', 0))} · ESPP {'Active' if stored.get('espp_enabled', stored.get('is_espp')) else 'Not active'}").classes("grow min-w-0 text-sm text-gray-600 break-words")
+                            ui.button("Edit Contributions", icon="payments", on_click=lambda row=stored: open_contribution_dialog(row)).props("flat dense").classes("w-full sm:w-auto min-h-11")
                 if not holdings:
                     ui.label("Add a holding to configure recurring or special contributions.").classes(EMPTY_STATE)
             fields = (("ticker", "Ticker"), ("shares", "Shares"), ("current_price", "Current Price"), ("market_value", "Market Value"), ("average_cost", "Average Cost"), ("cost_basis", "Cost Basis"), ("unrealized_gain", "Unrealized G/L"), ("dividend_yield_pct", "Dividend Yield %"), ("annual_income", "Annual Income"), ("asset_type", "Asset Type"), ("sector", "Sector"), ("regular_biweekly_contribution", "Regular Biweekly"), ("espp_biweekly_contribution", "ESPP Biweekly"), ("special_contribution", "Special Contribution"), ("employer_stock", "Employer Stock"), ("espp_enabled", "ESPP"))
@@ -250,13 +253,16 @@ async def index() -> None:
                     ui.table(columns=columns, rows=rows, row_key="ticker", pagination=25).classes("w-full min-w-max").props("dense flat bordered")
             else:
                 ui.label("Your portfolio has no holdings yet. Use Add Holding to create the first one.").classes(EMPTY_STATE)
-            with ui.expansion("Edit or delete a holding").classes("w-full"):
-                with ui.element("div").classes("w-full grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3"):
+            management_expansion = ui.expansion("Edit or delete a holding", value=ui_state.expansion_value("management")).classes("w-full")
+            management_expansion.on_value_change(lambda event: ui_state.set_expansion("management", event.value))
+            with management_expansion:
+                with ui.column().classes("w-full gap-0 divide-y divide-gray-200"):
                     for stored in holdings:
-                        with ui.card().classes("w-full"):
-                            ui.label(str(stored.get("ticker", ""))).classes("text-lg font-semibold")
-                            with ui.element("div").classes(RESPONSIVE_ACTIONS):
-                                ui.button("Edit", icon="edit", on_click=lambda row=stored: open_holding_dialog(row)).classes("w-full sm:w-auto min-h-11")
+                        with ui.row().classes("w-full min-w-0 flex-wrap items-center gap-2 py-2"):
+                            ui.label(str(stored.get("ticker", ""))).classes("w-20 font-semibold break-words")
+                            ui.label(f"{format_field_value('shares', stored.get('shares'))} shares · {str(stored.get('asset_type') or 'Unclassified')} · {str(stored.get('sector') or 'Unclassified')}").classes("grow min-w-0 text-sm text-gray-600 break-words")
+                            with ui.row().classes("w-full sm:w-auto gap-2"):
+                                ui.button("Edit", icon="edit", on_click=lambda row=stored: open_holding_dialog(row)).props("flat dense").classes("grow sm:grow-0 min-h-11")
                                 def confirm_delete(row: dict[str, Any] = stored) -> None:
                                     with ui.dialog() as confirm, ui.card().classes(CONFIRM_DIALOG_CARD):
                                         ui.label(f"Delete {row.get('ticker', '')} from the portfolio?").classes("text-lg font-semibold")
@@ -281,7 +287,7 @@ async def index() -> None:
                                             delete_button = ui.button("Delete Holding", icon="delete", color="negative", on_click=remove).classes("w-full sm:w-auto min-h-11")
                                             ui.button("Cancel", on_click=confirm.close).props("flat").classes("w-full sm:w-auto min-h-11")
                                     confirm.open()
-                                ui.button("Delete", icon="delete", color="negative", on_click=confirm_delete).classes("w-full sm:w-auto min-h-11")
+                                ui.button("Delete", icon="delete", color="negative", on_click=confirm_delete).props("flat dense").classes("grow sm:grow-0 min-h-11")
                 if not holdings:
                     ui.label("There are no holdings to edit or delete.").classes(EMPTY_STATE)
             ui.label("Read-only exports").classes("text-lg font-semibold mt-3")
@@ -758,6 +764,7 @@ async def index() -> None:
     def render_history(selected_range: str = DEFAULT_HISTORY_RANGE) -> None:
         nonlocal history_range
         history_range = selected_range
+        ui_state.history_range = selected_range
         area = areas["History"]
         area.clear()
         with area:
@@ -769,6 +776,7 @@ async def index() -> None:
             def update_chart(range_name: str) -> None:
                 nonlocal history_range
                 history_range = range_name
+                ui_state.history_range = range_name
                 chart_area.clear()
                 package = history_package(history, range_name)
                 with chart_area:
@@ -827,8 +835,7 @@ async def index() -> None:
 
     async def navigate(event: Any) -> None:
         name = str(event.value)
-        if mobile_navigation.value != name:
-            mobile_navigation.set_value(name)
+        ui_state.selected_navigation = name
         if name == "Portfolio Analysis": await render_analysis()
         elif name == "AI Analysis": render_ai()
         elif name == "Portfolio Insights": await render_insights()
@@ -839,7 +846,6 @@ async def index() -> None:
         elif name == "System": render_system()
 
     tabs.on_value_change(navigate)
-    mobile_navigation.on_value_change(lambda event: tabs.set_value(str(event.value)))
     async def refresh_data(force: bool = False) -> None:
         nonlocal holdings,history,metrics
         result = await run.io_bound(coordinator.refresh,force)

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 from pathlib import Path
 import unittest
 
@@ -13,6 +12,7 @@ from nicegui_app.services.formatting import (
     SAFE_RICH_OUTPUT,
     SCROLL_TABLE,
 )
+from nicegui_app.services.ui_state import PageUIState
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,34 +23,14 @@ class NiceGUIPhase2HPolishTests(unittest.TestCase):
     def test_single_destination_mapping_drives_desktop_and_mobile_navigation(self) -> None:
         self.assertEqual(len(NAVIGATION_AREAS), 9)
         self.assertEqual(len(set(NAVIGATION_AREAS)), 9)
-        self.assertIn('ui.select(list(NAVIGATION_AREAS), value="Holdings", label="Current section")', MAIN)
-        self.assertIn('classes("w-full lg:hidden")', MAIN)
-        self.assertIn('classes("hidden lg:block w-full max-w-full overflow-x-auto")', MAIN)
-        self.assertNotIn('classes("w-full md:hidden")', MAIN)
-        self.assertNotIn('classes("hidden md:block w-full max-w-full overflow-x-auto")', MAIN)
-        self.assertIn("mobile_navigation.on_value_change", MAIN)
-        self.assertIn("mobile_navigation.set_value(name)", MAIN)
-        self.assertNotIn("mobile-arrows", MAIN)
-
-    def test_mobile_select_converts_immutable_navigation_tuple_to_list_at_api_boundary(self) -> None:
-        tree = ast.parse(MAIN)
-        navigation_calls = [
-            node for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id == "ui"
-            and node.func.attr == "select"
-            and any(keyword.arg == "label" and isinstance(keyword.value, ast.Constant) and keyword.value.value == "Current section" for keyword in node.keywords)
-        ]
-        self.assertEqual(len(navigation_calls), 1)
-        options = navigation_calls[0].args[0]
-        self.assertIsInstance(options, ast.Call)
-        self.assertIsInstance(options.func, ast.Name)
-        self.assertEqual(options.func.id, "list")
-        self.assertEqual(len(options.args), 1)
-        self.assertIsInstance(options.args[0], ast.Name)
-        self.assertEqual(options.args[0].id, "NAVIGATION_AREAS")
+        self.assertIn('tabs = ui.tabs().classes("w-max min-w-full")', MAIN)
+        self.assertIn('tab_objects = {name: ui.tab(name) for name in NAVIGATION_AREAS}', MAIN)
+        self.assertIn("mobile-arrows outside-arrows", MAIN)
+        self.assertIn('ui.element("nav").classes("w-full max-w-full overflow-x-auto")', MAIN)
+        self.assertNotIn("hidden lg:block", MAIN)
+        self.assertNotIn("mobile_navigation", MAIN)
+        self.assertIn("tabs.on_value_change(navigate)", MAIN)
+        self.assertIn("ui_state.selected_navigation = name", MAIN)
 
     def test_hd_forced_controls_are_visible_disabled_and_transition_aware(self) -> None:
         form = MAIN.split("def holding_form", 1)[1].split("def open_holding_dialog", 1)[0]
@@ -98,6 +78,45 @@ class NiceGUIPhase2HPolishTests(unittest.TestCase):
             "Add a holding before requesting supplemental research",
         ):
             self.assertIn(message, MAIN)
+
+    def test_holdings_and_contributions_use_compact_rows_not_per_holding_cards(self) -> None:
+        contributions = MAIN.split('with ui.column().classes("w-full gap-0 divide-y divide-gray-200")', 1)[1].split("fields =", 1)[0]
+        management = MAIN.split('management_expansion = ui.expansion', 1)[1].split('ui.label("Read-only exports")', 1)[0]
+        self.assertIn("for stored in holdings", contributions)
+        self.assertIn('with ui.row().classes("w-full min-w-0 flex-wrap items-center gap-2 py-2")', contributions)
+        self.assertNotIn("ui.card()", contributions)
+        self.assertIn('ui.button("Edit Contributions"', contributions)
+        self.assertIn("for stored in holdings", management)
+        self.assertNotIn("ui.card()", management.split("def confirm_delete", 1)[0])
+        self.assertIn('int(row["_holding_id"])', management)
+        self.assertIn("expected_ticker", management)
+
+    def test_holdings_expansion_navigation_and_history_state_survive_rerender(self) -> None:
+        state = PageUIState(history_range="ALL")
+        self.assertTrue(state.expansion_value("contributions"))
+        self.assertFalse(state.expansion_value("management"))
+        state.set_expansion("contributions", False)
+        collapsed_rerender = PageUIState(
+            selected_navigation=state.selected_navigation,
+            history_range=state.history_range,
+            holdings_contributions_expanded=state.holdings_contributions_expanded,
+            holdings_management_expanded=state.holdings_management_expanded,
+        )
+        self.assertFalse(collapsed_rerender.expansion_value("contributions"))
+        collapsed_rerender.set_expansion("contributions", True)
+        collapsed_rerender.selected_navigation = "Portfolio Health"
+        collapsed_rerender.history_range = "1Y"
+        self.assertTrue(collapsed_rerender.expansion_value("contributions"))
+        self.assertEqual(collapsed_rerender.selected_navigation, "Portfolio Health")
+        self.assertEqual(collapsed_rerender.history_range, "1Y")
+        self.assertNotIn("dialog", PageUIState.__dataclass_fields__)
+        self.assertNotIn("busy", PageUIState.__dataclass_fields__)
+        self.assertIn('value=ui_state.expansion_value("contributions")', MAIN)
+        self.assertIn('ui_state.set_expansion("contributions", event.value)', MAIN)
+        self.assertIn('value=ui_state.expansion_value("management")', MAIN)
+        self.assertIn('ui_state.set_expansion("management", event.value)', MAIN)
+        self.assertIn("ui_state.selected_navigation = name", MAIN)
+        self.assertIn("ui_state.history_range = range_name", MAIN)
 
     def test_phase_boundaries_and_canonical_runtime_remain_intact(self) -> None:
         self.assertIn("PORT = 8502", MAIN)
