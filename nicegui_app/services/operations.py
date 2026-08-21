@@ -1,4 +1,4 @@
-"""Read-only discovery for user-facing operational status."""
+"""NiceGUI read-only discovery for user-facing operational status."""
 
 from __future__ import annotations
 

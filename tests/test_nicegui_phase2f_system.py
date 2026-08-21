@@ -3,7 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+import pandas as pd
 
 from nicegui_app.services.configuration import (
     DB_REFRESH_INTERVAL_SECONDS,
@@ -14,7 +17,8 @@ from nicegui_app.services.configuration import (
     PRICE_CACHE_TTL_SECONDS,
     YAHOO_METADATA_CACHE_TTL_SECONDS,
 )
-from portfolio_operations import CACHE_INTERVALS_SECONDS, format_interval, operational_status
+from nicegui_app.services.operations import CACHE_INTERVALS_SECONDS, format_interval, operational_status
+from nicegui_app.services.yahoo import current_market_data, yahoo_intelligence_package
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -85,6 +89,40 @@ class NiceGUIPhase2FSystemTests(unittest.TestCase):
         self.assertEqual([format_interval(value) for value in CACHE_INTERVALS_SECONDS.values()], [
             "1 minute", "1 day", "6 hours", "1 day", "10 minutes", "1 hour"
         ])
+
+    def test_actual_yahoo_cache_calls_use_each_production_ttl(self) -> None:
+        cache_calls: list[tuple[tuple[str, str], float]] = []
+        proxy = MagicMock()
+        proxy.info = {"trailingAnnualDividendYield": 0.04, "sector": "Technology", "trailingPE": 20}
+        proxy.funds_data = SimpleNamespace(sector_weightings={"technology": 0.5})
+        history_index = pd.to_datetime(["2025-01-02", "2026-01-02"])
+        proxy.history.return_value = pd.DataFrame({"Close": [100.0, 110.0], "Dividends": [1.0, 2.0]}, index=history_index)
+        download = pd.DataFrame({"Close": [99.0, 101.0]}, index=pd.to_datetime(["2026-01-01", "2026-01-02"]))
+
+        def observe_cache(key: tuple[str, str], loader, ttl: float):
+            cache_calls.append((key, ttl))
+            return loader()
+
+        metrics = pd.DataFrame([{"ticker": "ABC", "asset_type": "Stock", "sector": "Technology", "annual_income": 12.0}])
+        with patch("nicegui_app.services.yahoo._cached", side_effect=observe_cache), patch(
+            "nicegui_app.services.yahoo.yf.download", return_value=download
+        ), patch("nicegui_app.services.yahoo.yf.Ticker", return_value=proxy):
+            current_market_data(["ABC"])
+            yahoo_intelligence_package(metrics)
+
+        ttl_by_cache = {key[1]: ttl for key, ttl in cache_calls}
+        self.assertEqual(ttl_by_cache, {
+            "prices": 60,
+            "info": 86400,
+            "investment_intelligence": 21600,
+            "historical_context_history": 600,
+            "dividend_timing_history": 86400,
+            "fund_sector_weights": 3600,
+        })
+        self.assertNotEqual(
+            ttl_by_cache["historical_context_history"],
+            ttl_by_cache["dividend_timing_history"],
+        )
 
     def test_system_navigation_refresh_and_exclusions(self) -> None:
         source = (ROOT / "nicegui_app" / "main.py").read_text(encoding="utf-8")

@@ -25,7 +25,7 @@ from nicegui_app.services.portfolio_data import DEFAULT_HISTORY_RANGE,HISTORY_RA
 from nicegui_app.services.refresh import ReadOnlyRefreshCoordinator
 from nicegui_app.services.yahoo import current_market_data,yahoo_intelligence_package
 from portfolio_holdings_write import ASSET_TYPES, HoldingsWriteService, summarize_contributions
-from portfolio_operations import format_interval, operational_status
+from nicegui_app.services.operations import format_interval, operational_status
 from portfolio_research import PortfolioResearchService, research_contexts
 from portfolio_statement_history import StatementHistoryService, statement_display_records
 
