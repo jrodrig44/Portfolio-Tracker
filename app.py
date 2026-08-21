@@ -4840,6 +4840,12 @@ def _build_shared_production_export_package(
     database writes.
     """
     records = holdings_df.to_dict(orient="records") if isinstance(holdings_df, pd.DataFrame) else []
+    if fund_weights is None or external_context is None:
+        resolved_weights, resolved_context = _resolve_shared_export_enrichment(metrics_df)
+        if fund_weights is None:
+            fund_weights = resolved_weights
+        if external_context is None:
+            external_context = resolved_context
     return build_shared_export_package(
         records,
         metrics_df,
@@ -4851,6 +4857,71 @@ def _build_shared_production_export_package(
         strict_export_accuracy=_strict_export_accuracy_mode(),
         current_live_export=not _strict_export_accuracy_mode(),
     )
+
+
+def _resolve_shared_export_enrichment(
+    metrics_df: pd.DataFrame,
+    *,
+    biweekly_contribution: float = DEFAULT_PROJECTION_BIWEEKLY_CONTRIB,
+) -> tuple[dict[str, dict[str, float]], dict[str, object]]:
+    """Reuse production-cached enrichment before calling the pure export builder."""
+    tickers = _to_ticker_tuple(metrics_df.get("ticker", pd.Series(dtype=str))) if not metrics_df.empty else ()
+    fund_tickers = tuple(
+        str(row.get("ticker", "")).strip().upper()
+        for row in metrics_df.to_dict(orient="records")
+        if _canonical_asset_type(str(row.get("asset_type", ""))) in {"ETF", "Bond Fund", "CEF"} and str(row.get("ticker", "")).strip()
+    )
+    fund_weights = _latest_fund_sector_weights(fund_tickers) if fund_tickers else {}
+
+    intelligence_rows: list[dict[str, object]] = []
+    intelligence_map = _latest_investment_intelligence(tickers) if tickers else {}
+    for ticker in tickers:
+        entry = intelligence_map.get(ticker, {})
+        if entry:
+            intelligence_rows.append({
+                "ticker": ticker,
+                "fundamental_metrics": entry.get("fundamental_metrics", {}),
+                "earnings_and_estimates": entry.get("earnings_and_estimates", {}),
+                "analyst_targets": entry.get("analyst_targets", {}),
+                "fund_data": entry.get("fund_data", {}),
+                "data_source": entry.get("data_source", "Yahoo Finance"),
+            })
+
+    history_map = _resolved_historical_context(tickers) if tickers else {}
+    historical_rows = [dict(history_map[ticker]) for ticker in tickers if history_map.get(ticker)]
+    investor_profile = {
+        "portfolio_strategy": "Dividend growth and income",
+        "primary_goal": "Build long-term wealth while increasing dividend income",
+        "risk_tolerance": "Moderate",
+        "investment_horizon_years": 20,
+        "contribution_frequency": "Biweekly",
+        "contribution_amount": biweekly_contribution,
+    }
+    recommendation_constraints = {
+        "avoid_forced_selling": True,
+        "prefer_new_contributions_for_rebalancing": True,
+        "prioritize_dividend_growth": True,
+        "prioritize_total_return": True,
+        "consider_income_stability": True,
+        "do_not_recommend_based_on_yield_alone": True,
+    }
+    external_context: dict[str, object] = {
+        "supplemental_investment_intelligence": intelligence_rows,
+        "historical_security_context": historical_rows,
+        "dividend_seasonality": {},
+        "yahoo_metadata": {
+            "source": "Yahoo Finance",
+            "data_type": "current_yield",
+            "method": "Current dividend yield used to estimate annualized income",
+            "verified": False,
+        },
+        "investor_profile": investor_profile,
+        "recommendation_constraints": recommendation_constraints,
+        "notes": [],
+    }
+    if not fund_weights and not intelligence_rows and not historical_rows:
+        external_context["notes"] = ["External Yahoo enrichment was not supplied for this export."]
+    return fund_weights, external_context
 
 
 def _normalize_espp_acquired_shares(holdings: pd.DataFrame) -> tuple[pd.DataFrame, bool]:

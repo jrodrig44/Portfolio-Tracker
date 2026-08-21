@@ -55,9 +55,41 @@ class NiceGuiPhase1FExportTests(unittest.TestCase):
 
         holdings, metrics, history, weights, external = self.inputs()
         with unittest.mock.patch("app._use_export_json_data", return_value=True), unittest.mock.patch("app._strict_export_accuracy_mode", return_value=True):
-            package = app._build_shared_production_export_package(pd.DataFrame(holdings), metrics, generated_at="2026-08-20T12:00:00")
+            package = app._build_shared_production_export_package(pd.DataFrame(holdings), metrics, fund_weights={}, external_context={}, generated_at="2026-08-20T12:00:00")
         accuracy = json.loads(package["portfolio_export.json"])["export_accuracy"]
         self.assertEqual(accuracy, {"use_export_json_data": True, "strict_export_accuracy": True, "current_live_export": False, "market_data_resolution": "already_resolved_metrics"})
+
+    def test_streamlit_orchestration_forwards_cached_production_enrichment(self):
+        import app
+
+        holdings, metrics, history, _, _ = self.inputs()
+        intelligence = {"CORE": {"fundamental_metrics": {"pe_ratio": 20}, "data_source": "Yahoo Finance"}}
+        historical = {"CORE": {"ticker": "CORE", "start_price": 80, "end_price": 100, "return_pct": 25}}
+        with unittest.mock.patch("app._latest_fund_sector_weights", return_value={"FUND": {"Technology": 0.6, "Financials": 0.3}}) as weights_loader, unittest.mock.patch("app._latest_investment_intelligence", return_value=intelligence) as intelligence_loader, unittest.mock.patch("app._resolved_historical_context", return_value=historical) as history_loader, unittest.mock.patch("app._use_export_json_data", return_value=False), unittest.mock.patch("app._strict_export_accuracy_mode", return_value=False):
+            package = app._build_shared_production_export_package(pd.DataFrame(holdings), metrics, history=history, generated_at="2026-08-20T12:00:00")
+        payload = json.loads(package["portfolio_export.json"])
+        self.assertTrue(payload["exposure"]["look_through_exposure"])
+        self.assertEqual(payload["supplemental_investment_intelligence"][0]["ticker"], "CORE")
+        self.assertEqual(payload["historical_security_context"][0]["return_pct"], 25)
+        self.assertEqual(payload["dividend_data_metadata"]["source"], "Yahoo Finance")
+        self.assertEqual(payload["dividend_seasonality"], {})
+        self.assertEqual(payload["investor_profile"]["risk_tolerance"], "Moderate")
+        self.assertTrue(payload["recommendation_constraints"]["avoid_forced_selling"])
+        self.assertNotIn("External Yahoo enrichment was not supplied", package["portfolio_export.md"])
+        weights_loader.assert_called_once_with(("FUND",))
+        intelligence_loader.assert_called_once()
+        history_loader.assert_called_once()
+
+    def test_streamlit_orchestration_falls_back_safely_without_enrichment(self):
+        import app
+
+        holdings, metrics, history, _, _ = self.inputs()
+        with unittest.mock.patch("app._latest_fund_sector_weights", return_value={}), unittest.mock.patch("app._latest_investment_intelligence", return_value={}), unittest.mock.patch("app._resolved_historical_context", return_value={}), unittest.mock.patch("app._use_export_json_data", return_value=False), unittest.mock.patch("app._strict_export_accuracy_mode", return_value=False):
+            package = app._build_shared_production_export_package(pd.DataFrame(holdings), metrics, history=history, generated_at="2026-08-20T12:00:00")
+        payload = json.loads(package["portfolio_export.json"])
+        self.assertEqual(payload["exposure"]["look_through_exposure"], [])
+        self.assertEqual(payload["exposure"]["unresolved_fund_exposure"][0]["Market_Value"], 500.0)
+        self.assertIn("External Yahoo enrichment was not supplied for this export.", payload["external_context"]["notes"])
 
     def test_json_contains_current_summary_holdings_and_analysis_sections(self):
         holdings, metrics, history, weights, external = self.inputs()
