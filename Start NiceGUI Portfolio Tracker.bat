@@ -1,4 +1,10 @@
 @echo off
 set "SCRIPT_DIR=%~dp0"
 
-powershell -NoExit -ExecutionPolicy Bypass -File "%SCRIPT_DIR%run_nicegui.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%run_nicegui.ps1"
+
+if errorlevel 1 (
+    echo.
+    echo NiceGUI failed to start or exited with an error.
+    pause
+)

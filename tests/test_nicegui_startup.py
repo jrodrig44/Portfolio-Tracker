@@ -11,9 +11,13 @@ class NiceGuiStartupTests(unittest.TestCase):
         cls.batch = (ROOT / "Start NiceGUI Portfolio Tracker.bat").read_text(encoding="utf-8")
         cls.script = (ROOT / "run_nicegui.ps1").read_text(encoding="utf-8")
         cls.main = (ROOT / "nicegui_app" / "main.py").read_text(encoding="utf-8")
+        cls.lifecycle = (ROOT / "nicegui_app" / "process_lifecycle.py").read_text(encoding="utf-8")
 
     def test_batch_uses_only_nicegui_powershell_launcher(self) -> None:
         self.assertIn("run_nicegui.ps1", self.batch)
+        self.assertNotIn("-NoExit", self.batch)
+        self.assertIn("powershell -NoProfile -ExecutionPolicy Bypass -File", self.batch)
+        self.assertNotIn("Start-Process", self.batch)
         for forbidden in ("run.ps1", "start_streamlit.py", "app.py"):
             self.assertNotIn(forbidden, self.batch)
 
@@ -57,9 +61,24 @@ class NiceGuiStartupTests(unittest.TestCase):
 
     def test_launcher_rejects_duplicate_port_and_tracks_its_child_lifecycle(self) -> None:
         self.assertIn("Get-NetTCPConnection -LocalPort 8502", self.script)
+        self.assertIn("Port 8502 is already in use", self.script)
         self.assertIn("NICEGUI_LAUNCHER_PID", self.script)
         self.assertIn("& $venvPython $niceGuiMain", self.script)
         self.assertNotIn("Start-Process", self.script)
+
+    def test_main_starts_launcher_watchdog_and_watchdog_exits_with_launcher(self) -> None:
+        self.assertIn("start_launcher_watchdog()", self.main)
+        self.assertIn('os.environ.get("NICEGUI_LAUNCHER_PID"', self.lifecycle)
+        self.assertIn("WaitForSingleObject", self.lifecycle)
+        self.assertIn("os._exit(0)", self.lifecycle)
+        self.assertIn("daemon=True", self.lifecycle)
+
+    def test_nicegui_launch_chain_has_no_detachment_or_restart_path(self) -> None:
+        launch_chain = self.batch + self.script + self.lifecycle + self.main
+        for forbidden in ("Start-Process", "schtasks", "New-Service", "Startup\\", "while ($true)"):
+            self.assertNotIn(forbidden, launch_chain)
+        self.assertEqual(self.batch.count("run_nicegui.ps1"), 1)
+        self.assertEqual(self.script.count("& $venvPython $niceGuiMain"), 1)
 
     def test_production_startup_chain_still_targets_streamlit(self) -> None:
         production_batch = (ROOT / "Start Portfolio Tracker.bat").read_text(encoding="utf-8")
