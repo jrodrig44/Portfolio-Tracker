@@ -44,7 +44,7 @@ def load_holdings(db_path: Path = PORTFOLIO_DB_PATH) -> list[dict[str, Any]]:
         ).fetchone()
         if table is None:
             raise RuntimeError("Portfolio database has no holdings table.")
-        records = [dict(row) for row in connection.execute("SELECT * FROM holdings")]
+        records = [dict(row) for row in connection.execute("SELECT rowid AS _holding_id, * FROM holdings")]
 
     holdings: list[dict[str, Any]] = []
     for raw in records:
@@ -68,6 +68,7 @@ def load_holdings(db_path: Path = PORTFOLIO_DB_PATH) -> list[dict[str, Any]]:
             dividend_yield = annual_income / market_value * 100
         holdings.append(
             {
+                "_holding_id": int(row["_holding_id"]),
                 "ticker": str(row.get("ticker") or "").strip().upper(),
                 "shares": shares,
                 "current_price": current_price,
@@ -88,8 +89,11 @@ def load_holdings(db_path: Path = PORTFOLIO_DB_PATH) -> list[dict[str, Any]]:
                 "special_contribution": _number(row.get("special_contribution")),
                 "employer_stock": _boolean(row.get("employer_stock")),
                 "espp_enabled": _boolean(row.get("espp_enabled")) or _boolean(row.get("is_espp")),
+                "is_espp": _boolean(row.get("is_espp")),
                 "espp_acquired_shares": _number(row.get("espp_acquired_shares")),
-                "espp_discount_pct": _number(row.get("espp_discount_pct") or row.get("espp_discount")),
+                "espp_discount": _number(row.get("espp_discount")),
+                "espp_discount_pct": _number(row.get("espp_discount_pct")) or _number(row.get("espp_discount")) * 100.0,
+                "espp_purchase_frequency_months": _number(row.get("espp_purchase_frequency_months")) or 6.0,
                 "espp_purchase_frequency": str(row.get("espp_purchase_frequency") or ""),
             }
         )

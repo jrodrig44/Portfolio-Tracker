@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,7 @@ from nicegui_app.services.insights import insights_package
 from nicegui_app.services.portfolio_data import DEFAULT_HISTORY_RANGE,HISTORY_RANGE_OPTIONS,portfolio_summary
 from nicegui_app.services.refresh import ReadOnlyRefreshCoordinator
 from nicegui_app.services.yahoo import current_market_data,yahoo_intelligence_package
+from portfolio_holdings_write import ASSET_TYPES, HoldingsWriteService
 
 HOST = "0.0.0.0"
 PORT = 8502
@@ -78,11 +80,12 @@ async def index() -> None:
     history_range = DEFAULT_HISTORY_RANGE
     metrics = None
     coordinator = ReadOnlyRefreshCoordinator(market_loader=current_market_data)
+    holdings_writer = HoldingsWriteService(coordinator.portfolio_path)
     loaded = {name: False for name in NAVIGATION_AREAS}
 
     with ui.header().classes("flex-wrap items-center justify-between gap-2 shadow-sm px-3 sm:px-5"):
         ui.label("Portfolio Tracker").classes("text-lg sm:text-xl font-semibold")
-        ui.label("Read only · NiceGUI").classes("rounded bg-white/20 px-3 py-1 text-xs sm:text-sm")
+        ui.label("Holdings writable · NiceGUI").classes("rounded bg-white/20 px-3 py-1 text-xs sm:text-sm")
     with ui.column().classes("w-full max-w-screen-2xl mx-auto p-2 sm:p-4 gap-4"):
         with ui.row().classes("w-full flex-wrap items-center gap-2"):
             spinner = ui.spinner(size="lg")
@@ -105,7 +108,57 @@ async def index() -> None:
         summary = portfolio_summary(display_holdings)
         with area:
             ui.label("Holdings").classes("text-2xl font-semibold")
-            ui.label("Current stored portfolio data. Editing is intentionally disabled.").classes("text-gray-500")
+            ui.label("Add, edit, or remove holdings. Other portfolio data remains read-only.").classes("text-gray-500")
+            def holding_form(dialog: Any, existing: dict[str, Any] | None = None) -> None:
+                source = existing or {}
+                ticker = ui.input("Ticker", value=source.get("ticker", "")).classes(FULL_WIDTH_CONTROL)
+                with ui.element("div").classes("w-full grid grid-cols-1 sm:grid-cols-2 gap-3"):
+                    shares = ui.number("Shares", value=source.get("shares", 0.0), min=0, step=0.000001, format="%.6f").classes(FULL_WIDTH_CONTROL)
+                    espp_shares = ui.number("ESPP-acquired shares", value=source.get("espp_acquired_shares", 0.0), min=0, step=0.000001, format="%.6f").classes(FULL_WIDTH_CONTROL)
+                    invested = ui.number("Amount invested", value=source.get("amount_invested", source.get("cost_basis", 0.0)), min=0, step=0.01).classes(FULL_WIDTH_CONTROL)
+                    annual_dividend = ui.number("Annual dividend per share", value=source.get("annual_div_per_share", 0.0), min=0, step=0.01).classes(FULL_WIDTH_CONTROL)
+                    regular = ui.number("Regular biweekly contribution", value=source.get("regular_biweekly_contribution", 0.0), min=0, step=0.01).classes(FULL_WIDTH_CONTROL)
+                    espp = ui.number("ESPP biweekly contribution", value=source.get("espp_biweekly_contribution", source.get("espp_contribution_biweekly", 0.0)), min=0, step=0.01).classes(FULL_WIDTH_CONTROL)
+                    special = ui.number("Special contribution", value=source.get("special_contribution", 0.0), min=0, step=0.01).classes(FULL_WIDTH_CONTROL)
+                    discount_pct = source.get("espp_discount", 0.0)
+                    if not discount_pct:
+                        raw_pct = float(source.get("espp_discount_pct", 0.0) or 0.0)
+                        discount_pct = raw_pct / 100.0 if raw_pct > 1 else raw_pct
+                    discount = ui.number("ESPP discount (decimal)", value=discount_pct, min=0, max=1, step=0.01).classes(FULL_WIDTH_CONTROL)
+                    frequency = ui.number("ESPP purchase frequency (months)", value=source.get("espp_purchase_frequency_months", 6.0) or 6.0, min=1, step=1).classes(FULL_WIDTH_CONTROL)
+                    asset_type = ui.select(sorted(ASSET_TYPES), value=source.get("asset_type", "Stock") if source.get("asset_type", "Stock") in ASSET_TYPES else "Other", label="Asset type").classes(FULL_WIDTH_CONTROL)
+                sector = ui.input("Sector", value=source.get("sector", "")).classes(FULL_WIDTH_CONTROL)
+                is_espp = ui.checkbox("ESPP holding", value=bool(source.get("espp_enabled", source.get("is_espp", False))))
+                busy = {"value": False}
+                async def save() -> None:
+                    if busy["value"]:
+                        return
+                    busy["value"] = True
+                    save_button.disable()
+                    values = {"ticker": ticker.value, "shares": shares.value, "espp_acquired_shares": espp_shares.value, "amount_invested": invested.value, "annual_div_per_share": annual_dividend.value, "regular_biweekly_contribution": regular.value, "espp_contribution_biweekly": espp.value, "special_contribution": special.value, "is_espp": is_espp.value, "espp_discount": discount.value, "espp_purchase_frequency_months": frequency.value, "sector": sector.value, "asset_type": asset_type.value}
+                    try:
+                        token = uuid.uuid4().hex
+                        if existing:
+                            await run.io_bound(holdings_writer.edit, int(existing["_holding_id"]), values, submission_token=token)
+                        else:
+                            await run.io_bound(holdings_writer.add, values, submission_token=token)
+                        dialog.close()
+                        await refresh_after_holding_write()
+                        ui.notify(f"{str(values['ticker']).strip().upper()} saved.", type="positive")
+                    except Exception as exc:
+                        ui.notify(str(exc), type="negative", timeout=0)
+                    finally:
+                        busy["value"] = False
+                        save_button.enable()
+                with ui.element("div").classes(RESPONSIVE_ACTIONS):
+                    save_button = ui.button("Save Holding", icon="save", on_click=save).classes("w-full sm:w-auto min-h-11")
+                    ui.button("Cancel", on_click=dialog.close).props("flat").classes("w-full sm:w-auto min-h-11")
+            def open_holding_dialog(existing: dict[str, Any] | None = None) -> None:
+                with ui.dialog() as dialog, ui.card().classes("w-[min(96vw,48rem)] max-h-[90vh] overflow-y-auto"):
+                    ui.label("Edit Holding" if existing else "Add Holding").classes("text-xl font-semibold")
+                    holding_form(dialog, existing)
+                dialog.open()
+            ui.button("Add Holding", icon="add", on_click=lambda: open_holding_dialog()).classes("w-full sm:w-auto min-h-11")
             metric_cards([("Portfolio value", currency(summary["portfolio_value"])), ("Cost basis", currency(summary["cost_basis"])), ("Unrealized gain/loss", currency(summary["unrealized_gain"])), ("Estimated annual income", currency(summary["annual_income"])), ("Weighted yield", percent(summary["weighted_yield_pct"])), ("Holdings", format_count(summary["holding_count"])), ("Largest holding", str(summary["largest_holding"])), ("Largest weight", percent(summary["largest_weight_pct"]))])
             fields = (("ticker", "Ticker"), ("shares", "Shares"), ("current_price", "Current Price"), ("market_value", "Market Value"), ("average_cost", "Average Cost"), ("cost_basis", "Cost Basis"), ("unrealized_gain", "Unrealized G/L"), ("dividend_yield_pct", "Dividend Yield %"), ("annual_income", "Annual Income"), ("asset_type", "Asset Type"), ("sector", "Sector"), ("regular_biweekly_contribution", "Regular Biweekly"), ("espp_biweekly_contribution", "ESPP Biweekly"), ("special_contribution", "Special Contribution"), ("employer_stock", "Employer Stock"), ("espp_enabled", "ESPP"))
             selected_rows = [{key: row.get(key) for key, _ in fields} for row in display_holdings]
@@ -115,6 +168,38 @@ async def index() -> None:
                 column["label"] = labels.get(column["name"], column["label"])
             with ui.element("div").classes(SCROLL_TABLE):
                 ui.table(columns=columns, rows=rows, row_key="ticker", pagination=25).classes("w-full min-w-max").props("dense flat bordered")
+            with ui.expansion("Edit or delete a holding").classes("w-full"):
+                with ui.element("div").classes("w-full grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3"):
+                    for stored in holdings:
+                        with ui.card().classes("w-full"):
+                            ui.label(str(stored.get("ticker", ""))).classes("text-lg font-semibold")
+                            with ui.element("div").classes(RESPONSIVE_ACTIONS):
+                                ui.button("Edit", icon="edit", on_click=lambda row=stored: open_holding_dialog(row)).classes("w-full sm:w-auto min-h-11")
+                                def confirm_delete(row: dict[str, Any] = stored) -> None:
+                                    with ui.dialog() as confirm, ui.card().classes("w-[min(94vw,28rem)]"):
+                                        ui.label(f"Delete {row.get('ticker', '')} from the portfolio?").classes("text-lg font-semibold")
+                                        ui.label("This removes only the current holding. Statement history is not changed.").classes("text-sm text-gray-600")
+                                        deleting = {"value": False}
+                                        async def remove() -> None:
+                                            if deleting["value"]:
+                                                return
+                                            deleting["value"] = True
+                                            delete_button.disable()
+                                            try:
+                                                await run.io_bound(holdings_writer.delete, int(row["_holding_id"]), confirmed=True, expected_ticker=str(row.get("ticker", "")), submission_token=uuid.uuid4().hex)
+                                                confirm.close()
+                                                await refresh_after_holding_write()
+                                                ui.notify(f"{row.get('ticker', '')} deleted.", type="positive")
+                                            except Exception as exc:
+                                                ui.notify(str(exc), type="negative", timeout=0)
+                                            finally:
+                                                deleting["value"] = False
+                                                delete_button.enable()
+                                        with ui.element("div").classes(RESPONSIVE_ACTIONS):
+                                            delete_button = ui.button("Delete Holding", icon="delete", color="negative", on_click=remove).classes("w-full sm:w-auto min-h-11")
+                                            ui.button("Cancel", on_click=confirm.close).props("flat").classes("w-full sm:w-auto min-h-11")
+                                    confirm.open()
+                                ui.button("Delete", icon="delete", color="negative", on_click=confirm_delete).classes("w-full sm:w-auto min-h-11")
             ui.label("Read-only exports").classes("text-lg font-semibold mt-3")
             ui.label("Generate a fresh read-only snapshot, then download it in the format you need.").classes("text-sm text-gray-500")
             async def download_export(filename: str) -> None:
@@ -371,6 +456,14 @@ async def index() -> None:
             history=result.history or []
             if loaded["History"]: render_history(history_range)
         status.set_text(f"Refreshed {len(holdings)} holdings and {len(history)} history points")
+    async def refresh_after_holding_write() -> None:
+        """Reload writes and invalidate every holdings-derived lazy view."""
+        await refresh_data(True)
+        for name in ("Portfolio Analysis", "AI Analysis", "Portfolio Insights", "Portfolio Health"):
+            loaded[name] = False
+            areas[name].clear()
+            with areas[name]:
+                ui.label("Holdings changed; prior prepared output is stale and this section will refresh when opened.").classes("text-gray-500")
     refresh_button.on_click(lambda: refresh_data(True))
     ui.timer(DB_REFRESH_INTERVAL_SECONDS,lambda: refresh_data(False))
     try:
