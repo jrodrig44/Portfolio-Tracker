@@ -20,6 +20,11 @@ NUMERIC_FIELDS = {
     "regular_biweekly_contribution", "espp_contribution_biweekly",
     "special_contribution", "espp_discount", "espp_purchase_frequency_months",
 }
+CONTRIBUTION_FIELDS = (
+    "regular_biweekly_contribution", "special_contribution",
+    "espp_contribution_biweekly", "is_espp", "espp_discount",
+    "espp_purchase_frequency_months",
+)
 
 
 class HoldingValidationError(ValueError):
@@ -73,6 +78,68 @@ def normalize_holding_input(values: Mapping[str, Any], *, existing: Mapping[str,
         if output["espp_acquired_shares"] <= 0:
             output["espp_acquired_shares"] = output["shares"]
     return output
+
+
+def _nonnegative_number(value: Any, label: str) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise HoldingValidationError(f"{label} must be a valid number.") from exc
+    if not math.isfinite(number) or number < 0:
+        raise HoldingValidationError(f"{label} must be a finite non-negative number.")
+    return number
+
+
+def normalize_contribution_input(values: Mapping[str, Any], current: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize the production contribution fields without touching holding data."""
+    ticker = str(current.get("ticker") or "").strip().upper()
+    if not ticker:
+        raise HoldingValidationError("The stored holding has no ticker.")
+    regular = _nonnegative_number(values.get("regular_biweekly_contribution", current.get("regular_biweekly_contribution", 0)), "Regular contribution")
+    special = _nonnegative_number(values.get("special_contribution", current.get("special_contribution", 0)), "Special contribution")
+    espp = _nonnegative_number(values.get("espp_contribution_biweekly", current.get("espp_contribution_biweekly", current.get("espp_biweekly_contribution", 0))), "ESPP contribution")
+    raw_discount = _nonnegative_number(values.get("espp_discount", current.get("espp_discount", current.get("espp_discount_pct", 0))), "ESPP discount")
+    if raw_discount > 100:
+        raise HoldingValidationError("ESPP discount must be between 0 and 100 percent.")
+    discount = raw_discount / 100.0 if raw_discount > 1 else raw_discount
+    frequency = _nonnegative_number(values.get("espp_purchase_frequency_months", current.get("espp_purchase_frequency_months", 6)), "ESPP purchase frequency")
+    if frequency < 1:
+        raise HoldingValidationError("ESPP purchase frequency must be at least one month.")
+    is_espp = bool(values.get("is_espp", current.get("is_espp", current.get("espp_enabled", False))))
+    is_espp = is_espp or espp > 0 or _nonnegative_number(current.get("espp_acquired_shares", 0) or 0, "ESPP-acquired shares") > 0
+    if not is_espp:
+        discount = 0.0
+    if ticker == "HD":
+        regular = 0.0
+        special = 0.0
+        espp = espp or 100.0
+        is_espp = True
+        discount = 0.15
+        frequency = 6.0
+    return {
+        "ticker": ticker,
+        "regular_biweekly_contribution": regular,
+        "special_contribution": special,
+        "espp_contribution_biweekly": espp,
+        "is_espp": is_espp,
+        "espp_discount": discount,
+        "espp_purchase_frequency_months": frequency,
+    }
+
+
+def summarize_contributions(holdings: list[Mapping[str, Any]]) -> dict[str, float]:
+    regular = sum(_nonnegative_number(row.get("regular_biweekly_contribution", 0) or 0, "Regular contribution") for row in holdings)
+    espp = sum(_nonnegative_number(row.get("espp_biweekly_contribution", row.get("espp_contribution_biweekly", 0)) or 0, "ESPP contribution") for row in holdings)
+    special = sum(_nonnegative_number(row.get("special_contribution", 0) or 0, "Special contribution") for row in holdings)
+    return {
+        "regular_biweekly": regular,
+        "regular_annual": regular * 26,
+        "espp_biweekly": espp,
+        "espp_annual": espp * 26,
+        "combined_biweekly": regular + espp,
+        "combined_annual": (regular + espp) * 26,
+        "special_contribution": special,
+    }
 
 
 class HoldingsWriteService:
@@ -156,6 +223,33 @@ class HoldingsWriteService:
                 connection.close()
         return self._once(submission_token, operation)
 
+    def update_contributions(self, holding_id: int, values: Mapping[str, Any], *, submission_token: str | None = None) -> dict[str, Any] | None:
+        """Atomically update only production contribution and ESPP columns."""
+        def operation() -> dict[str, Any]:
+            connection = self._connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                columns = self._columns(connection)
+                current = self.get(holding_id, connection=connection)
+                normalized = normalize_contribution_input(values, current)
+                record = self._contribution_storage_values(normalized, columns)
+                assignments = ", ".join(f"{name}=?" for name in record)
+                cursor = connection.execute(
+                    f"UPDATE {HOLDINGS_TABLE} SET {assignments} WHERE rowid=?",
+                    [*record.values(), int(holding_id)],
+                )
+                if cursor.rowcount != 1:
+                    raise HoldingNotFoundError("The holding changed or no longer exists. Refresh and try again.")
+                result = self.get(holding_id, connection=connection)
+                connection.commit()
+                return result
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
+        return self._once(submission_token, operation)
+
     def delete(self, holding_id: int, *, confirmed: bool, expected_ticker: str | None = None, submission_token: str | None = None) -> dict[str, Any] | None:
         if not confirmed:
             raise HoldingConfirmationError("Deletion requires explicit confirmation.")
@@ -206,8 +300,25 @@ class HoldingsWriteService:
             record["espp_purchase_frequency"] = "approximately_every_6_months" if values["ticker"] == "HD" else ""
         return record
 
+    @staticmethod
+    def _contribution_storage_values(values: Mapping[str, Any], columns: set[str]) -> dict[str, Any]:
+        record = {key: values[key] for key in CONTRIBUTION_FIELDS if key in columns}
+        espp_amount = values["espp_contribution_biweekly"]
+        if "espp_biweekly_contribution" in columns:
+            record["espp_biweekly_contribution"] = espp_amount
+        if "espp_enabled" in columns:
+            record["espp_enabled"] = int(bool(values["is_espp"]))
+        if "espp_discount_pct" in columns:
+            record["espp_discount_pct"] = values["espp_discount"] * 100.0
+        if "employer_stock" in columns:
+            record["employer_stock"] = int(values["ticker"] == "HD")
+        if "espp_purchase_frequency" in columns:
+            record["espp_purchase_frequency"] = "approximately_every_6_months" if values["ticker"] == "HD" else ""
+        return record
+
 
 __all__ = [
     "ASSET_TYPES", "EDITABLE_FIELDS", "HoldingConfirmationError", "HoldingNotFoundError",
-    "HoldingValidationError", "HoldingsWriteService", "normalize_holding_input",
+    "HoldingValidationError", "HoldingsWriteService", "normalize_contribution_input",
+    "normalize_holding_input", "summarize_contributions",
 ]

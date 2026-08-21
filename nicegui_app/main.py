@@ -22,7 +22,7 @@ from nicegui_app.services.insights import insights_package
 from nicegui_app.services.portfolio_data import DEFAULT_HISTORY_RANGE,HISTORY_RANGE_OPTIONS,portfolio_summary
 from nicegui_app.services.refresh import ReadOnlyRefreshCoordinator
 from nicegui_app.services.yahoo import current_market_data,yahoo_intelligence_package
-from portfolio_holdings_write import ASSET_TYPES, HoldingsWriteService
+from portfolio_holdings_write import ASSET_TYPES, HoldingsWriteService, summarize_contributions
 
 HOST = "0.0.0.0"
 PORT = 8502
@@ -160,6 +160,58 @@ async def index() -> None:
                 dialog.open()
             ui.button("Add Holding", icon="add", on_click=lambda: open_holding_dialog()).classes("w-full sm:w-auto min-h-11")
             metric_cards([("Portfolio value", currency(summary["portfolio_value"])), ("Cost basis", currency(summary["cost_basis"])), ("Unrealized gain/loss", currency(summary["unrealized_gain"])), ("Estimated annual income", currency(summary["annual_income"])), ("Weighted yield", percent(summary["weighted_yield_pct"])), ("Holdings", format_count(summary["holding_count"])), ("Largest holding", str(summary["largest_holding"])), ("Largest weight", percent(summary["largest_weight_pct"]))])
+            contribution_totals = summarize_contributions(holdings)
+            with ui.expansion("Contribution Settings", value=True).classes("w-full"):
+                ui.label("Recurring regular and ESPP amounts use 26 pay periods per year. Special contributions remain separate.").classes("text-sm text-gray-500")
+                metric_cards([
+                    ("Regular biweekly", currency(contribution_totals["regular_biweekly"])),
+                    ("Regular annual", currency(contribution_totals["regular_annual"])),
+                    ("ESPP biweekly", currency(contribution_totals["espp_biweekly"])),
+                    ("ESPP annual", currency(contribution_totals["espp_annual"])),
+                    ("Combined recurring biweekly", currency(contribution_totals["combined_biweekly"])),
+                    ("Combined recurring annual", currency(contribution_totals["combined_annual"])),
+                    ("Special contributions", currency(contribution_totals["special_contribution"])),
+                ])
+                def open_contribution_dialog(stored: dict[str, Any]) -> None:
+                    with ui.dialog() as dialog, ui.card().classes("w-[min(96vw,40rem)] max-h-[90vh] overflow-y-auto"):
+                        ticker_text = str(stored.get("ticker", ""))
+                        ui.label(f"Contribution Settings · {ticker_text}").classes("text-xl font-semibold")
+                        ui.label("Special contribution is a separate amount and is not annualized.").classes("text-sm text-gray-500")
+                        regular = ui.number("Regular biweekly contribution", value=stored.get("regular_biweekly_contribution", 0.0), min=0, step=0.01).classes(FULL_WIDTH_CONTROL)
+                        special = ui.number("Special contribution (not recurring)", value=stored.get("special_contribution", 0.0), min=0, step=0.01).classes(FULL_WIDTH_CONTROL)
+                        espp_amount = ui.number("ESPP biweekly contribution", value=stored.get("espp_biweekly_contribution", 0.0), min=0, step=0.01).classes(FULL_WIDTH_CONTROL)
+                        discount = ui.number("ESPP discount (%)", value=stored.get("espp_discount_pct", 0.0), min=0, max=100, step=0.01).classes(FULL_WIDTH_CONTROL)
+                        frequency = ui.number("ESPP purchase frequency (months)", value=stored.get("espp_purchase_frequency_months", 6.0), min=1, step=1).classes(FULL_WIDTH_CONTROL)
+                        is_espp = ui.checkbox("ESPP enabled", value=bool(stored.get("espp_enabled", stored.get("is_espp", False))))
+                        if ticker_text.strip().upper() == "HD":
+                            ui.label("HD always uses zero regular/special contributions, a 15% discount, and a six-month cadence. A non-positive ESPP amount uses the $100 production fallback.").classes("rounded bg-amber-50 p-3 text-sm text-amber-900")
+                        busy = {"value": False}
+                        async def save_contributions() -> None:
+                            if busy["value"]:
+                                return
+                            busy["value"] = True
+                            save_button.disable()
+                            values = {"regular_biweekly_contribution": regular.value, "special_contribution": special.value, "espp_contribution_biweekly": espp_amount.value, "espp_discount": discount.value, "espp_purchase_frequency_months": frequency.value, "is_espp": is_espp.value}
+                            try:
+                                await run.io_bound(holdings_writer.update_contributions, int(stored["_holding_id"]), values, submission_token=uuid.uuid4().hex)
+                                dialog.close()
+                                await refresh_after_holding_write()
+                                ui.notify(f"{ticker_text} contributions saved.", type="positive")
+                            except Exception as exc:
+                                ui.notify(str(exc), type="negative", timeout=0)
+                            finally:
+                                busy["value"] = False
+                                save_button.enable()
+                        with ui.element("div").classes(RESPONSIVE_ACTIONS):
+                            save_button = ui.button("Save Contributions", icon="save", on_click=save_contributions).classes("w-full sm:w-auto min-h-11")
+                            ui.button("Cancel", on_click=dialog.close).props("flat").classes("w-full sm:w-auto min-h-11")
+                    dialog.open()
+                with ui.element("div").classes("w-full grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3"):
+                    for stored in holdings:
+                        with ui.card().classes("w-full"):
+                            ui.label(str(stored.get("ticker", ""))).classes("text-lg font-semibold")
+                            ui.label(f"Regular {currency(stored.get('regular_biweekly_contribution', 0))} · ESPP {currency(stored.get('espp_biweekly_contribution', 0))} · Special {currency(stored.get('special_contribution', 0))}").classes("text-sm text-gray-600")
+                            ui.button("Edit Contributions", icon="payments", on_click=lambda row=stored: open_contribution_dialog(row)).classes("w-full sm:w-auto min-h-11")
             fields = (("ticker", "Ticker"), ("shares", "Shares"), ("current_price", "Current Price"), ("market_value", "Market Value"), ("average_cost", "Average Cost"), ("cost_basis", "Cost Basis"), ("unrealized_gain", "Unrealized G/L"), ("dividend_yield_pct", "Dividend Yield %"), ("annual_income", "Annual Income"), ("asset_type", "Asset Type"), ("sector", "Sector"), ("regular_biweekly_contribution", "Regular Biweekly"), ("espp_biweekly_contribution", "ESPP Biweekly"), ("special_contribution", "Special Contribution"), ("employer_stock", "Employer Stock"), ("espp_enabled", "ESPP"))
             selected_rows = [{key: row.get(key) for key, _ in fields} for row in display_holdings]
             columns, rows = format_table_records(selected_rows)
