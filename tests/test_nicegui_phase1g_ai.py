@@ -1,4 +1,5 @@
 import os
+import copy
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -61,6 +62,64 @@ class NiceGuiPhase1GAITests(unittest.TestCase):
         self.assertEqual(streamlit_prompt, nicegui_prompt)
         self.assertIn("employer stock acquired through an ESPP", streamlit_prompt)
         self.assertIn("Regular biweekly contributions", streamlit_prompt)
+
+    def test_canonical_income_quality_and_concentration_keys_survive(self) -> None:
+        payload = copy.deepcopy(self.payload())
+        payload["holdings"].extend([
+            {"ticker": "JEPI", "market_value": 300.0, "annual_income": 24.0, "asset_type": "ETF"},
+            {"ticker": "SDIV", "market_value": 200.0, "annual_income": 20.0, "asset_type": "ETF"},
+        ])
+        payload["income"]["quality"] = [
+            {"ticker": "JEPI", "income_quality_classification": "Option Income", "option_income": True},
+            {"ticker": "SDIV", "income_quality_classification": "High Yield", "option_income": False},
+        ]
+        payload["concentration"]["largest_income_contributor"] = "HD"
+        payload["concentration"]["largest_income_weight_pct"] = 61.25
+        payload["concentration"]["largest_income_weight"] = 9.0
+        hd_employer = payload["contributions"]["employer_stock_context"][0]
+        hd_employer["capital_concentration_pct"] = 66.67
+        hd_employer["portfolio_weight_pct"] = 12.0
+
+        compact = compact_ai_context(payload, "Comprehensive Portfolio Review", "")
+        holdings = {row["ticker"]: row for row in compact["calculated_metrics"]}
+        self.assertEqual(holdings["JEPI"]["income_quality_classification"], "Option Income")
+        self.assertTrue(holdings["JEPI"]["option_income"])
+        self.assertEqual(holdings["SDIV"]["income_quality_classification"], "High Yield")
+        self.assertFalse(holdings["SDIV"]["option_income"])
+        self.assertEqual(compact["concentration_context"]["largest_income_weight_pct"], 61.25)
+        employer = compact["contribution_context"]["employer_stock_concentration_context"]
+        self.assertEqual(employer["primary_employer_ticker"], "HD")
+        self.assertEqual(employer["primary_employer_capital_concentration_pct"], 66.67)
+        summary = compact["contribution_context"]["summary"]
+        self.assertEqual(summary["annual_espp_contributions"], 2600.0)
+        self.assertEqual(summary["hd_espp_discount_pct"], 15.0)
+
+        prompt = build_ai_request(payload, "Comprehensive Portfolio Review", "")[0]["model_prompt"]
+        self.assertIn("Option Income", prompt)
+        self.assertIn("High Yield", prompt)
+        self.assertIn("61.25%", prompt)
+        self.assertIn("66.67%", prompt)
+        self.assertEqual(app._compact_analysis_context(payload, "Comprehensive Portfolio Review", ""), compact)
+
+    def test_legacy_production_shape_fallbacks_remain_supported(self) -> None:
+        legacy = {
+            "portfolio_snapshot": {"portfolio_value": 1000.0},
+            "calculated_metrics": [
+                {"ticker": "JEPI", "market_value": 600.0, "income_quality_classification": "Option Income", "option_income": True},
+                {"ticker": "SDIV", "market_value": 400.0, "income_quality_classification": "High Yield", "option_income": False},
+            ],
+            "income_quality": {"income_quality_score": 72.0},
+            "concentration_context": {"largest_income_contributor": "JEPI", "largest_income_weight_pct": 60.0},
+            "contribution_context": {
+                "summary": {"estimated_annual_espp_contributions": 2600.0, "hd_espp_discount_pct": 15.0},
+                "employer_stock_concentration_context": {"primary_employer_ticker": "HD", "primary_employer_capital_concentration_pct": 40.0},
+            },
+        }
+        compact = compact_ai_context(legacy, "Comprehensive Portfolio Review", "")
+        self.assertEqual(compact["income_quality_summary"]["income_quality_score"], 72.0)
+        self.assertEqual(compact["concentration_context"]["largest_income_weight_pct"], 60.0)
+        self.assertEqual(compact["contribution_context"]["employer_stock_concentration_context"]["primary_employer_capital_concentration_pct"], 40.0)
+        self.assertEqual({row["ticker"] for row in compact["calculated_metrics"]}, {"JEPI", "SDIV"})
 
     def test_analysis_types_and_model_configuration_match_production(self) -> None:
         with patch.dict(os.environ, {"ONEMIN_AI_MODEL": "custom-model", "ONEMIN_AI_API_KEY": "key"}, clear=False):

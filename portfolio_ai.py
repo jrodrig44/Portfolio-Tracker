@@ -180,6 +180,7 @@ def _production_shape(payload: dict[str, Any]) -> dict[str, Any]:
         return payload
     totals, contributions = payload.get("totals", {}), payload.get("contributions", {})
     health, exposure = payload.get("health_score", {}), payload.get("exposure", {})
+    income = payload.get("income", {}) if isinstance(payload.get("income"), dict) else {}
     concentration = payload.get("concentration", {})
     employer_rows = contributions.get("employer_stock_context", []) if isinstance(contributions, dict) else []
     employer = employer_rows[0] if employer_rows else {}
@@ -187,9 +188,29 @@ def _production_shape(payload: dict[str, Any]) -> dict[str, Any]:
     annual_espp = _finite(contributions.get("espp_annual"))
     external = payload.get("external_context", {}) if isinstance(payload.get("external_context"), dict) else {}
     history = payload.get("historical", {}) if isinstance(payload.get("historical"), dict) else {}
+    canonical_quality = income.get("quality")
+    quality_rows = canonical_quality if isinstance(canonical_quality, list) else []
+    quality_summary = canonical_quality if isinstance(canonical_quality, dict) else health.get("income_quality", {})
+    quality_by_ticker = {
+        str(row.get("ticker", "")).strip().upper(): row
+        for row in quality_rows
+        if isinstance(row, dict) and str(row.get("ticker", "")).strip()
+    }
+    calculated_metrics = []
+    for holding in payload.get("holdings", []):
+        if not isinstance(holding, dict):
+            continue
+        quality = quality_by_ticker.get(str(holding.get("ticker", "")).strip().upper(), {})
+        calculated_metrics.append({**holding, **_pick(quality, ["income_quality_classification", "option_income", "income_type", "notes"])})
+    largest_income_weight = concentration.get("largest_income_weight_pct")
+    if largest_income_weight is None:
+        largest_income_weight = concentration.get("largest_income_weight")
+    employer_capital_concentration = employer.get("capital_concentration_pct")
+    if employer_capital_concentration is None:
+        employer_capital_concentration = employer.get("portfolio_weight_pct")
     return {
         "portfolio_snapshot": {**totals, "top_holding": totals.get("largest_holding"), "top_holding_weight_pct": totals.get("largest_holding_weight_pct"), **(payload.get("projections", {}) or {})},
-        "calculated_metrics": payload.get("holdings", []),
+        "calculated_metrics": calculated_metrics,
         "asset_allocation": (payload.get("allocation", {}) or {}).get("asset_type", []),
         "economic_exposure_allocation": (payload.get("allocation", {}) or {}).get("economic_exposure", []),
         "direct_sector_exposure": exposure.get("direct_sector_exposure", []),
@@ -198,10 +219,10 @@ def _production_shape(payload: dict[str, Any]) -> dict[str, Any]:
         "data_completeness": exposure.get("data_completeness", payload.get("data_completeness", {})),
         "unresolved_exposure": {"unresolved_fund_exposure": sum(_finite(row.get("market_value", row.get("Market_Value"))) for row in exposure.get("unresolved_fund_exposure", []) if isinstance(row, dict))},
         "income_allocation_by_holding": [{"ticker": row.get("ticker"), "annual_income": row.get("annual_income"), "market_value": row.get("market_value")} for row in payload.get("holdings", []) if isinstance(row, dict)],
-        "income_quality": health.get("income_quality", {}),
+        "income_quality": quality_summary,
         "portfolio_health": {**health, "health_score_breakdown": health.get("subscores", health.get("health_score_breakdown", {})), "context_summary": {"score": health.get("health_score", health.get("overall_score", 0)), "score_label": "Tracker-generated score", "strongest_areas": health.get("strongest_areas", []), "weakest_areas": health.get("weakest_areas", []), "primary_alert": health.get("primary_alert", "")}},
-        "concentration_context": {"largest_holding_by_value": concentration.get("largest_holding", totals.get("largest_holding")), "largest_holding_value_weight_pct": concentration.get("largest_holding_weight", totals.get("largest_holding_weight_pct")), "largest_income_contributor": concentration.get("largest_income_contributor"), "largest_income_weight_pct": concentration.get("largest_income_weight"), "guidance": "Capital concentration and income concentration should be evaluated separately."},
-        "contribution_context": {"summary": {"total_regular_biweekly_contribution": contributions.get("regular_biweekly"), "total_espp_biweekly_contributions": contributions.get("espp_biweekly"), "estimated_annual_regular_contributions": annual_regular, "estimated_annual_espp_contributions": annual_espp, "estimated_combined_annual_contributions": contributions.get("combined_recurring_annual"), "special_contribution": contributions.get("special_contribution"), "hd_espp_purchase_frequency": (contributions.get("espp_context", {}) or {}).get("purchase_frequency"), "hd_espp_discount_pct": (contributions.get("espp_context", {}) or {}).get("discount_pct")}, "employer_stock_concentration_context": {"primary_employer_ticker": employer.get("ticker", "HD" if employer_rows else ""), "primary_employer_capital_concentration_pct": employer.get("portfolio_weight_pct"), "is_concentration_alert": bool(employer_rows)}},
+        "concentration_context": {"largest_holding_by_value": concentration.get("largest_holding", totals.get("largest_holding")), "largest_holding_value_weight_pct": concentration.get("largest_holding_weight", totals.get("largest_holding_weight_pct")), "largest_income_contributor": concentration.get("largest_income_contributor"), "largest_income_weight_pct": largest_income_weight, "guidance": "Capital concentration and income concentration should be evaluated separately."},
+        "contribution_context": {"summary": {"total_regular_biweekly_contribution": contributions.get("regular_biweekly"), "total_espp_biweekly_contributions": contributions.get("espp_biweekly"), "estimated_annual_regular_contributions": annual_regular, "estimated_annual_espp_contributions": annual_espp, "estimated_combined_annual_contributions": contributions.get("combined_recurring_annual"), "special_contribution": contributions.get("special_contribution"), "hd_espp_purchase_frequency": (contributions.get("espp_context", {}) or {}).get("purchase_frequency"), "hd_espp_discount_pct": (contributions.get("espp_context", {}) or {}).get("discount_pct")}, "employer_stock_concentration_context": {"primary_employer_ticker": employer.get("ticker", "HD" if employer_rows else ""), "primary_employer_capital_concentration_pct": employer_capital_concentration, "is_concentration_alert": bool(employer_rows)}},
         "supplemental_yahoo_financial_data": payload.get("supplemental_investment_intelligence", external.get("supplemental_investment_intelligence", [])),
         "historical_context": payload.get("historical_security_context", external.get("historical_security_context", [])),
         "portfolio_history_summary": build_portfolio_history_summary(history.get("records", [])),
@@ -232,7 +253,7 @@ def compact_ai_context(payload: dict[str, Any], analysis_type: str, custom_quest
         if any(word in question for word in ("contribution", "espp", "biweekly", "outlook", "projection")): limits["holdings"] = 20
     snapshot = full.get("portfolio_snapshot", {}); health = full.get("portfolio_health", {}); context = health.get("context_summary", {}) if isinstance(health, dict) else {}
     contribution = full.get("contribution_context", {}); source_summary = contribution.get("summary", {}) if isinstance(contribution, dict) else {}
-    holding_fields = ["ticker", "shares", "current_price", "market_value", "portfolio_weight_pct", "cost_basis", "unrealized_gain", "annual_income", "portfolio_yield_pct", "dividend_yield_pct", "regular_biweekly_contribution", "espp_biweekly_contribution", "special_contribution", "total_contribution", "sector", "asset_type", "employer_stock", "espp_enabled", "espp_acquired_shares"]
+    holding_fields = ["ticker", "shares", "current_price", "market_value", "portfolio_weight_pct", "cost_basis", "unrealized_gain", "annual_income", "portfolio_yield_pct", "dividend_yield_pct", "income_quality_classification", "option_income", "income_type", "notes", "regular_biweekly_contribution", "espp_biweekly_contribution", "special_contribution", "total_contribution", "sector", "asset_type", "employer_stock", "espp_enabled", "espp_acquired_shares"]
     holdings = _records(full.get("calculated_metrics", []), holding_fields, limits["holdings"], "market_value")
     supplemental = _supplemental(full.get("supplemental_yahoo_financial_data", []), [str(row.get("ticker", "")).strip().upper() for row in holdings], limits["supplemental"])
     history_summary = portfolio_history_summary if portfolio_history_summary is not None else full.get("portfolio_history_summary", {})
