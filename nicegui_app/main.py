@@ -25,11 +25,12 @@ from nicegui_app.services.portfolio_data import DEFAULT_HISTORY_RANGE,HISTORY_RA
 from nicegui_app.services.refresh import ReadOnlyRefreshCoordinator
 from nicegui_app.services.yahoo import current_market_data,yahoo_intelligence_package
 from portfolio_holdings_write import ASSET_TYPES, HoldingsWriteService, summarize_contributions
+from portfolio_research import PortfolioResearchService, research_contexts
 from portfolio_statement_history import StatementHistoryService, statement_display_records
 
 HOST = "0.0.0.0"
 PORT = 8502
-NAVIGATION_AREAS = ("Holdings", "Portfolio Analysis", "AI Analysis", "Portfolio Insights", "Portfolio Health", "History", "Statement History")
+NAVIGATION_AREAS = ("Holdings", "Portfolio Analysis", "AI Analysis", "Portfolio Insights", "Portfolio Health", "History", "Statement History", "Supplemental Research")
 
 
 def currency(value: Any) -> str:
@@ -85,6 +86,7 @@ async def index() -> None:
     coordinator = ReadOnlyRefreshCoordinator(market_loader=current_market_data)
     holdings_writer = HoldingsWriteService(coordinator.portfolio_path)
     statement_service = StatementHistoryService(db_path=coordinator.history_path)
+    research_service = PortfolioResearchService(coordinator.portfolio_path)
     loaded = {name: False for name in NAVIGATION_AREAS}
 
     with ui.header().classes("flex-wrap items-center justify-between gap-2 shadow-sm px-3 sm:px-5"):
@@ -449,6 +451,95 @@ async def index() -> None:
             ui.button("Delete Imported History…", icon="delete", on_click=confirm_delete_history).classes("w-full sm:w-auto min-h-11")
         loaded["Statement History"] = True
 
+    async def render_supplemental_research(force: bool = False) -> None:
+        if loaded["Supplemental Research"] and not force:
+            return
+        area = areas["Supplemental Research"]
+        area.clear()
+        metric_records = metrics.to_dict(orient="records") if metrics is not None else []
+        contexts = research_contexts(holdings, metric_records)
+        try:
+            package = await run.io_bound(research_service.state, contexts)
+        except Exception as exc:
+            with area:
+                ui.label("Supplemental Research").classes("text-2xl font-semibold")
+                ui.label("Research state could not be loaded.").classes("text-red-700")
+                ui.label(str(exc)).classes("text-sm break-words")
+            loaded["Supplemental Research"] = True
+            return
+        with area:
+            ui.label("Supplemental Research").classes("text-2xl font-semibold")
+            ui.label("Yahoo remains the primary financial-data source. Research runs only after an explicit action and supplements missing descriptive context.").classes("text-gray-500")
+            metric_cards([
+                ("Active holdings", format_count(len(package["active"]))),
+                ("Enrolled", format_count(sum(bool(row["enrolled"]) for row in package["active"]))),
+                ("Archived", format_count(len(package["archived"]))),
+                ("Research expiry", f'{package["expiry_days"]} days'),
+                ("Failure retry", f'{package["retry_hours"]} hours'),
+                ("Worker check", f'{package["worker_check_hours"]} hours'),
+            ])
+            with ui.card().classes("w-full min-w-0"):
+                ui.label("Research Settings").classes("text-lg font-semibold")
+                ui.label("Only the production supplemental-research model setting is managed here. The existing background worker and cadence are unchanged.").classes("text-sm text-gray-500")
+                model = ui.select(package["models"], value=package["model"], label="Supplemental Research Model").classes(FULL_WIDTH_CONTROL)
+                async def save_model() -> None:
+                    try:
+                        await run.io_bound(research_service.set_model, str(model.value or ""))
+                        ui.notify("Supplemental research model saved.", type="positive")
+                    except Exception as exc:
+                        ui.notify(str(exc), type="negative", timeout=0)
+                ui.button("Save Research Model", icon="save", on_click=save_model).classes("w-full sm:w-auto min-h-11")
+
+            async def update_ticker(ticker: str, button: Any) -> None:
+                button.disable()
+                try:
+                    result = await run.io_bound(research_service.update, ticker, contexts[ticker], str(model.value or ""))
+                    if result.get("status") == "current":
+                        ui.notify(f"Supplemental research completed for {ticker}.", type="positive")
+                    elif result.get("reason") == "already running":
+                        ui.notify(f"Research for {ticker} is already running.", type="warning")
+                    else:
+                        ui.notify(str(result.get("error") or result.get("reason") or "Research did not complete."), type="negative", timeout=0)
+                    await render_supplemental_research(True)
+                except Exception as exc:
+                    ui.notify(str(exc), type="negative", timeout=0)
+                    button.enable()
+
+            ui.label("Portfolio Holdings").classes("text-xl font-semibold mt-2")
+            if not package["active"]:
+                ui.label("Add a holding before requesting supplemental research.").classes("text-gray-500")
+            with ui.element("div").classes("w-full grid grid-cols-1 lg:grid-cols-2 gap-3"):
+                for row in package["active"]:
+                    ticker = row["ticker"]
+                    with ui.card().classes("w-full min-w-0 overflow-hidden"):
+                        with ui.row().classes("w-full flex-wrap items-center justify-between gap-2"):
+                            ui.label(ticker).classes("text-xl font-semibold")
+                            ui.badge(row["status"], color="positive" if row["status"] == "Current" else "warning")
+                        detail_cards([
+                            ("Enrollment", "Enrolled" if row["enrolled"] else "Manual research required"),
+                            ("Last success", row["last_success_at"]),
+                            ("Next refresh", row["next_due_at"]),
+                            ("Model", row["model_used"]),
+                            ("Verified facts", row["verified_facts"]),
+                        ])
+                        if row["error"]:
+                            ui.label(f'Latest attempt: {row["error"]}').classes("w-full rounded bg-red-50 p-2 text-sm text-red-800 break-words")
+                        action = ui.button("Refresh Research" if row["enrolled"] else "Enroll & Research", icon="science").classes("w-full sm:w-auto min-h-11")
+                        action.on_click(lambda _event, t=ticker, b=action: update_ticker(t, b))
+                        if not row["can_update"]:
+                            action.disable()
+                        if row["research_markdown"]:
+                            with ui.expansion("Existing Research", icon="description").classes("w-full"):
+                                ui.markdown(row["research_markdown"]).classes("w-full max-w-full break-words overflow-hidden")
+            if package["archived"]:
+                ui.label("Archived Research").classes("text-xl font-semibold mt-2")
+                ui.label("Production retains research when a holding leaves the portfolio. Re-adding that ticker restores it through the normal holding synchronization path.").classes("text-sm text-gray-500")
+                records_table([{key: row[key] for key in ("ticker", "status", "last_success_at", "model_used", "verified_facts")} for row in package["archived"]])
+            with ui.expansion("Background Worker Status", icon="schedule").classes("w-full"):
+                ui.label(f'The existing worker checks every {package["worker_check_hours"]} hours. This page does not start or schedule a worker.').classes("text-sm text-gray-500")
+                records_table(package["jobs"])
+        loaded["Supplemental Research"] = True
+
     async def render_analysis() -> None:
         if loaded["Portfolio Analysis"]:
             return
@@ -673,6 +764,7 @@ async def index() -> None:
         elif name == "Portfolio Health": await render_health()
         elif name == "History" and not loaded["History"]: render_history()
         elif name == "Statement History": await render_statement_history()
+        elif name == "Supplemental Research": await render_supplemental_research()
 
     tabs.on_value_change(navigate)
     async def refresh_data(force: bool = False) -> None:
@@ -695,7 +787,7 @@ async def index() -> None:
     async def refresh_after_holding_write() -> None:
         """Reload writes and invalidate every holdings-derived lazy view."""
         await refresh_data(True)
-        for name in ("Portfolio Analysis", "AI Analysis", "Portfolio Insights", "Portfolio Health"):
+        for name in ("Portfolio Analysis", "AI Analysis", "Portfolio Insights", "Portfolio Health", "Supplemental Research"):
             loaded[name] = False
             areas[name].clear()
             with areas[name]:
