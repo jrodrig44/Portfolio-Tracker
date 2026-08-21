@@ -32,6 +32,33 @@ class NiceGuiPhase1FExportTests(unittest.TestCase):
         self.assertEqual(build_export_payload(holdings, metrics, **kwargs), shared_payload(holdings, metrics, **kwargs))
         self.assertEqual(export_package(holdings, metrics, **kwargs), build_export_package(holdings, metrics, **kwargs))
 
+    def test_streamlit_and_nicegui_use_same_canonical_production_package(self):
+        import app
+
+        holdings, metrics, history, weights, external = self.inputs()
+        generated_at = "2026-08-20T12:00:00"
+        with unittest.mock.patch("app._use_export_json_data", return_value=False), unittest.mock.patch("app._strict_export_accuracy_mode", return_value=False):
+            streamlit_package = app._build_shared_production_export_package(
+                pd.DataFrame(holdings), metrics, history=history, fund_weights=weights,
+                external_context=external, generated_at=generated_at,
+            )
+        nicegui_package = export_package(
+            holdings, metrics, history=history, fund_weights=weights,
+            external_context=external, generated_at=generated_at,
+            use_export_json_data=False, strict_export_accuracy=False, current_live_export=True,
+        )
+        self.assertEqual(json.loads(streamlit_package["portfolio_export.json"]), json.loads(nicegui_package["portfolio_export.json"]))
+        self.assertEqual(streamlit_package["portfolio_export.md"], nicegui_package["portfolio_export.md"])
+
+    def test_streamlit_accuracy_controls_are_explicit_shared_contract_inputs(self):
+        import app
+
+        holdings, metrics, history, weights, external = self.inputs()
+        with unittest.mock.patch("app._use_export_json_data", return_value=True), unittest.mock.patch("app._strict_export_accuracy_mode", return_value=True):
+            package = app._build_shared_production_export_package(pd.DataFrame(holdings), metrics, generated_at="2026-08-20T12:00:00")
+        accuracy = json.loads(package["portfolio_export.json"])["export_accuracy"]
+        self.assertEqual(accuracy, {"use_export_json_data": True, "strict_export_accuracy": True, "current_live_export": False, "market_data_resolution": "already_resolved_metrics"})
+
     def test_json_contains_current_summary_holdings_and_analysis_sections(self):
         holdings, metrics, history, weights, external = self.inputs()
         package = export_package(holdings, metrics, history=history, fund_weights=weights, external_context=external)

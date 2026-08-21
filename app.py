@@ -25,6 +25,7 @@ from portfolio_analysis import canonical_asset_type as shared_canonical_asset_ty
 from portfolio_analysis import future_value as shared_future_value
 from portfolio_analysis import normalize_sector as shared_normalize_sector
 from portfolio_history import DEFAULT_HISTORY_RANGE, HISTORY_RANGE_OPTIONS, filter_history_range
+from portfolio_export import build_export_package as build_shared_export_package
 from stash_history import clear_scan_preview, delete_imported_history, history_summary, import_validated_history, load_performance_history, load_statement_history, remove_manual_statement_review, run_statement_scan, save_manual_statement_review, scan_can_import, scan_state, upsert_live_portfolio_snapshot
 from onemin_ai_client import (
     ONEMIN_AI_DEFAULT_BASE_URL,
@@ -4823,6 +4824,35 @@ def _build_export_markdown(
     return generate_export(payload)
 
 
+def _build_shared_production_export_package(
+    holdings_df: pd.DataFrame,
+    metrics_df: pd.DataFrame,
+    *,
+    history: list[dict[str, object]] | None = None,
+    fund_weights: dict[str, dict[str, float]] | None = None,
+    external_context: dict[str, object] | None = None,
+    generated_at: str | None = None,
+) -> dict[str, str]:
+    """Canonical pure export used by the Streamlit and NiceGUI download paths.
+
+    Streamlit-specific accuracy controls determine how metrics and enrichment are
+    resolved before this call. The shared builder never performs market lookup or
+    database writes.
+    """
+    records = holdings_df.to_dict(orient="records") if isinstance(holdings_df, pd.DataFrame) else []
+    return build_shared_export_package(
+        records,
+        metrics_df,
+        history=history,
+        fund_weights=fund_weights,
+        external_context=external_context,
+        generated_at=generated_at,
+        use_export_json_data=_use_export_json_data(),
+        strict_export_accuracy=_strict_export_accuracy_mode(),
+        current_live_export=not _strict_export_accuracy_mode(),
+    )
+
+
 def _normalize_espp_acquired_shares(holdings: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
     cleaned = holdings.copy()
     cleaned["espp_acquired_shares"] = pd.to_numeric(cleaned["espp_acquired_shares"], errors="coerce").fillna(0.0)
@@ -5067,6 +5097,11 @@ def _render_holdings_tab(current_holdings: pd.DataFrame, mobile_mode: bool = Fal
     st.caption(_manual_input_data_note())
 
     export_metrics = _compute_metrics(persist_df, price_map, yield_map)
+    shared_exports = _build_shared_production_export_package(
+        persist_df,
+        export_metrics,
+        history=load_performance_history(STATEMENT_HISTORY_DB_PATH),
+    )
     left, middle, right = st.columns([1, 1, 1])
     with left:
         st.download_button(
@@ -5078,29 +5113,13 @@ def _render_holdings_tab(current_holdings: pd.DataFrame, mobile_mode: bool = Fal
     with middle:
         st.download_button(
             label="Export AI-friendly summary",
-            data=_build_export_markdown(
-                persist_df,
-                export_metrics,
-                biweekly_contribution=float(st.session_state.get("analysis_biweekly_contribution", 280.0)),
-                projection_return_pct=float(st.session_state.get("analysis_projection_return", 8.0)),
-                espp_contrib_biweekly=float(st.session_state.get("analysis_espp_contrib_biweekly", ESPP_CONTRIB_BIWEEKLY)),
-                espp_purchase_frequency=str(st.session_state.get("analysis_espp_purchase_frequency", ESPP_PURCHASE_FREQUENCY)),
-                espp_discount=float(st.session_state.get("analysis_espp_discount", ESPP_DISCOUNT)),
-            ).encode("utf-8"),
+            data=shared_exports["portfolio_export.md"].encode("utf-8"),
             file_name="portfolio_export.md",
             mime="text/markdown",
         )
         st.download_button(
             label="Export AI JSON payload",
-            data=_build_ai_export_json(
-                persist_df,
-                export_metrics,
-                biweekly_contribution=float(st.session_state.get("analysis_biweekly_contribution", 280.0)),
-                projection_return_pct=float(st.session_state.get("analysis_projection_return", 8.0)),
-                espp_contrib_biweekly=float(st.session_state.get("analysis_espp_contrib_biweekly", ESPP_CONTRIB_BIWEEKLY)),
-                espp_purchase_frequency=str(st.session_state.get("analysis_espp_purchase_frequency", ESPP_PURCHASE_FREQUENCY)),
-                espp_discount=float(st.session_state.get("analysis_espp_discount", ESPP_DISCOUNT)),
-            ).encode("utf-8"),
+            data=shared_exports["portfolio_export.json"].encode("utf-8"),
             file_name="portfolio_export.json",
             mime="application/json",
         )
