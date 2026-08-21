@@ -17,7 +17,7 @@ from nicegui_app.services.ai_context import AIAnalysisState,ai_options,run_ai_an
 from nicegui_app.services.analysis import analysis_package
 from nicegui_app.services.configuration import DB_REFRESH_INTERVAL_SECONDS
 from nicegui_app.services.exports import export_package
-from nicegui_app.services.formatting import FULL_WIDTH_CONTROL, RESPONSIVE_ACTIONS, RESPONSIVE_CARD_GRID, SCROLL_TABLE, format_count, format_currency, format_field_value, format_percentage, format_score, format_status, format_table_records, human_label
+from nicegui_app.services.formatting import CONFIRM_DIALOG_CARD, DIALOG_CARD, EMPTY_STATE, FULL_WIDTH_CONTROL, RESPONSIVE_ACTIONS, RESPONSIVE_CARD_GRID, SAFE_RICH_OUTPUT, SCROLL_TABLE, format_count, format_currency, format_field_value, format_percentage, format_score, format_status, format_table_records, human_label
 from nicegui_app.services.health import health_package
 from nicegui_app.services.history import history_package
 from nicegui_app.services.insights import insights_package
@@ -67,7 +67,7 @@ def records_table(records: list[dict[str, Any]], title: str | None = None) -> No
     if title:
         ui.label(title).classes("text-lg font-semibold mt-3")
     if not records:
-        ui.label("No data available.").classes("text-gray-500")
+        ui.label("No records are available for this section yet.").classes(EMPTY_STATE)
         return
     columns, rows = format_table_records(records)
     if not columns:
@@ -80,6 +80,8 @@ def records_table(records: list[dict[str, Any]], title: str | None = None) -> No
 @ui.page("/")
 async def index() -> None:
     ui.colors(primary="#1d4ed8", secondary="#0f766e", accent="#d97706")
+    ui.add_css(".safe-rich-output, .safe-rich-output * { max-width: 100%; overflow-wrap: anywhere; word-break: break-word; } .safe-rich-output pre { overflow-x: auto; white-space: pre-wrap; }")
+    ui.query("body").classes("overflow-x-hidden")
     holdings: list[dict[str, Any]] = []
     history: list[dict[str, Any]] = []
     history_range = DEFAULT_HISTORY_RANGE
@@ -98,8 +100,9 @@ async def index() -> None:
             spinner = ui.spinner(size="lg")
             status = ui.label("Loading portfolio and history from read-only databases…").classes("grow text-sm break-words")
             refresh_button = ui.button("Refresh Data", icon="refresh").classes("min-h-11")
-        with ui.element("div").classes("w-full max-w-full overflow-x-auto"):
-            tabs = ui.tabs().classes("w-max min-w-full").props("mobile-arrows outside-arrows")
+        mobile_navigation = ui.select(NAVIGATION_AREAS, value="Holdings", label="Current section").classes("w-full md:hidden").props("outlined options-dense")
+        with ui.element("nav").classes("hidden md:block w-full max-w-full overflow-x-auto").props('aria-label="Portfolio sections"'):
+            tabs = ui.tabs().classes("w-max min-w-full").props("outside-arrows")
         with tabs:
             tab_objects = {name: ui.tab(name) for name in NAVIGATION_AREAS}
         with ui.tab_panels(tabs, value=tab_objects["Holdings"]).classes("w-full"):
@@ -136,6 +139,19 @@ async def index() -> None:
                     asset_type = ui.select(sorted(ASSET_TYPES), value=source.get("asset_type", "Stock") if source.get("asset_type", "Stock") in ASSET_TYPES else "Other", label="Asset type").classes(FULL_WIDTH_CONTROL)
                 sector = ui.input("Sector", value=source.get("sector", "")).classes(FULL_WIDTH_CONTROL)
                 is_espp = ui.checkbox("ESPP holding", value=bool(source.get("espp_enabled", source.get("is_espp", False))))
+                hd_notice = ui.label("HD production rules enforce zero regular/special contributions, ESPP enabled, a 15% discount, and a six-month purchase cadence. A non-positive ESPP amount uses the $100 fallback.").classes("hidden w-full rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900")
+                def apply_hd_presentation(value: Any) -> None:
+                    forced = str(value or "").strip().upper() == "HD"
+                    controls = (regular, special, discount, frequency, is_espp)
+                    if forced:
+                        regular.set_value(0); special.set_value(0); discount.set_value(0.15); frequency.set_value(6); is_espp.set_value(True)
+                        for control in controls: control.disable()
+                        hd_notice.classes(remove="hidden")
+                    else:
+                        for control in controls: control.enable()
+                        hd_notice.classes(add="hidden")
+                ticker.on_value_change(lambda event: apply_hd_presentation(event.value))
+                apply_hd_presentation(ticker.value)
                 busy = {"value": False}
                 async def save() -> None:
                     if busy["value"]:
@@ -161,7 +177,7 @@ async def index() -> None:
                     save_button = ui.button("Save Holding", icon="save", on_click=save).classes("w-full sm:w-auto min-h-11")
                     ui.button("Cancel", on_click=dialog.close).props("flat").classes("w-full sm:w-auto min-h-11")
             def open_holding_dialog(existing: dict[str, Any] | None = None) -> None:
-                with ui.dialog() as dialog, ui.card().classes("w-[min(96vw,48rem)] max-h-[90vh] overflow-y-auto"):
+                with ui.dialog() as dialog, ui.card().classes(DIALOG_CARD):
                     ui.label("Edit Holding" if existing else "Add Holding").classes("text-xl font-semibold")
                     holding_form(dialog, existing)
                 dialog.open()
@@ -169,7 +185,7 @@ async def index() -> None:
             metric_cards([("Portfolio value", currency(summary["portfolio_value"])), ("Cost basis", currency(summary["cost_basis"])), ("Unrealized gain/loss", currency(summary["unrealized_gain"])), ("Estimated annual income", currency(summary["annual_income"])), ("Weighted yield", percent(summary["weighted_yield_pct"])), ("Holdings", format_count(summary["holding_count"])), ("Largest holding", str(summary["largest_holding"])), ("Largest weight", percent(summary["largest_weight_pct"]))])
             contribution_totals = summarize_contributions(holdings)
             with ui.expansion("Contribution Settings", value=True).classes("w-full"):
-                ui.label("Recurring regular and ESPP amounts use 26 pay periods per year. Special contributions remain separate.").classes("text-sm text-gray-500")
+                ui.label("Regular and ESPP amounts repeat across 26 pay periods each year. Special contributions are one-time amounts and are never annualized.").classes("w-full rounded-lg bg-blue-50 p-3 text-sm text-blue-900 break-words")
                 metric_cards([
                     ("Regular biweekly", currency(contribution_totals["regular_biweekly"])),
                     ("Regular annual", currency(contribution_totals["regular_annual"])),
@@ -180,7 +196,7 @@ async def index() -> None:
                     ("Special contributions", currency(contribution_totals["special_contribution"])),
                 ])
                 def open_contribution_dialog(stored: dict[str, Any]) -> None:
-                    with ui.dialog() as dialog, ui.card().classes("w-[min(96vw,40rem)] max-h-[90vh] overflow-y-auto"):
+                    with ui.dialog() as dialog, ui.card().classes(DIALOG_CARD):
                         ticker_text = str(stored.get("ticker", ""))
                         ui.label(f"Contribution Settings · {ticker_text}").classes("text-xl font-semibold")
                         ui.label("Special contribution is a separate amount and is not annualized.").classes("text-sm text-gray-500")
@@ -192,6 +208,8 @@ async def index() -> None:
                         is_espp = ui.checkbox("ESPP enabled", value=bool(stored.get("espp_enabled", stored.get("is_espp", False))))
                         if ticker_text.strip().upper() == "HD":
                             ui.label("HD always uses zero regular/special contributions, a 15% discount, and a six-month cadence. A non-positive ESPP amount uses the $100 production fallback.").classes("rounded bg-amber-50 p-3 text-sm text-amber-900")
+                            regular.set_value(0); special.set_value(0); discount.set_value(15); frequency.set_value(6); is_espp.set_value(True)
+                            for control in (regular, special, discount, frequency, is_espp): control.disable()
                         busy = {"value": False}
                         async def save_contributions() -> None:
                             if busy["value"]:
@@ -219,14 +237,19 @@ async def index() -> None:
                             ui.label(str(stored.get("ticker", ""))).classes("text-lg font-semibold")
                             ui.label(f"Regular {currency(stored.get('regular_biweekly_contribution', 0))} · ESPP {currency(stored.get('espp_biweekly_contribution', 0))} · Special {currency(stored.get('special_contribution', 0))}").classes("text-sm text-gray-600")
                             ui.button("Edit Contributions", icon="payments", on_click=lambda row=stored: open_contribution_dialog(row)).classes("w-full sm:w-auto min-h-11")
+                if not holdings:
+                    ui.label("Add a holding to configure recurring or special contributions.").classes(EMPTY_STATE)
             fields = (("ticker", "Ticker"), ("shares", "Shares"), ("current_price", "Current Price"), ("market_value", "Market Value"), ("average_cost", "Average Cost"), ("cost_basis", "Cost Basis"), ("unrealized_gain", "Unrealized G/L"), ("dividend_yield_pct", "Dividend Yield %"), ("annual_income", "Annual Income"), ("asset_type", "Asset Type"), ("sector", "Sector"), ("regular_biweekly_contribution", "Regular Biweekly"), ("espp_biweekly_contribution", "ESPP Biweekly"), ("special_contribution", "Special Contribution"), ("employer_stock", "Employer Stock"), ("espp_enabled", "ESPP"))
             selected_rows = [{key: row.get(key) for key, _ in fields} for row in display_holdings]
             columns, rows = format_table_records(selected_rows)
             labels = dict(fields)
             for column in columns:
                 column["label"] = labels.get(column["name"], column["label"])
-            with ui.element("div").classes(SCROLL_TABLE):
-                ui.table(columns=columns, rows=rows, row_key="ticker", pagination=25).classes("w-full min-w-max").props("dense flat bordered")
+            if rows:
+                with ui.element("div").classes(SCROLL_TABLE):
+                    ui.table(columns=columns, rows=rows, row_key="ticker", pagination=25).classes("w-full min-w-max").props("dense flat bordered")
+            else:
+                ui.label("Your portfolio has no holdings yet. Use Add Holding to create the first one.").classes(EMPTY_STATE)
             with ui.expansion("Edit or delete a holding").classes("w-full"):
                 with ui.element("div").classes("w-full grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3"):
                     for stored in holdings:
@@ -235,7 +258,7 @@ async def index() -> None:
                             with ui.element("div").classes(RESPONSIVE_ACTIONS):
                                 ui.button("Edit", icon="edit", on_click=lambda row=stored: open_holding_dialog(row)).classes("w-full sm:w-auto min-h-11")
                                 def confirm_delete(row: dict[str, Any] = stored) -> None:
-                                    with ui.dialog() as confirm, ui.card().classes("w-[min(94vw,28rem)]"):
+                                    with ui.dialog() as confirm, ui.card().classes(CONFIRM_DIALOG_CARD):
                                         ui.label(f"Delete {row.get('ticker', '')} from the portfolio?").classes("text-lg font-semibold")
                                         ui.label("This removes only the current holding. Statement history is not changed.").classes("text-sm text-gray-600")
                                         deleting = {"value": False}
@@ -259,6 +282,8 @@ async def index() -> None:
                                             ui.button("Cancel", on_click=confirm.close).props("flat").classes("w-full sm:w-auto min-h-11")
                                     confirm.open()
                                 ui.button("Delete", icon="delete", color="negative", on_click=confirm_delete).classes("w-full sm:w-auto min-h-11")
+                if not holdings:
+                    ui.label("There are no holdings to edit or delete.").classes(EMPTY_STATE)
             ui.label("Read-only exports").classes("text-lg font-semibold mt-3")
             ui.label("Generate a fresh read-only snapshot, then download it in the format you need.").classes("text-sm text-gray-500")
             async def download_export(filename: str) -> None:
@@ -360,7 +385,7 @@ async def index() -> None:
             if records:
                 records_table(statement_display_records(records), "Scan results")
             else:
-                ui.label("No scan results yet.").classes("text-gray-500")
+                ui.label("No statement scan has been run. Statements are scanned only when you choose Scan Statements.").classes(EMPTY_STATE)
 
             def review_dialog(existing: dict[str, Any] | None = None) -> None:
                 missing = list(continuity.get("missing_months", []))
@@ -372,7 +397,7 @@ async def index() -> None:
                 selected_default = existing_month or options[0]
                 year, month = (int(part) for part in selected_default.split("-"))
                 default_date = str(existing.get("statement_end_date")) if existing else date(year, month, calendar.monthrange(year, month)[1]).isoformat()
-                with ui.dialog() as dialog, ui.card().classes("w-[min(96vw,42rem)] max-h-[90vh] overflow-y-auto"):
+                with ui.dialog() as dialog, ui.card().classes(DIALOG_CARD):
                     ui.label("Edit Manual Statement Review" if existing else "Manual Statement Review").classes("text-xl font-semibold")
                     ui.label("Enter only values verified against the original statement. Total Priced Portfolio plus Net Account Balance must equal Total Equity Holdings.").classes("text-sm text-gray-600")
                     review_month = ui.select(options, value=selected_default, label="Missing month").classes(FULL_WIDTH_CONTROL)
@@ -437,7 +462,7 @@ async def index() -> None:
                 ui.label("Import remains disabled until the scan is complete, all PDFs are accounted for, and monthly continuity is complete.").classes("text-sm text-amber-700")
 
             def confirm_delete_history() -> None:
-                with ui.dialog() as dialog, ui.card().classes("w-[min(94vw,30rem)]"):
+                with ui.dialog() as dialog, ui.card().classes(CONFIRM_DIALOG_CARD):
                     ui.label("Delete all imported statement history?").classes("text-lg font-semibold")
                     ui.label("Original PDFs and holdings will not be changed. Live snapshots remain intact.").classes("text-sm text-gray-600")
                     async def remove_imported() -> None:
@@ -531,7 +556,7 @@ async def index() -> None:
                             action.disable()
                         if row["research_markdown"]:
                             with ui.expansion("Existing Research", icon="description").classes("w-full"):
-                                ui.markdown(row["research_markdown"]).classes("w-full max-w-full break-words overflow-hidden")
+                                ui.markdown(row["research_markdown"]).classes(SAFE_RICH_OUTPUT)
             if package["archived"]:
                 ui.label("Archived Research").classes("text-xl font-semibold mt-2")
                 ui.label("Production retains research when a holding leaves the portfolio. Re-adding that ticker restores it through the normal holding synchronization path.").classes("text-sm text-gray-500")
@@ -602,7 +627,7 @@ async def index() -> None:
                                 seasonality = intelligence["seasonality"]
                                 if seasonality.get("chart_available"):
                                     monthly = seasonality.get("monthly_income", {})
-                                    ui.echart({"xAxis": {"type": "category", "data": list(monthly)}, "yAxis": {"type": "value"}, "series": [{"name": "Estimated income", "type": "bar", "data": list(monthly.values())}]}).classes("w-full h-80")
+                                    ui.echart({"grid": {"left": 48, "right": 12, "top": 20, "bottom": 36, "containLabel": True}, "xAxis": {"type": "category", "data": list(monthly)}, "yAxis": {"type": "value"}, "series": [{"name": "Estimated income", "type": "bar", "data": list(monthly.values())}]}).classes("w-full min-w-0 h-64 sm:h-80")
                                 else:
                                     ui.label(str(seasonality.get("message", "Dividend seasonality is unavailable."))).classes("text-gray-500")
                         except Exception as exc:
@@ -630,9 +655,9 @@ async def index() -> None:
                 analysis_type = ui.select(options["analysis_types"], value=options["analysis_types"][0], label="Analysis type").classes(FULL_WIDTH_CONTROL)
                 model = ui.select(options["models"], value=options["default_model"], label="Model").classes(FULL_WIDTH_CONTROL)
             instructions = ui.textarea(label="Optional instructions").classes("w-full").props("autogrow")
-            with ui.card().classes("w-full min-h-32"):
+            with ui.card().classes("w-full min-w-0 min-h-32 overflow-hidden"):
                 ui.label("Latest analysis").classes("text-lg font-semibold")
-                output = ui.markdown("No analysis has been run yet.").classes("w-full max-w-none break-words")
+                output = ui.markdown("No analysis has been run yet. Choose an analysis type and select Analyze when you are ready.").classes(SAFE_RICH_OUTPUT)
             status = ui.label("").classes("w-full text-sm text-gray-600 break-words")
             context_size = ui.label("").classes("w-full text-xs text-gray-500 break-words")
             state = AIAnalysisState()
@@ -660,7 +685,7 @@ async def index() -> None:
                     button.enable()
             def clear_analysis() -> None:
                 state.clear()
-                output.set_content("No analysis has been run yet.")
+                output.set_content("No analysis has been run yet. Choose an analysis type and select Analyze when you are ready.")
                 status.set_text("")
                 context_size.set_text("")
             with ui.element("div").classes(RESPONSIVE_ACTIONS):
@@ -713,7 +738,7 @@ async def index() -> None:
             area.clear()
             with area:
                 ui.label("Portfolio Health").classes("text-2xl font-semibold")
-                ui.label(str(package.get("disclaimer", "Tracker-generated and not an objective investment rating."))).classes("font-semibold text-amber-700")
+                ui.label(str(package.get("disclaimer", "Tracker-generated and not an objective investment rating."))).classes("w-full rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm font-medium text-amber-900 break-words")
                 metric_cards([("Overall health score", format_score(package.get("health_score"), out_of_100=True)), ("Largest holding", str(package.get("largest_holding", "N/A"))), ("Largest holding weight", percent(package.get("largest_holding_weight", 0.0)))])
                 records_table([{"component": key, "score": value} for key, value in package.get("subscores", {}).items()], "Component scores")
                 records_table(package.get("strongest_areas", []), "Strongest areas")
@@ -748,11 +773,11 @@ async def index() -> None:
                 package = history_package(history, range_name)
                 with chart_area:
                     if not package["records"]:
-                        ui.label("No historical values are available.")
+                        ui.label("No portfolio history is available yet. Import verified statements or wait for a live snapshot.").classes(EMPTY_STATE)
                         return
                     summary = package["summary"]
                     metric_cards([("Starting value", currency(summary["starting_portfolio_value"])), ("Ending value", currency(summary["ending_portfolio_value"])), ("Value change", currency(summary["absolute_change"])), ("Value change %", percent(summary["percentage_change"])), ("History points", format_count(summary["point_count"]))])
-                    ui.echart({"tooltip": {"trigger": "axis"}, "xAxis": {"type": "category", "data": package["series"]["dates"]}, "yAxis": {"type": "value", "scale": True, "axisLabel": {"formatter": "${value}"}}, "series": [{"name": "Portfolio value", "type": "line", "data": package["series"]["portfolio_values"], "areaStyle": {"opacity": 0.12}}]}).classes("w-full h-96")
+                    ui.echart({"tooltip": {"trigger": "axis"}, "grid": {"left": 56, "right": 16, "top": 24, "bottom": 48, "containLabel": True}, "xAxis": {"type": "category", "data": package["series"]["dates"], "axisLabel": {"hideOverlap": True}}, "yAxis": {"type": "value", "scale": True, "axisLabel": {"formatter": "${value}"}}, "series": [{"name": "Portfolio value", "type": "line", "data": package["series"]["portfolio_values"], "areaStyle": {"opacity": 0.12}}]}).classes("w-full min-w-0 h-72 sm:h-96")
             selector.on_value_change(lambda event: update_chart(str(event.value)))
             update_chart(selected_range)
         loaded["History"] = True
@@ -802,6 +827,8 @@ async def index() -> None:
 
     async def navigate(event: Any) -> None:
         name = str(event.value)
+        if mobile_navigation.value != name:
+            mobile_navigation.set_value(name)
         if name == "Portfolio Analysis": await render_analysis()
         elif name == "AI Analysis": render_ai()
         elif name == "Portfolio Insights": await render_insights()
@@ -812,6 +839,7 @@ async def index() -> None:
         elif name == "System": render_system()
 
     tabs.on_value_change(navigate)
+    mobile_navigation.on_value_change(lambda event: tabs.set_value(str(event.value)))
     async def refresh_data(force: bool = False) -> None:
         nonlocal holdings,history,metrics
         result = await run.io_bound(coordinator.refresh,force)

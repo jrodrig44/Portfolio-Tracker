@@ -136,3 +136,7 @@ RESPONSIVE_CARD_GRID = "w-full grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl
 RESPONSIVE_ACTIONS = "w-full flex flex-col sm:flex-row gap-2 sm:items-center"
 SCROLL_TABLE = "w-full max-w-full overflow-x-auto"
 FULL_WIDTH_CONTROL = "w-full sm:max-w-xl"
+DIALOG_CARD = "w-[min(96vw,48rem)] max-h-[90dvh] overflow-y-auto p-4 sm:p-6"
+CONFIRM_DIALOG_CARD = "w-[min(94vw,30rem)] max-h-[90dvh] overflow-y-auto p-4 sm:p-6"
+SAFE_RICH_OUTPUT = "w-full max-w-full min-w-0 break-words overflow-hidden safe-rich-output"
+EMPTY_STATE = "w-full rounded-lg border border-dashed border-gray-300 bg-gray-50 p-4 text-sm text-gray-600 break-words"

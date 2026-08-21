@@ -80,7 +80,9 @@ class NiceGuiPhase2APresentationTests(unittest.TestCase):
         source = (ROOT / "nicegui_app" / "main.py").read_text(encoding="utf-8")
         self.assertIn("RESPONSIVE_CARD_GRID", source)
         self.assertIn("SCROLL_TABLE", source)
-        self.assertIn("mobile-arrows", source)
+        self.assertIn('ui.select(NAVIGATION_AREAS, value="Holdings", label="Current section")', source)
+        self.assertIn("w-full md:hidden", source)
+        self.assertIn("hidden md:block", source)
         self.assertIn("w-full sm:w-auto min-h-11", source)
 
     def test_no_database_write_statements_were_added(self) -> None:
