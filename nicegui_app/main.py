@@ -100,8 +100,8 @@ async def index() -> None:
             spinner = ui.spinner(size="lg")
             status = ui.label("Loading portfolio and history from read-only databases…").classes("grow text-sm break-words")
             refresh_button = ui.button("Refresh Data", icon="refresh").classes("min-h-11")
-        mobile_navigation = ui.select(NAVIGATION_AREAS, value="Holdings", label="Current section").classes("w-full md:hidden").props("outlined options-dense")
-        with ui.element("nav").classes("hidden md:block w-full max-w-full overflow-x-auto").props('aria-label="Portfolio sections"'):
+        mobile_navigation = ui.select(NAVIGATION_AREAS, value="Holdings", label="Current section").classes("w-full lg:hidden").props("outlined options-dense")
+        with ui.element("nav").classes("hidden lg:block w-full max-w-full overflow-x-auto").props('aria-label="Portfolio sections"'):
             tabs = ui.tabs().classes("w-max min-w-full").props("outside-arrows")
         with tabs:
             tab_objects = {name: ui.tab(name) for name in NAVIGATION_AREAS}

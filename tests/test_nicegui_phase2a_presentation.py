@@ -81,8 +81,8 @@ class NiceGuiPhase2APresentationTests(unittest.TestCase):
         self.assertIn("RESPONSIVE_CARD_GRID", source)
         self.assertIn("SCROLL_TABLE", source)
         self.assertIn('ui.select(NAVIGATION_AREAS, value="Holdings", label="Current section")', source)
-        self.assertIn("w-full md:hidden", source)
-        self.assertIn("hidden md:block", source)
+        self.assertIn("w-full lg:hidden", source)
+        self.assertIn("hidden lg:block", source)
         self.assertIn("w-full sm:w-auto min-h-11", source)
 
     def test_no_database_write_statements_were_added(self) -> None:
