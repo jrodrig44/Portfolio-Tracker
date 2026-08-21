@@ -53,6 +53,29 @@ class NiceGuiPhase1DInsightsTests(unittest.TestCase):
         self.assertTrue(any("Employer-stock context" in text for text in result["observations"]))
         self.assertTrue(any("Contribution profile: 2" in text for text in result["observations"]))
 
+    def test_special_contribution_is_not_annualized_or_double_counted(self):
+        metrics=metrics_frame([
+            {"ticker":"CORE","shares":1,"current_price":100,"amount_invested":100,"annual_div_per_share":2,"asset_type":"Stock","sector":"Technology","regular_biweekly_contribution":280,"special_contribution":500},
+            {"ticker":"HD","shares":1,"current_price":100,"amount_invested":100,"annual_div_per_share":4,"asset_type":"Stock","sector":"Consumer Cyclical","regular_biweekly_contribution":280,"espp_biweekly_contribution":100,"special_contribution":500},
+        ])
+        result=insights_package(metrics)
+        summary=result["contribution"]["summary"]
+        self.assertEqual(summary["regular_biweekly"],280.0)
+        self.assertEqual(summary["espp_biweekly"],100.0)
+        self.assertEqual(summary["combined_biweekly"],380.0)
+        self.assertEqual(summary["regular_annual"],7280.0)
+        self.assertEqual(summary["espp_annual"],2600.0)
+        self.assertEqual(summary["combined_annual"],9880.0)
+        self.assertEqual(summary["special_contribution"],500.0)
+        self.assertEqual(summary["special_total"],500.0)
+        self.assertNotEqual(summary["combined_annual"],(280+100+500)*26)
+        hd=next(row for row in result["contribution"]["rows"] if row["ticker"]=="HD")
+        self.assertEqual(hd["regular_biweekly_contribution"],0.0)
+        self.assertEqual(hd["espp_biweekly_contribution"],100.0)
+        self.assertEqual(hd["special_contribution"],0.0)
+        self.assertEqual(result["contribution"]["active_contributors"],2)
+        self.assertEqual(result,build_portfolio_insights(metrics))
+
     def test_income_quality_sector_and_lookthrough_context(self):
         result=insights_package(self.metrics(),fund_weights=self.weights())
         quality={row["ticker"]:row["income_quality_classification"] for row in result["income_quality"]}

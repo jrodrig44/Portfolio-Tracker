@@ -38,7 +38,7 @@ def build_portfolio_insights(metrics: pd.DataFrame, *, fund_weights: dict[str, d
         return {
             "totals": {"portfolio_value": 0.0, "annual_income": 0.0, "weighted_yield_pct": 0.0, "average_monthly_income": 0.0},
             "yield": {"highest_yield_ticker": "N/A", "highest_yield_pct": 0.0, "lowest_positive_yield_ticker": "N/A", "lowest_positive_yield_pct": 0.0, "yield_spread_pct": None},
-            "contribution": {"rows": [], "summary": {"regular_biweekly": 0.0, "espp_biweekly": 0.0, "special_biweekly": 0.0, "combined_biweekly": 0.0, "regular_annual": 0.0, "espp_annual": 0.0, "combined_annual": 0.0}, "active_contributors": 0},
+            "contribution": {"rows": [], "summary": {"regular_biweekly": 0.0, "espp_biweekly": 0.0, "special_contribution": 0.0, "special_total": 0.0, "special_biweekly": 0.0, "combined_biweekly": 0.0, "regular_annual": 0.0, "espp_annual": 0.0, "combined_annual": 0.0}, "active_contributors": 0},
             "allocation": [], "economic_exposure": [], "direct_sector": [], "income_allocation": [], "income_quality": [], "concentration": {}, "fund_lookthrough": {}, "data_completeness": {}, "observations": [],
         }
 
@@ -61,7 +61,19 @@ def build_portfolio_insights(metrics: pd.DataFrame, *, fund_weights: dict[str, d
     contributions = analysis["contributions"]
     contribution_rows = contributions["holdings"]
     regular = finite(contributions.get("regular_biweekly")); espp = finite(contributions.get("espp_biweekly")); special = finite(contributions.get("special_biweekly"))
-    contribution_summary = {"regular_biweekly": regular, "espp_biweekly": espp, "special_biweekly": special, "combined_biweekly": regular + espp + special, "regular_annual": regular * 26, "espp_annual": espp * 26, "combined_annual": (regular + espp + special) * 26}
+    contribution_summary = {
+        "regular_biweekly": regular,
+        "espp_biweekly": espp,
+        "combined_biweekly": regular + espp,
+        "regular_annual": regular * 26,
+        "espp_annual": espp * 26,
+        "combined_annual": (regular + espp) * 26,
+        "special_contribution": special,
+        "special_total": special,
+        # Backward-compatible alias; special contributions are not recurring.
+        "special_biweekly": special,
+        "special_contribution_note": "Separate additional contribution; excluded from recurring biweekly and annual totals.",
+    }
     active = sum(finite(row.get("total_contribution")) > 0 for row in contribution_rows)
 
     concentration = analysis["concentration"]
