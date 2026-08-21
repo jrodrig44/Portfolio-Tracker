@@ -19,6 +19,7 @@ import streamlit as st
 import yfinance as yf
 
 from ai_analysis_prompt import AI_ANALYSIS_TYPES, build_ai_analysis_markdown, build_ai_analysis_messages, format_ai_analysis_markdown
+from portfolio_ai import compact_ai_context as _shared_compact_ai_context
 from health_engine import compute_portfolio_health as compute_portfolio_health_engine
 from portfolio_intelligence import compute_portfolio_intelligence
 from portfolio_analysis import canonical_asset_type as shared_canonical_asset_type
@@ -6689,6 +6690,23 @@ def _compact_analysis_context(
         summary["concentration_direction"] = "indeterminate"
 
     return _strip_empty_context_values(compact_payload) if isinstance(_strip_empty_context_values(compact_payload), dict) else compact_payload
+
+
+def _compact_analysis_context(
+    full_payload: dict[str, object],
+    analysis_type: str,
+    custom_question: str,
+    portfolio_history_summary: dict[str, object] | None = None,
+    dividend_seasonality_summary: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Framework adapter for the shared production AI context compactor."""
+    return _shared_compact_ai_context(
+        full_payload,
+        analysis_type,
+        custom_question,
+        portfolio_history_summary=portfolio_history_summary,
+        dividend_seasonality_summary=dividend_seasonality_summary,
+    )
 
 
 def _build_ai_analysis_payload_with_diagnostics(

@@ -26,7 +26,7 @@ class NiceGuiFullMirrorTests(unittest.TestCase):
         insights=insights_package(metrics);self.assertEqual(insights["yield"]["highest_yield_pct"],5.0);self.assertEqual(insights["contribution"]["summary"]["regular_annual"],260.0)
         health=health_package(metrics);self.assertIn("risk",health["subscores"]);self.assertTrue(0<=health["health_score"]<=100)
         payload=build_export_payload(self.holdings(),metrics);self.assertEqual(payload["totals"]["portfolio_value"],100.0);self.assertEqual(payload["schema_version"],"2.0")
-        compact=compact_context(payload,"Risk Analysis","Focus",[{"history_date":"2026-01-01","portfolio_value":100}]);self.assertEqual(compact["portfolio_snapshot"]["portfolio_value"],100.0);self.assertEqual(compact["portfolio_history_summary"]["points"],1)
+        compact=compact_context(payload,"Risk Analysis","Focus",[{"history_date":"2026-01-01","portfolio_value":100}]);self.assertEqual(compact["portfolio_snapshot"]["portfolio_value"],100.0);self.assertNotIn("portfolio_history_summary",compact)
     def _databases(self,root):
         portfolio=root/"portfolio.db";history=root/"history.sqlite"
         with closing(sqlite3.connect(portfolio)) as c:c.execute("CREATE TABLE holdings (ticker TEXT,shares REAL,amount_invested REAL,current_price REAL,dividend_yield_pct REAL,asset_type TEXT,sector TEXT)");c.execute("INSERT INTO holdings VALUES ('ABC',2,80,50,5,'Stock','Technology')");c.commit()

@@ -1,33 +1,47 @@
 from __future__ import annotations
 
-import os
-from dataclasses import dataclass
 from typing import Any
+
 import pandas as pd
 
-from ai_analysis_prompt import AI_ANALYSIS_TYPES,build_ai_analysis_messages,format_ai_analysis_markdown
-from onemin_ai_client import OneMinAIClient,messages_to_prompt
-from nicegui_app.services.configuration import ONEMIN_AI_RECOMMENDED_MODELS
 from nicegui_app.services.exports import build_export_payload
 from nicegui_app.services.portfolio_data import load_history
+from nicegui_app.services.yahoo import yahoo_intelligence_package
+from portfolio_ai import AIAnalysisState, ai_options, build_portfolio_history_summary, compact_ai_context, run_ai_analysis as shared_run_ai_analysis
 
 
-def ai_options()->dict[str,Any]:
-    default=os.environ.get("ONEMIN_AI_MODEL",ONEMIN_AI_RECOMMENDED_MODELS[0]).strip() or ONEMIN_AI_RECOMMENDED_MODELS[0]
-    return {"analysis_types":list(AI_ANALYSIS_TYPES),"models":list(dict.fromkeys([default,*ONEMIN_AI_RECOMMENDED_MODELS])),"default_model":default,"configured":bool(os.environ.get("ONEMIN_AI_API_KEY","").strip())}
+def compact_context(payload: dict[str, Any], analysis_type: str, instructions: str, history: list[dict[str, Any]]) -> dict[str, Any]:
+    return compact_ai_context(payload, analysis_type, instructions, portfolio_history_summary=build_portfolio_history_summary(history))
 
 
-def compact_context(payload:dict[str,Any],analysis_type:str,instructions:str,history:list[dict[str,Any]])->dict[str,Any]:
-    totals=payload.get("totals",{}); holdings=payload.get("holdings",[]); latest=history[-1] if history else {}
-    return {"analysis_type":analysis_type,"custom_question":instructions,"portfolio_snapshot":totals,"holdings":[{k:row.get(k) for k in ("ticker","shares","market_value","annual_income","asset_type","sector","portfolio_weight_pct")} for row in holdings],"allocation":payload.get("allocation",{}),"exposure":payload.get("exposure",{}),"income":payload.get("income",{}),"contributions":payload.get("contributions",{}),"health_score":payload.get("health_score",{}),"portfolio_history_summary":{"points":len(history),"latest_date":latest.get("history_date"),"latest_value":latest.get("portfolio_value")}}
+def _production_export_payload(holdings: list[dict[str, Any]], metrics: pd.DataFrame, history: list[dict[str, Any]], export_options: dict[str, Any]) -> dict[str, Any]:
+    options = dict(export_options)
+    if "external_context" not in options:
+        yahoo = yahoo_intelligence_package(metrics)
+        options["external_context"] = {
+            "supplemental_investment_intelligence": yahoo.get("investment_intelligence", []),
+            "historical_security_context": yahoo.get("historical_context", []),
+            "dividend_seasonality": yahoo.get("seasonality", {}),
+            "yahoo_metadata": [],
+            "notes": ["Yahoo context was loaded on demand for this explicit AI request."],
+        }
+        options["fund_weights"] = yahoo.get("fund_weights", {})
+    return build_export_payload(holdings, metrics, history=history, **options)
 
 
-@dataclass(frozen=True)
-class AIResult: markdown:str;model:str;record_id:str
+def build_ai_context(holdings: list[dict[str, Any]], metrics: pd.DataFrame, analysis_type: str, instructions: str, **export_options: Any) -> dict[str, Any]:
+    history = export_options.pop("history", None)
+    if history is None:
+        history = load_history()
+    return compact_ai_context(_production_export_payload(holdings, metrics, history, export_options), analysis_type, instructions)
 
 
-def run_ai_analysis(holdings:list[dict[str,Any]],metrics:pd.DataFrame,analysis_type:str,model:str,instructions:str)->AIResult:
-    payload=compact_context(build_export_payload(holdings,metrics),analysis_type,instructions,load_history());messages=build_ai_analysis_messages(payload,analysis_type,instructions)
-    client=OneMinAIClient(api_key=os.environ.get("ONEMIN_AI_API_KEY"),base_url=os.environ.get("ONEMIN_AI_BASE_URL","https://api.1min.ai"),timeout_seconds=float(os.environ.get("ONEMIN_AI_TIMEOUT_SECONDS","180")))
-    response=client.chat_with_ai(model=model,prompt=messages_to_prompt(messages),web_search=False)
-    return AIResult(format_ai_analysis_markdown(response.content),response.model,response.record_id)
+def run_ai_analysis(holdings: list[dict[str, Any]], metrics: pd.DataFrame, analysis_type: str, model: str, instructions: str, *, state: AIAnalysisState | None = None, **export_options: Any) -> AIAnalysisState:
+    history = export_options.pop("history", None)
+    if history is None:
+        history = load_history()
+    payload = _production_export_payload(holdings, metrics, history, export_options)
+    return shared_run_ai_analysis(payload, analysis_type, model, instructions, state=state)
+
+
+__all__ = ["AIAnalysisState", "ai_options", "build_ai_context", "compact_context", "run_ai_analysis"]

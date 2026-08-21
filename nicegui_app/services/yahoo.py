@@ -74,4 +74,4 @@ def yahoo_intelligence_package(metrics:pd.DataFrame)->dict[str,Any]:
         weights=_cached((ticker,"fund_sector_weights"),load_fund_weights,3600.0)
         if weights:fund_weights[ticker]=weights
     resolved=resolve_fund_lookthrough(metrics,fund_weights)
-    return {"investment_intelligence":intelligence,"lookthrough":resolved["records"],"unresolved_lookthrough":resolved["unresolved_records"],"fund_lookthrough":resolved,"seasonality":{"monthly_income":monthly,"chart_available":any(monthly.values()),"message":"Estimated distribution of current annual portfolio income based on available historical dividend timing."},"historical_context":historical}
+    return {"investment_intelligence":intelligence,"lookthrough":resolved["records"],"unresolved_lookthrough":resolved["unresolved_records"],"fund_lookthrough":resolved,"fund_weights":fund_weights,"seasonality":{"monthly_income":monthly,"chart_available":any(monthly.values()),"message":"Estimated distribution of current annual portfolio income based on available historical dividend timing."},"historical_context":historical}

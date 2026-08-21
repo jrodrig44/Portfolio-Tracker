@@ -10,7 +10,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from nicegui import run, ui
 from nicegui_app.process_lifecycle import start_launcher_watchdog
-from nicegui_app.services.ai_context import ai_options,run_ai_analysis
+from nicegui_app.services.ai_context import AIAnalysisState,ai_options,run_ai_analysis
 from nicegui_app.services.analysis import analysis_package
 from nicegui_app.services.configuration import DB_REFRESH_INTERVAL_SECONDS
 from nicegui_app.services.exports import export_package
@@ -182,21 +182,39 @@ async def index() -> None:
             model = ui.select(options["models"], value=options["default_model"], label="Model").classes("w-full max-w-xl")
             instructions = ui.textarea(label="Optional instructions").classes("w-full")
             output = ui.markdown("").classes("w-full")
-            result_text = {"value": ""}
+            status = ui.label("").classes("text-gray-500")
+            context_size = ui.label("").classes("text-gray-500")
+            state = AIAnalysisState()
+            request_active = {"value": False}
             async def analyze() -> None:
+                if request_active["value"]:
+                    return
+                request_active["value"] = True
                 button.disable()
-                output.set_content("_Analyzing through 1min.AI…_")
                 try:
-                    result = await run.io_bound(run_ai_analysis, holdings, metrics, analysis_type.value, model.value, instructions.value or "")
-                    result_text["value"] = result.markdown
-                    output.set_content(result.markdown)
-                    ui.notify(f"Analysis completed with {result.model}", type="positive")
-                except Exception as exc:
-                    output.set_content(f"**Analysis failed:** {exc}")
+                    status.set_text("Analyzing through 1min.AI…")
+                    await run.io_bound(run_ai_analysis, holdings, metrics, analysis_type.value, model.value, instructions.value or "", state=state)
+                    stats = state.context_diagnostics
+                    if stats:
+                        context_size.set_text(f"AI context: {int(stats.get('after_chars', 0)):,} chars (~{int(stats.get('after_tokens', 0)):,} tokens), {float(stats.get('reduction_pct', 0)):.1f}% smaller after compaction.")
+                    if state.error_message:
+                        status.set_text(state.error_message)
+                        ui.notify(state.error_message, type="negative")
+                    else:
+                        output.set_content(state.result_markdown)
+                        status.set_text(f"Completed with {state.result_model} at {state.generated_at}.")
+                        ui.notify(f"Analysis completed with {state.result_model}", type="positive")
                 finally:
+                    request_active["value"] = False
                     button.enable()
+            def clear_analysis() -> None:
+                state.clear()
+                output.set_content("")
+                status.set_text("")
+                context_size.set_text("")
             button = ui.button("Analyze", on_click=analyze, color="primary")
-            ui.button("Download AI Markdown", on_click=lambda: ui.download(result_text["value"].encode("utf-8"), "ai_analysis.md"))
+            ui.button("Clear Displayed Analysis", on_click=clear_analysis)
+            ui.button("Download AI Markdown", on_click=lambda: ui.download(state.result_markdown.encode("utf-8"), "ai_analysis.md"))
         loaded["AI Analysis"] = True
 
     async def render_insights() -> None:
