@@ -7,6 +7,7 @@ from pathlib import Path
 
 from nicegui_app.services.portfolio_data import load_holdings
 from portfolio_holdings_write import HoldingNotFoundError, HoldingsWriteService
+from portfolio_statement_history import statement_scan_diagnostic_records, statement_verified_display_records
 from stash_history import (
     import_validated_history,
     prepare_history_database,
@@ -141,6 +142,31 @@ class StatementReconciliationTests(unittest.TestCase):
         self.assertEqual((state["needs_review"], state["manually_resolved"]), (1, 0))
         self.assertEqual(state["records"][0]["raw_status"], "needs_review")
 
+    def test_undated_parser_diagnostic_is_separate_from_manual_verified_values(self) -> None:
+        add_scan_preview(self.db, "pdf-a", "2025-01")
+        with sqlite3.connect(self.db) as connection:
+            connection.execute("UPDATE statement_scan_preview SET statement_end_date=NULL WHERE source_hash='pdf-a'")
+        manual_id = save_manual_statement_review("2025-01", "2025-01-31", 1000.0, 50.0, 1050.0, True, db_path=self.db)
+        state = scan_state(self.db)
+        verified = statement_verified_display_records(state["verified_records"])
+        diagnostic = statement_scan_diagnostic_records(state["scan_diagnostics"])
+        self.assertEqual(verified, [{
+            "statement_start_date": "—", "statement_end_date": "2025-01-31",
+            "total_priced_portfolio": 1000.0, "net_account_balance": 50.0,
+            "total_equity_holdings": 1050.0, "source_resolution": "Manually Verified",
+            "current_status": "Verified",
+        }])
+        self.assertEqual(diagnostic[0]["parser_end_date"], "—")
+        self.assertEqual(diagnostic[0]["raw_parser_status"], "needs_review")
+        self.assertNotIn("source_hash", verified[0])
+        save_manual_statement_review("2025-01", "2025-01-31", 1200.0, 75.0, 1275.0, True, manual_id=manual_id, db_path=self.db)
+        refreshed = statement_verified_display_records(scan_state(self.db)["verified_records"])
+        self.assertEqual((refreshed[0]["total_priced_portfolio"], refreshed[0]["net_account_balance"], refreshed[0]["total_equity_holdings"]), (1200.0, 75.0, 1275.0))
+        remove_manual_statement_review(manual_id, self.db)
+        removed = scan_state(self.db)
+        self.assertEqual(removed["verified_records"], [])
+        self.assertIn("2025-01", removed["monthly_continuity"]["missing_months"])
+
     def test_manual_save_edit_and_remove_reconcile_immediately(self) -> None:
         add_scan_preview(self.db, "pdf-a", "2022-01")
         manual_id = manual_review(self.db, "2022-01")
@@ -199,8 +225,22 @@ class StatementReconciliationTests(unittest.TestCase):
         state = scan_state(self.db)
         self.assertEqual((state["needs_review"], state["manually_resolved"], state["parser_review_flags"]), (0, 9, 9))
         self.assertTrue(state["monthly_continuity"]["complete"])
+        manual_rows = statement_verified_display_records(state["verified_records"])
+        self.assertEqual(len([row for row in manual_rows if row["source_resolution"] == "Manually Verified"]), 9)
+        self.assertTrue(all(row["statement_end_date"] != "—" and row["total_priced_portfolio"] is not None and row["net_account_balance"] is not None and row["total_equity_holdings"] is not None for row in manual_rows))
         self.assertTrue(all(row["raw_status"] == "needs_review" for row in state["records"][:9]))
         self.assertTrue(all(row["resolved_by"] == "verified_history_coverage" for row in state["records"][:9]))
+
+    def test_imported_manual_review_remains_visible_with_verified_values(self) -> None:
+        add_scan_preview(self.db, "pdf-a", "2025-01")
+        manual_review(self.db, "2025-01")
+        manual_records = [row for row in scan_state(self.db)["records"] if row.get("source_type") == "manual_statement_review"]
+        import_validated_history(manual_records, self.db)
+        displayed = statement_verified_display_records(scan_state(self.db)["verified_records"])
+        self.assertEqual(len(displayed), 1)
+        self.assertEqual(displayed[0]["source_resolution"], "Manually Verified")
+        self.assertEqual(displayed[0]["current_status"], "Previously Imported")
+        self.assertEqual((displayed[0]["total_priced_portfolio"], displayed[0]["net_account_balance"], displayed[0]["total_equity_holdings"]), (10.0, 1.0, 11.0))
 
 
 if __name__ == "__main__":

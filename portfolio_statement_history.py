@@ -38,6 +38,37 @@ def statement_display_records(records: list[dict[str, Any]]) -> list[dict[str, A
     ]
 
 
+def statement_verified_display_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Format verified financial rows without exposing persistence identifiers."""
+    return [
+        {
+            "statement_start_date": row.get("statement_start_date") or "—",
+            "statement_end_date": row.get("statement_end_date") or "—",
+            "total_priced_portfolio": row.get("invested_value"),
+            "net_account_balance": row.get("cash_value"),
+            "total_equity_holdings": row.get("portfolio_value"),
+            "source_resolution": row.get("resolution_source") or "Verified",
+            "current_status": row.get("current_status") or "Verified",
+        }
+        for row in records
+    ]
+
+
+def statement_scan_diagnostic_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Format raw parser diagnostics separately from verified financial history."""
+    return [
+        {
+            "parser_start_date": row.get("statement_start_date") or "—",
+            "parser_end_date": row.get("statement_end_date") or "—",
+            "raw_parser_status": row.get("raw_status", row.get("status")),
+            "current_action_required": bool(row.get("action_required", row.get("status") == "needs_review")),
+            "resolution_context": row.get("resolved_by") or "—",
+            "parser_warning": row.get("warning") or "",
+        }
+        for row in records
+    ]
+
+
 class StatementHistoryService:
     """Thin orchestration around the production statement parser and history store."""
 
@@ -99,4 +130,4 @@ class StatementHistoryService:
         delete_imported_history(self.db_path)
 
 
-__all__ = ["StatementHistoryService", "statement_display_records"]
+__all__ = ["StatementHistoryService", "statement_display_records", "statement_scan_diagnostic_records", "statement_verified_display_records"]

@@ -380,7 +380,7 @@ def scan_state(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> dict[str, Any]:
         reclassify_scan_preview(db_path)
     preview_records = load_scan_preview(db_path)
     manual_records = load_manual_statement_reviews(db_path)
-    imported_records = load_statement_history(db_path)
+    imported_records = load_statement_history_details(db_path)
     expected_months = []
     year, month = 2021, 8
     while (year, month) <= (2026, 7):
@@ -430,6 +430,47 @@ def scan_state(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> dict[str, Any]:
         if record.get("status") == "valid"
         and str(record.get("statement_end_date") or "")[:7] not in imported_months
     ]
+    verified_by_month: dict[str, dict[str, Any]] = {}
+    for imported in imported_records:
+        history_date = str(imported.get("history_date") or "")
+        if not history_date:
+            continue
+        source_type = str(imported.get("source_type") or "")
+        verified_by_month[history_date[:7]] = {
+            "statement_start_date": None,
+            "statement_end_date": history_date,
+            "portfolio_value": imported.get("portfolio_value"),
+            "invested_value": imported.get("invested_value"),
+            "cash_value": imported.get("cash_value"),
+            "resolution_source": "Manually Verified" if source_type == "manual_statement_review" else "Previously Imported",
+            "current_status": "Previously Imported",
+        }
+    for parsed in preview_records:
+        end_date = str(parsed.get("statement_end_date") or "")
+        if parsed.get("status") != "valid" or not end_date or end_date[:7] in verified_by_month:
+            continue
+        verified_by_month[end_date[:7]] = {
+            "statement_start_date": parsed.get("statement_start_date"),
+            "statement_end_date": end_date,
+            "portfolio_value": parsed.get("portfolio_value"),
+            "invested_value": parsed.get("invested_value"),
+            "cash_value": parsed.get("cash_value"),
+            "resolution_source": "Automatically Parsed",
+            "current_status": "Ready",
+        }
+    for manual in manual_records:
+        end_date = str(manual.get("statement_end_date") or "")
+        if manual.get("status") != "valid" or not manual.get("confirmed") or not end_date:
+            continue
+        verified_by_month[end_date[:7]] = {
+            "statement_start_date": None,
+            "statement_end_date": end_date,
+            "portfolio_value": manual.get("portfolio_value"),
+            "invested_value": manual.get("invested_value"),
+            "cash_value": manual.get("cash_value"),
+            "resolution_source": "Manually Verified",
+            "current_status": "Previously Imported" if end_date[:7] in imported_months else "Verified",
+        }
     state.update({
         "ready": len(ready_records),
         "needs_review": sum(1 for record in reconciled_preview if record["action_required"]),
@@ -438,6 +479,8 @@ def scan_state(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> dict[str, Any]:
         "parser_review_flags": sum(1 for record in reconciled_preview if record["raw_status"] == "needs_review"),
         "unparseable": sum(1 for record in reconciled_preview if record["raw_status"] == "unparseable"),
         "records": records,
+        "verified_records": [verified_by_month[month] for month in sorted(verified_by_month)],
+        "scan_diagnostics": reconciled_preview,
     })
     candidate_months = [str(record["statement_end_date"])[:7] for record in records if record["status"] == "valid" and record.get("statement_end_date") and str(record["statement_end_date"])[:7] not in imported_months]
     represented_months = set(candidate_months) | imported_months
@@ -639,6 +682,14 @@ def load_statement_history(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> list[di
     with closing(sqlite3.connect(db_path)) as conn:
         rows = conn.execute("SELECT history_date, portfolio_value, source_type FROM statement_portfolio_history ORDER BY history_date").fetchall()
     return [{"history_date": row[0], "portfolio_value": float(row[1]), "source_type": row[2]} for row in rows]
+
+
+def load_statement_history_details(db_path: Path = STATEMENT_HISTORY_DB_PATH) -> list[dict[str, Any]]:
+    """Load verified statement values used by reconciliation and presentation."""
+    prepare_history_database(db_path)
+    with closing(sqlite3.connect(db_path)) as conn:
+        rows = conn.execute("SELECT history_date, portfolio_value, invested_value, cash_value, source_type FROM statement_portfolio_history ORDER BY history_date").fetchall()
+    return [{"history_date": row[0], "portfolio_value": float(row[1]), "invested_value": float(row[2]) if row[2] is not None else None, "cash_value": float(row[3]) if row[3] is not None else None, "source_type": row[4]} for row in rows]
 
 
 def upsert_live_portfolio_snapshot(portfolio_value: float, snapshot_date: str | None = None, db_path: Path = STATEMENT_HISTORY_DB_PATH) -> None:

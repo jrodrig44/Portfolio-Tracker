@@ -28,7 +28,7 @@ from nicegui_app.services.yahoo import current_market_data,yahoo_intelligence_pa
 from portfolio_holdings_write import ASSET_TYPES, HoldingsWriteService, summarize_contributions
 from nicegui_app.services.operations import format_interval, operational_status
 from portfolio_research import PortfolioResearchService, research_contexts
-from portfolio_statement_history import StatementHistoryService, statement_display_records
+from portfolio_statement_history import StatementHistoryService, statement_scan_diagnostic_records, statement_verified_display_records
 
 HOST = "0.0.0.0"
 PORT = 8502
@@ -329,8 +329,14 @@ async def index() -> None:
                     await reload_statement_area()
                 ui.button("Clear Scan Preview", icon="clear", on_click=clear_preview).classes("w-full sm:w-auto min-h-11")
             scan_status = ui.label("").classes("text-sm text-gray-600")
-            if records:
-                records_table(statement_display_records(records), "Scan results")
+            verified_records = state.get("verified_records", [])
+            if verified_records:
+                records_table(statement_verified_display_records(verified_records), "Verified / Resolved Statements")
+            else:
+                ui.label("No verified or resolved statement history is available yet.").classes(EMPTY_STATE)
+            scan_diagnostics = state.get("scan_diagnostics", [])
+            if scan_diagnostics:
+                records_table(statement_scan_diagnostic_records(scan_diagnostics), "Scan Diagnostics")
             else:
                 ui.label("No statement scan has been run. Statements are scanned only when you choose Scan Statements.").classes(EMPTY_STATE)
 
