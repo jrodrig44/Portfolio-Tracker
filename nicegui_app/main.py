@@ -6,14 +6,14 @@ import uuid
 import calendar
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from nicegui import app, run, ui
-from nicegui_app.process_lifecycle import start_launcher_watchdog
+from nicegui_app.process_lifecycle import ShutdownInProgress, lifecycle, start_launcher_watchdog, start_shutdown_request_watcher
 from nicegui_app.services.ai_context import AIAnalysisState,ai_options,run_ai_analysis
 from nicegui_app.services.appearance import APPEARANCE_OPTIONS, APPEARANCE_STORAGE_KEY, restore_appearance
 from nicegui_app.services.analysis import analysis_package
@@ -79,6 +79,16 @@ def records_table(records: list[dict[str, Any]], title: str | None = None) -> No
         return
     with ui.element("div").classes(SCROLL_TABLE):
         ui.table(columns=columns, rows=rows, pagination=15).classes("w-full min-w-max").props("dense flat bordered")
+
+
+async def critical_io(name: str, operation: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Run one admitted mutation to completion, including its blocking worker."""
+    try:
+        with lifecycle.critical_operation(name):
+            return await run.io_bound(operation, *args, **kwargs)
+    except ShutdownInProgress as exc:
+        ui.notify(str(exc), type="warning")
+        raise
 
 
 @ui.page("/")
@@ -202,7 +212,8 @@ async def index() -> None:
                 save_button.disable()
                 try:
                     await grid.get_client_data()
-                    result = await run.io_bound(
+                    result = await critical_io(
+                        "holdings_save",
                         holdings_writer.save_grid,
                         list(grid.options["rowData"]),
                         expected_rows=list(holdings),
@@ -314,7 +325,7 @@ async def index() -> None:
                 resume_button.disable()
                 scan_status.set_text("Scanning statements…")
                 try:
-                    await run.io_bound(statement_service.scan, restart=restart)
+                    await critical_io("statement_scan", statement_service.scan, restart=restart)
                     ui.notify("Statement scan completed.", type="positive")
                     await reload_statement_area()
                 except Exception as exc:
@@ -331,7 +342,10 @@ async def index() -> None:
                 if state["scan_status"] not in {"interrupted", "running"}:
                     resume_button.disable()
                 async def clear_preview() -> None:
-                    await run.io_bound(statement_service.clear_scan)
+                    try:
+                        await critical_io("statement_scan_clear", statement_service.clear_scan)
+                    except ShutdownInProgress:
+                        return
                     await reload_statement_area()
                 ui.button("Clear Scan Preview", icon="clear", on_click=clear_preview).classes("w-full sm:w-auto min-h-11")
             scan_status = ui.label("").classes("text-sm text-gray-600 dark:text-gray-300")
@@ -372,7 +386,7 @@ async def index() -> None:
                         saving["value"] = True
                         save_button.disable()
                         try:
-                            await run.io_bound(statement_service.save_review, str(review_month.value), str(ending_date.value), float(invested.value), float(cash.value), float(total.value), bool(confirmed.value), manual_id=str(existing["source_hash"]) if existing else None)
+                            await critical_io("statement_review_save", statement_service.save_review, str(review_month.value), str(ending_date.value), float(invested.value), float(cash.value), float(total.value), bool(confirmed.value), manual_id=str(existing["source_hash"]) if existing else None)
                             dialog.close()
                             ui.notify("Manual review saved as Ready.", type="positive")
                             await reload_statement_area()
@@ -396,7 +410,10 @@ async def index() -> None:
                         with ui.element("div").classes(RESPONSIVE_ACTIONS):
                             ui.button("Edit Review", icon="edit", on_click=lambda row=manual: review_dialog(row)).classes("w-full sm:w-auto min-h-11")
                             async def remove_review(row: dict[str, Any] = manual) -> None:
-                                await run.io_bound(statement_service.remove_review, str(row["source_hash"]))
+                                try:
+                                    await critical_io("statement_review_remove", statement_service.remove_review, str(row["source_hash"]))
+                                except ShutdownInProgress:
+                                    return
                                 await reload_statement_area()
                             ui.button("Remove Review", icon="delete", on_click=remove_review).classes("w-full sm:w-auto min-h-11")
 
@@ -406,7 +423,7 @@ async def index() -> None:
                 action_busy["value"] = True
                 import_button.disable()
                 try:
-                    result = await run.io_bound(statement_service.import_ready, submission_token=uuid.uuid4().hex)
+                    result = await critical_io("statement_import", statement_service.import_ready, submission_token=uuid.uuid4().hex)
                     await refresh_history_after_statement_write()
                     ui.notify(f"Imported {int((result or {}).get('imported', 0))} statement history records.", type="positive")
                     await reload_statement_area()
@@ -425,7 +442,10 @@ async def index() -> None:
                     ui.label("Delete all imported statement history?").classes("text-lg font-semibold")
                     ui.label("Original PDFs and holdings will not be changed. Live snapshots remain intact.").classes("text-sm text-gray-600 dark:text-gray-300")
                     async def remove_imported() -> None:
-                        await run.io_bound(statement_service.delete_imported, confirmed=True)
+                        try:
+                            await critical_io("statement_history_delete", statement_service.delete_imported, confirmed=True)
+                        except ShutdownInProgress:
+                            return
                         dialog.close()
                         await refresh_history_after_statement_write()
                         await reload_statement_area()
@@ -469,7 +489,7 @@ async def index() -> None:
                 model = ui.select(package["models"], value=package["model"], label="Supplemental Research Model").classes(FULL_WIDTH_CONTROL)
                 async def save_model() -> None:
                     try:
-                        await run.io_bound(research_service.set_model, str(model.value or ""))
+                        await critical_io("research_settings_save", research_service.set_model, str(model.value or ""))
                         ui.notify("Supplemental research model saved.", type="positive")
                     except Exception as exc:
                         ui.notify(str(exc), type="negative", timeout=0)
@@ -478,7 +498,7 @@ async def index() -> None:
             async def update_ticker(ticker: str, button: Any) -> None:
                 button.disable()
                 try:
-                    result = await run.io_bound(research_service.update, ticker, contexts[ticker], str(model.value or ""))
+                    result = await critical_io("research_update", research_service.update, ticker, contexts[ticker], str(model.value or ""))
                     if result.get("status") == "current":
                         ui.notify(f"Supplemental research completed for {ticker}.", type="positive")
                     elif result.get("reason") == "already running":
@@ -856,4 +876,5 @@ async def index() -> None:
 
 if __name__ in {"__main__", "__mp_main__"}:
     start_launcher_watchdog()
+    start_shutdown_request_watcher(app.shutdown)
     ui.run(host=HOST, port=PORT, title="Portfolio Tracker · NiceGUI Mirror", reload=False, show=False, storage_secret=STORAGE_SECRET)

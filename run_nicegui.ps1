@@ -183,14 +183,68 @@ if ($null -ne $existingListener) {
 
 Write-Host "Starting NiceGUI Portfolio Tracker on http://localhost:8502..."
 $env:NICEGUI_LAUNCHER_PID = [string]$PID
+$shutdownToken = [Guid]::NewGuid().ToString("N")
+$shutdownRequestPath = Join-Path ([System.IO.Path]::GetTempPath()) "portfolio-tracker-stop-$shutdownToken.request"
+$shutdownWaitPath = Join-Path ([System.IO.Path]::GetTempPath()) "portfolio-tracker-stop-$shutdownToken.waiting"
+$env:NICEGUI_SHUTDOWN_REQUEST_FILE = $shutdownRequestPath
+$env:NICEGUI_SHUTDOWN_WAIT_FILE = $shutdownWaitPath
+$gracefulShutdownTimeoutSeconds = 15
+$intentionalShutdown = $false
+$forcedShutdown = $false
 try {
-    # Direct invocation keeps Python in this console's process chain. The Python
-    # watchdog also exits the server if this launcher is closed unexpectedly.
-    & $venvPython $niceGuiMain
-    if ($LASTEXITCODE -ne 0) {
-        throw "NiceGUI exited with code $LASTEXITCODE."
+    $quotedNiceGuiMain = '"' + $niceGuiMain + '"'
+    $child = Start-Process -FilePath $venvPython -ArgumentList @($quotedNiceGuiMain) -WorkingDirectory $projectRoot -NoNewWindow -PassThru
+    $oldTreatControlCAsInput = [Console]::TreatControlCAsInput
+    [Console]::TreatControlCAsInput = $true
+    try {
+        while (-not $child.HasExited) {
+            if ([Console]::KeyAvailable) {
+                $key = [Console]::ReadKey($true)
+                if (($key.Modifiers -band [ConsoleModifiers]::Control) -and $key.Key -eq [ConsoleKey]::C) {
+                    $intentionalShutdown = $true
+                    Write-Host "Stopping Portfolio Tracker safely..."
+                    New-Item -ItemType File -Path $shutdownRequestPath -Force | Out-Null
+                    $deadline = [DateTime]::UtcNow.AddSeconds($gracefulShutdownTimeoutSeconds)
+                    $waitingReported = $false
+                    while (-not $child.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+                        if (-not $waitingReported -and (Test-Path -LiteralPath $shutdownWaitPath -PathType Leaf)) {
+                            Write-Host "Waiting for active operations to finish..."
+                            $waitingReported = $true
+                        }
+                        Start-Sleep -Milliseconds 100
+                        $child.Refresh()
+                    }
+                    if (-not $child.HasExited) {
+                        Write-Host "Graceful shutdown timed out after $gracefulShutdownTimeoutSeconds seconds."
+                        Write-Host "Forcing Portfolio Tracker to stop..."
+                        & taskkill.exe /PID $child.Id /T /F | Out-Null
+                        $forcedShutdown = $true
+                        Write-Host "Portfolio Tracker was force-stopped."
+                    }
+                    else {
+                        Write-Host "Portfolio Tracker stopped safely."
+                    }
+                    break
+                }
+            }
+            Start-Sleep -Milliseconds 100
+            $child.Refresh()
+        }
+    }
+    finally {
+        [Console]::TreatControlCAsInput = $oldTreatControlCAsInput
+    }
+    if ($forcedShutdown) {
+        exit 2
+    }
+    if (-not $intentionalShutdown -and $child.ExitCode -ne 0) {
+        throw "NiceGUI exited with code $($child.ExitCode)."
     }
 }
 finally {
     Remove-Item Env:NICEGUI_LAUNCHER_PID -ErrorAction SilentlyContinue
+    Remove-Item Env:NICEGUI_SHUTDOWN_REQUEST_FILE -ErrorAction SilentlyContinue
+    Remove-Item Env:NICEGUI_SHUTDOWN_WAIT_FILE -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $shutdownRequestPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $shutdownWaitPath -Force -ErrorAction SilentlyContinue
 }

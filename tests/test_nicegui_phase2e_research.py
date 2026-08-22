@@ -143,7 +143,7 @@ class NiceGUIPhase2EResearchTests(unittest.TestCase):
         source = (Path(__file__).parents[1] / "nicegui_app" / "main.py").read_text(encoding="utf-8")
         worker_source = (Path(__file__).parents[1] / "supplemental_research_worker.py").read_text(encoding="utf-8")
         self.assertIn('"Supplemental Research"', source)
-        self.assertIn("await run.io_bound(research_service.update", source)
+        self.assertIn('await critical_io("research_update", research_service.update', source)
         self.assertIn("grid-cols-1 lg:grid-cols-2", source)
         self.assertIn("w-full sm:w-auto min-h-11", source)
         self.assertNotIn("supplemental_research_worker", source)

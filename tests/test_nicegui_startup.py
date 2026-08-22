@@ -63,8 +63,9 @@ class NiceGuiStartupTests(unittest.TestCase):
         self.assertIn("Get-NetTCPConnection -LocalPort 8502", self.script)
         self.assertIn("Port 8502 is already in use", self.script)
         self.assertIn("NICEGUI_LAUNCHER_PID", self.script)
-        self.assertIn("& $venvPython $niceGuiMain", self.script)
-        self.assertNotIn("Start-Process", self.script)
+        self.assertIn("Start-Process -FilePath $venvPython", self.script)
+        self.assertIn("-PassThru", self.script)
+        self.assertIn("$child.Id", self.script)
 
     def test_main_starts_launcher_watchdog_and_watchdog_exits_with_launcher(self) -> None:
         self.assertIn("start_launcher_watchdog()", self.main)
@@ -75,10 +76,25 @@ class NiceGuiStartupTests(unittest.TestCase):
 
     def test_nicegui_launch_chain_has_no_detachment_or_restart_path(self) -> None:
         launch_chain = self.batch + self.script + self.lifecycle + self.main
-        for forbidden in ("Start-Process", "schtasks", "New-Service", "Startup\\", "while ($true)"):
+        for forbidden in ("schtasks", "New-Service", "Startup\\", "while ($true)"):
             self.assertNotIn(forbidden, launch_chain)
         self.assertEqual(self.batch.count("run_nicegui.ps1"), 1)
-        self.assertEqual(self.script.count("& $venvPython $niceGuiMain"), 1)
+        self.assertEqual(self.script.count("Start-Process -FilePath $venvPython"), 1)
+
+    def test_launcher_has_bounded_exact_pid_shutdown(self) -> None:
+        self.assertIn("$gracefulShutdownTimeoutSeconds = 15", self.script)
+        self.assertIn("NICEGUI_SHUTDOWN_REQUEST_FILE", self.script)
+        self.assertIn("[Console]::TreatControlCAsInput = $true", self.script)
+        self.assertIn("taskkill.exe /PID $child.Id /T /F", self.script)
+        self.assertNotIn("taskkill /IM", self.script)
+        self.assertIn("Portfolio Tracker stopped safely.", self.script)
+        self.assertIn("Portfolio Tracker was force-stopped.", self.script)
+        self.assertIn("exit 2", self.script)
+
+    def test_intentional_and_failed_exits_remain_distinct(self) -> None:
+        self.assertIn("$intentionalShutdown = $true", self.script)
+        self.assertIn("-not $intentionalShutdown -and $child.ExitCode -ne 0", self.script)
+        self.assertIn('throw "NiceGUI exited with code $($child.ExitCode)."', self.script)
 
     def test_production_startup_chain_still_targets_streamlit(self) -> None:
         production_batch = (ROOT / "Start Portfolio Tracker.bat").read_text(encoding="utf-8")
