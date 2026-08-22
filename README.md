@@ -1,6 +1,6 @@
 # Dividend Portfolio Tracker
 
-Dividend Portfolio Tracker is a self-contained local Streamlit application for managing, analyzing, and exporting a dividend-focused investment portfolio. It combines holdings management, market-data enrichment, portfolio analysis, methodology-based health views, and optional AI-assisted analysis in one local workflow.
+Dividend Portfolio Tracker is a self-contained local NiceGUI application for managing, analyzing, and exporting a dividend-focused investment portfolio. NiceGUI is the production interface; the retained Streamlit application is a temporary rollback option.
 
 ## Core Features
 
@@ -24,6 +24,10 @@ Dividend Portfolio Tracker is a self-contained local Streamlit application for m
 3. AI Analysis
 4. Portfolio Insights
 5. Portfolio Health
+6. History
+7. Statement History
+8. Supplemental Research
+9. System
 
 ### Holdings
 
@@ -92,13 +96,13 @@ The research model selector focuses on lightweight models and does not use the t
 
 Research is never triggered by opening, refreshing, rerunning, or switching tabs, refreshing Yahoo data, or saving a holding. New holdings start as **Missing** and require an explicit **Research Selected Holding** action. The AI Analysis tab also provides **Refresh Due Holdings** for successful research older than approximately 30 days and **Force Refresh All Holdings**, which requires confirmation and may use more credits. Each result displays its status, model, retrieval dates, verified supplemental facts, sanitized HTTPS source links, AI interpretation, limitations, and unresolved fields. Failed refreshes preserve the previous successful result.
 
-The monthly worker runs independently of browser sessions alongside Streamlit. Keep the Streamlit server and worker process running; the website does not need to remain open. The worker checks approximately every six hours, uses a persisted SQLite lease to prevent overlapping jobs, and can be exercised once without sleeping:
+The monthly worker runs independently of browser sessions as a child of the production NiceGUI server (and of the temporary Streamlit rollback supervisor when rollback is active). Keep the active application process running; the website does not need to remain open. The worker checks approximately every six hours, uses a persisted SQLite lease to prevent overlapping jobs, and can be exercised once without sleeping:
 
 ```text
 python.exe supplemental_research_worker.py --once
 ```
 
-`start_streamlit.py` launches and stops the worker with the Streamlit process. Credit consumption varies by provider model, prompt size, and response length. Comprehensive reports remain available through the independent manual Markdown and JSON export workflow.
+The active interface starts exactly one worker child and stops it with the application process. Credit consumption varies by provider model, prompt size, and response length. Comprehensive reports remain available through the independent manual Markdown and JSON export workflow.
 
 ### Local Logs
 
@@ -119,35 +123,36 @@ You can save an export and upload it manually to another AI service for a more c
 
 ## Running the Application
 
-Startup chain:
+Production startup chain:
 
 ```text
-Start Portfolio Tracker.bat -> run.ps1 -> start_streamlit.py -> app.py
+Start Portfolio Tracker.bat -> run_nicegui.ps1 -> nicegui_app/main.py -> http://localhost:8501
 ```
 
 ### Recommended: Double-click launcher
 
 On Windows, double-click [Start Portfolio Tracker.bat](Start%20Portfolio%20Tracker.bat).
 
-The launcher:
+The production launcher:
 
 1. Determines its own project directory.
-2. Opens PowerShell and keeps it open with `-NoExit`.
-3. Runs `run.ps1` with an execution-policy bypass scoped only to that PowerShell process.
+2. Opens PowerShell without detaching the server.
+3. Runs `run_nicegui.ps1` with an execution-policy bypass scoped only to that PowerShell process.
 4. Changes to the project directory.
 5. Creates `.venv` when needed.
 6. Installs dependencies when `.venv` is new or `requirements.txt` has changed; otherwise skips installation using a local requirements fingerprint.
-7. Starts the application through `start_streamlit.py`.
-8. Launches `app.py` through Streamlit.
+7. Refuses to start if production port 8501 belongs to another listener; it never kills or silently replaces that process.
+8. Starts NiceGUI and verifies readiness at `http://localhost:8501`.
+9. Starts one Supplemental Research worker as a NiceGUI child process.
 
-Keep the PowerShell window open while using the application. Closing it stops the local app. The execution-policy bypass does not permanently change Windows policy.
+Keep the PowerShell window open while using the application. Press Ctrl+C for the two-stage graceful shutdown: new protected writes are rejected, admitted writes drain, and an exact-process-tree forced stop is used only if the 15-second grace period expires. The launcher intentionally does not open a browser tab automatically.
 
 ### PowerShell Alternative
 
 From the project folder, run:
 
 ```powershell
-.\run.ps1
+.\run_nicegui.ps1
 ```
 
 ### Manual Start
@@ -159,11 +164,37 @@ From the project folder, run:
 pip install -r requirements.txt
 ```
 
-3. Start the application:
+3. Start the production application:
 
 ```powershell
-streamlit run app.py
+python nicegui_app\main.py
 ```
+
+## Shared data and temporary Streamlit rollback
+
+NiceGUI and Streamlit read the same authoritative local databases:
+
+- `data/portfolio.db`
+- `data/stash_statement_history.sqlite`
+
+There is no database copying or import/export synchronization. These databases, `.env`, NiceGUI user storage, logs, statements, and other runtime files remain local and ignored by Git. Both interfaces initialize the project-root `.env` with existing environment values taking precedence (`override=False`).
+
+Before switching from production NiceGUI to rollback:
+
+1. Open **System** in NiceGUI.
+2. Select **Prepare Shared Data** and wait for **Shared data is ready**.
+3. Stop NiceGUI gracefully with Ctrl+C.
+4. Run [Start Portfolio Tracker - Streamlit Rollback.bat](Start%20Portfolio%20Tracker%20-%20Streamlit%20Rollback.bat).
+5. Open `http://localhost:8502` if Streamlit does not open it automatically.
+
+To return to production:
+
+1. Select **Prepare Shared Data** in the Streamlit sidebar and wait for success.
+2. Stop Streamlit.
+3. Run [Start Portfolio Tracker.bat](Start%20Portfolio%20Tracker.bat).
+4. Open `http://localhost:8501`.
+
+Never run the handoff as a database copy. The Last AI Analysis Snapshot, holdings, statement/live history, Supplemental Research records, and settings remain available through the shared databases.
 
 ## Notes
 

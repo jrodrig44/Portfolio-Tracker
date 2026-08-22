@@ -48,6 +48,6 @@ class NiceGuiFullMirrorTests(unittest.TestCase):
     def test_main_preserves_areas_refresh_network_and_lifecycle(self):
         main=(ROOT/"nicegui_app"/"main.py").read_text(encoding="utf-8");launcher=(ROOT/"run_nicegui.ps1").read_text(encoding="utf-8")
         for area in ("Holdings","Portfolio Analysis","AI Analysis","Portfolio Insights","Portfolio Health","History"):self.assertIn(f'"{area}"',main)
-        self.assertIn("Refresh Data",main);self.assertIn("DB_REFRESH_INTERVAL_SECONDS",main);self.assertIn('HOST = "0.0.0.0"',main);self.assertIn("PORT = 8502",main);self.assertIn("NICEGUI_LAUNCHER_PID",launcher);self.assertIn("Start-Process -FilePath $venvPython",launcher);self.assertIn("-PassThru",launcher)
+        self.assertIn("Refresh Data",main);self.assertIn("DB_REFRESH_INTERVAL_SECONDS",main);self.assertIn('HOST = "0.0.0.0"',main);self.assertIn('PORT = int(os.environ.get("PORTFOLIO_TRACKER_PORT", "8501"))',main);self.assertIn("NICEGUI_LAUNCHER_PID",launcher);self.assertIn("Start-Process -FilePath $venvPython",launcher);self.assertIn("-PassThru",launcher)
 
 if __name__=="__main__":unittest.main()

@@ -73,7 +73,7 @@ class NiceGuiReadOnlyPocTests(unittest.TestCase):
     def test_main_configuration_and_forbidden_side_effects(self) -> None:
         source = (Path(__file__).parents[1] / "nicegui_app" / "main.py").read_text(encoding="utf-8")
         self.assertIn('HOST = "0.0.0.0"', source)
-        self.assertIn("PORT = 8502", source)
+        self.assertIn('PORT = int(os.environ.get("PORTFOLIO_TRACKER_PORT", "8501"))', source)
         self.assertIn("ui.toggle(list(HISTORY_RANGE_OPTIONS)", source)
         for forbidden in ("upsert_live_portfolio_snapshot", "run_statement_scan", "import_validated_history", "supplemental_research_worker", "start_worker"):
             self.assertNotIn(forbidden, source)

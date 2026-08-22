@@ -1,5 +1,8 @@
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
+
+from nicegui_app import research_worker_lifecycle
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -8,7 +11,9 @@ ROOT = Path(__file__).resolve().parents[1]
 class NiceGuiStartupTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.batch = (ROOT / "Start NiceGUI Portfolio Tracker.bat").read_text(encoding="utf-8")
+        cls.batch = (ROOT / "Start Portfolio Tracker.bat").read_text(encoding="utf-8")
+        cls.rollback_batch = (ROOT / "Start Portfolio Tracker - Streamlit Rollback.bat").read_text(encoding="utf-8")
+        cls.rollback_script = (ROOT / "run.ps1").read_text(encoding="utf-8")
         cls.script = (ROOT / "run_nicegui.ps1").read_text(encoding="utf-8")
         cls.main = (ROOT / "nicegui_app" / "main.py").read_text(encoding="utf-8")
         cls.lifecycle = (ROOT / "nicegui_app" / "process_lifecycle.py").read_text(encoding="utf-8")
@@ -57,11 +62,14 @@ class NiceGuiStartupTests(unittest.TestCase):
 
     def test_nicegui_network_configuration_remains_isolated(self) -> None:
         self.assertIn('HOST = "0.0.0.0"', self.main)
-        self.assertIn("PORT = 8502", self.main)
+        self.assertIn('PORT = int(os.environ.get("PORTFOLIO_TRACKER_PORT", "8501"))', self.main)
 
     def test_launcher_rejects_duplicate_port_and_tracks_its_child_lifecycle(self) -> None:
-        self.assertIn("Get-NetTCPConnection -LocalPort 8502", self.script)
-        self.assertIn("Port 8502 is already in use", self.script)
+        self.assertIn("$productionPort = 8501", self.script)
+        self.assertIn("Get-NetTCPConnection -LocalPort $productionPort", self.script)
+        self.assertIn("Port $productionPort is already in use", self.script)
+        self.assertIn("Invoke-WebRequest -Uri $productionUrl", self.script)
+        self.assertIn("NiceGUI ready to go on $productionUrl", self.script)
         self.assertIn("NICEGUI_LAUNCHER_PID", self.script)
         self.assertIn("Start-Process -FilePath $venvPython", self.script)
         self.assertIn("-PassThru", self.script)
@@ -96,12 +104,43 @@ class NiceGuiStartupTests(unittest.TestCase):
         self.assertIn("-not $intentionalShutdown -and $child.ExitCode -ne 0", self.script)
         self.assertIn('throw "NiceGUI exited with code $($child.ExitCode)."', self.script)
 
-    def test_production_startup_chain_still_targets_streamlit(self) -> None:
-        production_batch = (ROOT / "Start Portfolio Tracker.bat").read_text(encoding="utf-8")
-        production_script = (ROOT / "run.ps1").read_text(encoding="utf-8")
-        self.assertIn("run.ps1", production_batch)
-        self.assertIn("start_streamlit.py", production_script)
-        self.assertNotIn("run_nicegui.ps1", production_batch + production_script)
+    def test_production_startup_chain_targets_only_nicegui(self) -> None:
+        self.assertIn("run_nicegui.ps1", self.batch)
+        self.assertNotIn("run.ps1", self.batch.replace("run_nicegui.ps1", ""))
+        self.assertNotIn("start_streamlit.py", self.batch + self.script)
+        self.assertFalse((ROOT / "Start NiceGUI Portfolio Tracker.bat").exists())
+
+    def test_explicit_rollback_launcher_targets_streamlit_on_alternate_port(self) -> None:
+        self.assertIn("temporary Streamlit rollback", self.rollback_batch)
+        self.assertIn("run.ps1", self.rollback_batch)
+        self.assertNotIn("run_nicegui.ps1", self.rollback_batch + self.rollback_script)
+        self.assertIn("start_streamlit.py", self.rollback_script)
+        self.assertIn("$rollbackPort = 8502", self.rollback_script)
+        self.assertIn("STREAMLIT_SERVER_PORT", self.rollback_script)
+        self.assertIn("Get-NetTCPConnection -LocalPort $rollbackPort", self.rollback_script)
+
+    def test_production_starts_one_tracked_research_worker_child(self) -> None:
+        worker_lifecycle = (ROOT / "nicegui_app" / "research_worker_lifecycle.py").read_text(encoding="utf-8")
+        self.assertIn("app.on_startup(start_research_worker)", self.main)
+        self.assertIn("app.on_shutdown(stop_research_worker)", self.main)
+        self.assertEqual(worker_lifecycle.count("subprocess.Popen("), 1)
+        self.assertIn("worker.terminate()", worker_lifecycle)
+        self.assertIn("worker.wait(timeout=10)", worker_lifecycle)
+
+    def test_research_worker_start_is_idempotent_and_shutdown_targets_tracked_child(self) -> None:
+        worker = Mock()
+        worker.poll.return_value = None
+        research_worker_lifecycle._worker = None
+        try:
+            with patch("nicegui_app.research_worker_lifecycle.subprocess.Popen", return_value=worker) as popen:
+                research_worker_lifecycle.start_research_worker()
+                research_worker_lifecycle.start_research_worker()
+                popen.assert_called_once()
+                research_worker_lifecycle.stop_research_worker()
+            worker.terminate.assert_called_once_with()
+            worker.wait.assert_called_once_with(timeout=10)
+        finally:
+            research_worker_lifecycle._worker = None
 
 
 if __name__ == "__main__":

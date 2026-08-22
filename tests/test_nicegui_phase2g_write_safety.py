@@ -249,7 +249,7 @@ class NiceGUIPhase2GWriteSafetyTests(unittest.TestCase):
         self.assertNotIn("current_market_data", history_refresh)
         self.assertNotIn("coordinator.refresh", history_refresh)
         self.assertEqual(source.count('ui.button("Refresh Data"'), 1)
-        self.assertIn("PORT = 8502", source)
+        self.assertIn('PORT = int(os.environ.get("PORTFOLIO_TRACKER_PORT", "8501"))', source)
 
 
 if __name__ == "__main__":

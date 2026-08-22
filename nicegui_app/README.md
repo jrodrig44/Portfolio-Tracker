@@ -1,29 +1,20 @@
-# NiceGUI read-only mirror
+# Portfolio Tracker NiceGUI production UI
 
-Start alongside Streamlit with:
+NiceGUI is the production Portfolio Tracker interface. Normal Windows startup is:
 
-```powershell
-.\.venv\Scripts\python.exe nicegui_app\main.py
+```text
+Start Portfolio Tracker.bat -> run_nicegui.ps1 -> nicegui_app/main.py
 ```
 
-NiceGUI listens on `0.0.0.0:8502`, so it is available at
-`http://localhost:8502` and `http://<current-machine-lan-ip>:8502`. Streamlit
-continues to use port 8501.
+The server listens on `0.0.0.0:8501` and is available locally at `http://localhost:8501`. The launcher refuses an occupied production port, performs an HTTP readiness check, keeps the server attached, and preserves the graceful 15-second shutdown followed by exact-child-process-tree fallback. Browser auto-open remains disabled.
 
-The app opens both existing SQLite databases with URI `mode=ro`. It never calls
-the production schema preparation, snapshot, statement import, save, migration,
-research, or worker functions. The overview uses the same stored/enriched
-holding fields and formulas as the Streamlit calculation path; it does not make
-Yahoo requests during page interaction.
+The production process starts one Supplemental Research worker child. NiceGUI shutdown stops the worker normally; the existing SQLite lease continues to prevent duplicate research work. Opening pages or clicking **Prepare Shared Data** does not directly enqueue research.
 
-The mirror includes Holdings, Portfolio Analysis, AI Analysis, Portfolio
-Insights, Portfolio Health, and History. Portfolio and history databases load
-once per browser session. Holdings renders immediately; Analysis, AI controls,
-Insights, Health, and History render when first visited. AI is never invoked
-until Analyze is clicked. Export payloads are generated only when a download is
-requested. Changing `1M`, `3M`, `1Y`, or `ALL` updates only the history chart.
+NiceGUI and the temporary Streamlit rollback interface use the same project-root `.env` and authoritative databases:
 
-Use `Start NiceGUI Portfolio Tracker.bat` for normal startup. The launcher keeps
-Python attached, rejects duplicate port-8502 launches, and records its PID for a
-server watchdog so closing the launcher also stops NiceGUI. No service,
-scheduled task, startup entry, or automatic restart is installed.
+- `data/portfolio.db`
+- `data/stash_statement_history.sqlite`
+
+No database synchronization or copy is required. Use **System → Prepare Shared Data** before stopping NiceGUI and launching `Start Portfolio Tracker - Streamlit Rollback.bat`. The rollback interface uses `http://localhost:8502`. Before returning, run **Prepare Shared Data** in Streamlit, stop it, and launch `Start Portfolio Tracker.bat` again.
+
+Runtime databases, `.env`, `.nicegui/`, logs, statements, process files, and user-specific state remain local and ignored by Git.

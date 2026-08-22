@@ -41,7 +41,7 @@ class NiceGUIPhase2FSystemTests(unittest.TestCase):
             with patch("stash_history.run_statement_scan") as scan, patch("yfinance.Ticker") as provider:
                 payload = operational_status(
                     portfolio_db, statements, history_db,
-                    application_port=8502,
+                    application_port=8501,
                     database_refresh_interval_seconds=DB_REFRESH_INTERVAL_SECONDS,
                 )
             self.assertEqual(payload["statement_storage"]["folder"]["pdf_count"], 2)
@@ -58,7 +58,7 @@ class NiceGUIPhase2FSystemTests(unittest.TestCase):
             missing_history = root / "history.sqlite"
             payload = operational_status(
                 root / "portfolio.db", missing_folder, missing_history,
-                application_port=8502,
+                application_port=8501,
                 database_refresh_interval_seconds=20,
             )
             self.assertEqual(payload["statement_storage"]["folder"]["status"], "Not available")
@@ -72,7 +72,7 @@ class NiceGUIPhase2FSystemTests(unittest.TestCase):
             "os.environ", {"ONEMIN_AI_API_KEY": "top-secret", "LEASE_TOKEN": "private-id"}, clear=False
         ):
             root = Path(directory)
-            payload = operational_status(root / "p.db", root / "Statements", root / "h.db", application_port=8502, database_refresh_interval_seconds=20)
+            payload = operational_status(root / "p.db", root / "Statements", root / "h.db", application_port=8501, database_refresh_interval_seconds=20)
         rendered = repr(payload)
         self.assertNotIn("top-secret", rendered)
         self.assertNotIn("private-id", rendered)
@@ -136,7 +136,7 @@ class NiceGUIPhase2FSystemTests(unittest.TestCase):
         self.assertNotIn("Strict Export Accuracy Mode", source)
         self.assertNotIn("run_statement_scan", source)
         self.assertNotIn("yfinance", source)
-        self.assertIn("PORT = 8502", source)
+        self.assertIn('PORT = int(os.environ.get("PORTFOLIO_TRACKER_PORT", "8501"))', source)
 
     def test_system_cards_are_responsive_and_wrap_long_values(self) -> None:
         source = (ROOT / "nicegui_app" / "main.py").read_text(encoding="utf-8")

@@ -9,6 +9,8 @@ $requirementsPath = Join-Path $projectRoot "requirements.txt"
 $runtimeDataPath = Join-Path $projectRoot "data"
 $requirementsFingerprintPath = Join-Path $runtimeDataPath ".requirements.sha256"
 $niceGuiMain = Join-Path $projectRoot "nicegui_app\main.py"
+$productionPort = 8501
+$productionUrl = "http://localhost:$productionPort"
 $environmentCreated = $false
 
 function Test-PythonCommand {
@@ -166,7 +168,7 @@ if (-not (Test-PythonCommand -PythonPath $venvPython)) {
     throw "Shared virtual-environment Python failed its final validation. NiceGUI was not started."
 }
 
-$existingListener = Get-NetTCPConnection -LocalPort 8502 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+$existingListener = Get-NetTCPConnection -LocalPort $productionPort -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($null -ne $existingListener) {
     $listenerDescription = "process ID $($existingListener.OwningProcess)"
     try {
@@ -178,10 +180,11 @@ if ($null -ne $existingListener) {
     catch {
         # The owner may not be inspectable; never kill or adopt an unknown process.
     }
-    throw "Port 8502 is already in use by $listenerDescription. NiceGUI was not started. Close the existing listener and try again."
+    throw "Port $productionPort is already in use by $listenerDescription. Portfolio Tracker was not started. Close the existing listener or choose the explicitly named Streamlit rollback launcher."
 }
 
-Write-Host "Starting NiceGUI Portfolio Tracker on http://localhost:8502..."
+Write-Host "Starting Portfolio Tracker on $productionUrl..."
+$env:PORTFOLIO_TRACKER_PORT = [string]$productionPort
 $env:NICEGUI_LAUNCHER_PID = [string]$PID
 $shutdownToken = [Guid]::NewGuid().ToString("N")
 $shutdownRequestPath = Join-Path ([System.IO.Path]::GetTempPath()) "portfolio-tracker-stop-$shutdownToken.request"
@@ -194,6 +197,25 @@ $forcedShutdown = $false
 try {
     $quotedNiceGuiMain = '"' + $niceGuiMain + '"'
     $child = Start-Process -FilePath $venvPython -ArgumentList @($quotedNiceGuiMain) -WorkingDirectory $projectRoot -NoNewWindow -PassThru
+    $ready = $false
+    $readyDeadline = [DateTime]::UtcNow.AddSeconds(30)
+    while (-not $child.HasExited -and -not $ready -and [DateTime]::UtcNow -lt $readyDeadline) {
+        try {
+            $response = Invoke-WebRequest -Uri $productionUrl -UseBasicParsing -TimeoutSec 1 -ErrorAction Stop
+            $ready = $response.StatusCode -ge 200 -and $response.StatusCode -lt 500
+        }
+        catch {
+            Start-Sleep -Milliseconds 200
+            $child.Refresh()
+        }
+    }
+    if (-not $ready) {
+        if (-not $child.HasExited) {
+            & taskkill.exe /PID $child.Id /T /F | Out-Null
+        }
+        throw "Portfolio Tracker did not become ready on $productionUrl within 30 seconds."
+    }
+    Write-Host "NiceGUI ready to go on $productionUrl"
     $oldTreatControlCAsInput = [Console]::TreatControlCAsInput
     [Console]::TreatControlCAsInput = $true
     try {
@@ -242,6 +264,7 @@ try {
     }
 }
 finally {
+    Remove-Item Env:PORTFOLIO_TRACKER_PORT -ErrorAction SilentlyContinue
     Remove-Item Env:NICEGUI_LAUNCHER_PID -ErrorAction SilentlyContinue
     Remove-Item Env:NICEGUI_SHUTDOWN_REQUEST_FILE -ErrorAction SilentlyContinue
     Remove-Item Env:NICEGUI_SHUTDOWN_WAIT_FILE -ErrorAction SilentlyContinue

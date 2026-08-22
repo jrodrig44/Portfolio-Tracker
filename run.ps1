@@ -8,6 +8,8 @@ $venvPython = Join-Path $venvPath "Scripts\python.exe"
 $requirementsPath = Join-Path $projectRoot "requirements.txt"
 $runtimeDataPath = Join-Path $projectRoot "data"
 $requirementsFingerprintPath = Join-Path $runtimeDataPath ".requirements.sha256"
+$rollbackPort = 8502
+$rollbackUrl = "http://localhost:$rollbackPort"
 $environmentCreated = $false
 
 if (-not (Test-Path $venvPython)) {
@@ -52,5 +54,18 @@ else {
     Write-Host "Dependencies unchanged; skipping installation."
 }
 
-Write-Host "Starting Dividend Portfolio Tracker..."
-& $venvPython (Join-Path $projectRoot "start_streamlit.py")
+$existingListener = Get-NetTCPConnection -LocalPort $rollbackPort -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($null -ne $existingListener) {
+    throw "Rollback port $rollbackPort is already in use by process ID $($existingListener.OwningProcess). Streamlit rollback was not started. Close that listener and try again."
+}
+
+Write-Host "Starting temporary Streamlit rollback on $rollbackUrl..."
+$env:STREAMLIT_SERVER_PORT = [string]$rollbackPort
+$env:STREAMLIT_BROWSER_GATHER_USAGE_STATS = "false"
+try {
+    & $venvPython (Join-Path $projectRoot "start_streamlit.py")
+}
+finally {
+    Remove-Item Env:STREAMLIT_SERVER_PORT -ErrorAction SilentlyContinue
+    Remove-Item Env:STREAMLIT_BROWSER_GATHER_USAGE_STATS -ErrorAction SilentlyContinue
+}

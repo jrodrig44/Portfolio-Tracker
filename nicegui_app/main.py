@@ -19,6 +19,7 @@ ENVIRONMENT_STATUS = initialize_project_environment(PROJECT_ROOT)
 
 from nicegui import app, run, ui
 from nicegui_app.process_lifecycle import ShutdownInProgress, lifecycle, start_launcher_watchdog, start_shutdown_request_watcher
+from nicegui_app.research_worker_lifecycle import start_research_worker, stop_research_worker
 from nicegui_app.services.ai_context import AIAnalysisState,ai_options,run_ai_analysis
 from nicegui_app.services.ai_snapshot import AIAnalysisSnapshotService, friendly_utc_timestamp, save_successful_analysis_snapshot
 from nicegui_app.services.appearance import APPEARANCE_OPTIONS, APPEARANCE_STORAGE_KEY, restore_appearance
@@ -40,9 +41,12 @@ from portfolio_statement_history import StatementHistoryService, statement_scan_
 from shared_data_preparation import prepare_shared_data
 
 HOST = "0.0.0.0"
-PORT = 8502
+PORT = int(os.environ.get("PORTFOLIO_TRACKER_PORT", "8501"))
 STORAGE_SECRET = os.environ.get("NICEGUI_STORAGE_SECRET", "portfolio-tracker-local-appearance-storage")
 NAVIGATION_AREAS = ("Holdings", "Portfolio Analysis", "AI Analysis", "Portfolio Insights", "Portfolio Health", "History", "Statement History", "Supplemental Research", "System")
+
+app.on_startup(start_research_worker)
+app.on_shutdown(stop_research_worker)
 
 
 def currency(value: Any) -> str:
@@ -128,7 +132,7 @@ async def index() -> None:
 
     with ui.header().classes("flex-wrap items-center justify-between gap-2 shadow-sm px-3 sm:px-5"):
         ui.label("Portfolio Tracker").classes("text-lg sm:text-xl font-semibold")
-        ui.label("Holdings writable · NiceGUI").classes("rounded bg-white/20 px-3 py-1 text-xs sm:text-sm")
+        ui.label("NiceGUI Production").classes("rounded bg-white/20 px-3 py-1 text-xs sm:text-sm")
     with ui.column().classes("w-full max-w-screen-2xl mx-auto p-2 sm:p-4 gap-4"):
         with ui.row().classes("w-full flex-wrap items-center gap-2"):
             spinner = ui.spinner(size="lg")
@@ -873,7 +877,7 @@ async def index() -> None:
         area = areas["System"]
         with area:
             ui.label("System").classes("text-2xl font-semibold")
-            ui.label("Read-only application and local storage status. Use the global Refresh Data action to refresh portfolio data.").classes("text-gray-500 dark:text-gray-400")
+            ui.label("Production application and shared local-storage status. Use the global Refresh Data action to refresh portfolio data.").classes("text-gray-500 dark:text-gray-400")
             ui.label("Appearance").classes("text-lg font-semibold mt-2")
             ui.toggle(APPEARANCE_OPTIONS, value=appearance_storage[APPEARANCE_STORAGE_KEY]).bind_value(
                 appearance_storage, APPEARANCE_STORAGE_KEY
@@ -1029,4 +1033,4 @@ async def index() -> None:
 if __name__ in {"__main__", "__mp_main__"}:
     start_launcher_watchdog()
     start_shutdown_request_watcher(app.shutdown)
-    ui.run(host=HOST, port=PORT, title="Portfolio Tracker · NiceGUI Mirror", reload=False, show=False, storage_secret=STORAGE_SECRET)
+    ui.run(host=HOST, port=PORT, title="Portfolio Tracker · NiceGUI", reload=False, show=False, storage_secret=STORAGE_SECRET)

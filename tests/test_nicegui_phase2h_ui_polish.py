@@ -100,7 +100,7 @@ class NiceGUIPhase2HPolishTests(unittest.TestCase):
         self.assertIn("ui_state.history_range = range_name", MAIN)
 
     def test_phase_boundaries_and_canonical_runtime_remain_intact(self) -> None:
-        self.assertIn("PORT = 8502", MAIN)
+        self.assertIn('PORT = int(os.environ.get("PORTFOLIO_TRACKER_PORT", "8501"))', MAIN)
         self.assertEqual(MAIN.count('ui.button("Refresh Data"'), 1)
         self.assertIn("ui.timer(DB_REFRESH_INTERVAL_SECONDS", MAIN)
         self.assertNotIn("Use Export JSON Data", MAIN)
