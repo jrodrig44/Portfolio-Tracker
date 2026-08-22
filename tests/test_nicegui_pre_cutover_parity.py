@@ -100,6 +100,66 @@ class HoldingsGridSaveTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertAlmostEqual(rows[0]["shares"], 1.123456789)
 
+    def test_unchanged_legacy_defaults_and_new_bogus_ticker_save_and_reload(self) -> None:
+        with sqlite3.connect(self.db) as connection:
+            connection.execute(
+                "INSERT INTO holdings (ticker, shares, sector, asset_type) VALUES ('KEEP', 1, NULL, NULL)"
+            )
+        expected = load_holdings(self.db)
+        new_row = holding("ZZZZ")
+        new_row["_holding_id"] = None
+        result = self.service.save_grid([*expected, new_row], expected_rows=[*expected, new_row])
+        self.assertEqual(result, {"added": 1, "updated": 0, "unchanged": 1, "deleted": 0})
+        reloaded = load_holdings(self.db)
+        bogus = next(row for row in reloaded if row["ticker"] == "ZZZZ")
+        self.assertEqual({row["ticker"] for row in reloaded}, {"KEEP", "ZZZZ"})
+        self.service.delete(bogus["_holding_id"], confirmed=True, expected_ticker="ZZZZ")
+        self.assertEqual([row["ticker"] for row in load_holdings(self.db)], ["KEEP"])
+
+    def test_alias_and_default_differences_do_not_conflict(self) -> None:
+        with sqlite3.connect(self.db) as connection:
+            connection.execute(
+                "INSERT INTO holdings (ticker, shares, espp_biweekly_contribution, espp_contribution_biweekly, "
+                "espp_enabled, is_espp, espp_discount, espp_discount_pct, espp_purchase_frequency_months, sector, asset_type) "
+                "VALUES ('ALIAS', 1, 25, 0, 1, 0, .10, 15, NULL, NULL, NULL)"
+            )
+        expected = load_holdings(self.db)
+        submitted = [{
+            **expected[0],
+            "espp_contribution_biweekly": expected[0]["espp_biweekly_contribution"],
+            "is_espp": expected[0]["espp_enabled"],
+        }]
+        result = self.service.save_grid(submitted, expected_rows=expected)
+        self.assertEqual(result, {"added": 0, "updated": 0, "unchanged": 1, "deleted": 0})
+
+    def test_dynamic_field_change_does_not_trigger_concurrency_failure(self) -> None:
+        self.service.add(holding("DYNAMIC"))
+        expected = load_holdings(self.db)
+        with sqlite3.connect(self.db) as connection:
+            for definition in (
+                "current_price REAL", "market_value REAL", "unrealized_gain REAL",
+                "annualized_income REAL", "dividend_yield_pct REAL",
+            ):
+                connection.execute(f"ALTER TABLE holdings ADD COLUMN {definition}")
+            connection.execute(
+                "UPDATE holdings SET current_price=999, market_value=999, unrealized_gain=999, "
+                "annualized_income=999, dividend_yield_pct=99 WHERE rowid=?",
+                (expected[0]["_holding_id"],),
+            )
+        result = self.service.save_grid(expected, expected_rows=expected)
+        self.assertEqual(result["unchanged"], 1)
+
+    def test_real_external_edit_is_detected_and_new_insert_rolls_back(self) -> None:
+        existing = self.service.add(holding("KEEP"))
+        expected = load_holdings(self.db)
+        with sqlite3.connect(self.db) as connection:
+            connection.execute("UPDATE holdings SET shares=9 WHERE rowid=?", (existing["_holding_id"],))
+        with self.assertRaisesRegex(HoldingNotFoundError, "A holding changed after the grid loaded"):
+            self.service.save_grid([*expected, holding("ZZZZ")], expected_rows=expected)
+        reloaded = load_holdings(self.db)
+        self.assertEqual([row["ticker"] for row in reloaded], ["KEEP"])
+        self.assertEqual(reloaded[0]["shares"], 9)
+
     def test_stale_grid_and_hd_values_are_safely_normalized(self) -> None:
         row = self.service.add(holding("HD"))
         expected = load_holdings(self.db)

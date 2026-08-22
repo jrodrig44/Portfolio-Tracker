@@ -90,6 +90,51 @@ def _nonnegative_number(value: Any, label: str) -> float:
     return number
 
 
+def _comparison_number(value: Any, default: float = 0.0) -> float:
+    """Canonicalize a persisted editor number without applying write-time policy."""
+    if value in (None, ""):
+        return default
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) else default
+
+
+def _editable_comparison_values(values: Mapping[str, Any]) -> dict[str, Any]:
+    """Return storage-faithful semantic values for fields owned by the grid.
+
+    The read model supplies friendly defaults and canonical aliases, while older
+    database rows can retain NULLs or differing alias columns. These values are
+    intentionally not run through write normalization because doing so expands
+    aliases and production defaults which were not changes made by another user.
+    """
+    espp_contribution = values.get("espp_biweekly_contribution")
+    if espp_contribution in (None, "", 0, 0.0):
+        espp_contribution = values.get("espp_contribution_biweekly")
+    sector = str(values.get("sector") or "").strip()
+    asset_type = str(values.get("asset_type") or "").strip()
+    if sector.casefold() == "unclassified":
+        sector = ""
+    if asset_type.casefold() == "unclassified":
+        asset_type = ""
+    return {
+        "ticker": str(values.get("ticker") or "").strip().upper(),
+        "shares": _comparison_number(values.get("shares")),
+        "espp_acquired_shares": _comparison_number(values.get("espp_acquired_shares")),
+        "amount_invested": _comparison_number(values.get("amount_invested")),
+        "annual_div_per_share": _comparison_number(values.get("annual_div_per_share")),
+        "regular_biweekly_contribution": _comparison_number(values.get("regular_biweekly_contribution")),
+        "espp_contribution_biweekly": _comparison_number(espp_contribution),
+        "special_contribution": _comparison_number(values.get("special_contribution")),
+        "is_espp": bool(values.get("is_espp")) or bool(values.get("espp_enabled")),
+        "espp_discount": _comparison_number(values.get("espp_discount")),
+        "espp_purchase_frequency_months": _comparison_number(values.get("espp_purchase_frequency_months"), 6.0),
+        "sector": sector,
+        "asset_type": asset_type,
+    }
+
+
 def normalize_contribution_input(values: Mapping[str, Any], current: Mapping[str, Any]) -> dict[str, Any]:
     """Normalize the production contribution fields without touching holding data."""
     ticker = str(current.get("ticker") or "").strip().upper()
@@ -281,15 +326,25 @@ class HoldingsWriteService:
         submission_token: str | None = None,
     ) -> dict[str, Any] | None:
         """Atomically apply a spreadsheet edit without rewriting unchanged rows."""
-        expected_by_id = {int(row["_holding_id"]): dict(row) for row in expected_rows}
+        expected_by_id = {
+            int(row["_holding_id"]): dict(row)
+            for row in expected_rows
+            if row.get("_holding_id") not in (None, "")
+        }
 
         def operation() -> dict[str, Any]:
             connection = self._connect()
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 columns = self._columns(connection)
+                current_by_id: dict[int, dict[str, Any]] = {}
+                for holding_id, expected in expected_by_id.items():
+                    current = self.get(holding_id, connection=connection)
+                    current_by_id[holding_id] = current
+                    if _editable_comparison_values(current) != _editable_comparison_values(expected):
+                        raise HoldingNotFoundError("A holding changed after the grid loaded. Refresh and try again.")
                 submitted_ids: set[int] = set()
-                normalized_rows: list[tuple[int | None, dict[str, Any]]] = []
+                normalized_rows: list[tuple[int | None, Mapping[str, Any], dict[str, Any]]] = []
                 for values in rows:
                     raw_id = values.get("_holding_id")
                     holding_id = int(raw_id) if raw_id not in (None, "") else None
@@ -297,21 +352,17 @@ class HoldingsWriteService:
                         if holding_id in submitted_ids or holding_id not in expected_by_id:
                             raise HoldingValidationError("The holdings grid contains an invalid or duplicate internal row reference.")
                         submitted_ids.add(holding_id)
-                        current = self.get(holding_id, connection=connection)
-                        expected = expected_by_id[holding_id]
-                        expected_record = self._storage_values(normalize_holding_input(expected, existing=current), columns)
-                        if any(current.get(name) != value for name, value in expected_record.items()):
-                            raise HoldingNotFoundError("A holding changed after the grid loaded. Refresh and try again.")
-                        normalized_rows.append((holding_id, normalize_holding_input(values, existing=current)))
+                        current = current_by_id[holding_id]
+                        normalized_rows.append((holding_id, values, normalize_holding_input(values, existing=current)))
                     else:
-                        normalized_rows.append((None, normalize_holding_input(values)))
+                        normalized_rows.append((None, values, normalize_holding_input(values)))
 
                 removed_ids = set(expected_by_id) - submitted_ids
                 for holding_id in removed_ids:
                     self.get(holding_id, connection=connection)
 
                 added = updated = unchanged = deleted = 0
-                for holding_id, normalized in normalized_rows:
+                for holding_id, submitted, normalized in normalized_rows:
                     record = self._storage_values(normalized, columns)
                     if holding_id is None:
                         names = list(record)
@@ -322,7 +373,10 @@ class HoldingsWriteService:
                         )
                         added += 1
                         continue
-                    current = self.get(holding_id, connection=connection)
+                    current = current_by_id[holding_id]
+                    if _editable_comparison_values(current) == _editable_comparison_values(submitted):
+                        unchanged += 1
+                        continue
                     changed = {name: value for name, value in record.items() if current.get(name) != value}
                     if not changed:
                         unchanged += 1
