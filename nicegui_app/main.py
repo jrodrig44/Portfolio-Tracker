@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import uuid
 import calendar
@@ -11,9 +12,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from nicegui import run, ui
+from nicegui import app, run, ui
 from nicegui_app.process_lifecycle import start_launcher_watchdog
 from nicegui_app.services.ai_context import AIAnalysisState,ai_options,run_ai_analysis
+from nicegui_app.services.appearance import APPEARANCE_OPTIONS, APPEARANCE_STORAGE_KEY, restore_appearance
 from nicegui_app.services.analysis import analysis_package
 from nicegui_app.services.configuration import DB_REFRESH_INTERVAL_SECONDS
 from nicegui_app.services.exports import export_package
@@ -32,6 +34,7 @@ from portfolio_statement_history import StatementHistoryService, statement_scan_
 
 HOST = "0.0.0.0"
 PORT = 8502
+STORAGE_SECRET = os.environ.get("NICEGUI_STORAGE_SECRET", "portfolio-tracker-local-appearance-storage")
 NAVIGATION_AREAS = ("Holdings", "Portfolio Analysis", "AI Analysis", "Portfolio Insights", "Portfolio Health", "History", "Statement History", "Supplemental Research", "System")
 
 
@@ -47,7 +50,7 @@ def metric_cards(items: list[tuple[str, str]]) -> None:
     with ui.element("div").classes(RESPONSIVE_CARD_GRID):
         for label, value in items:
             with ui.card().classes("w-full min-w-0"):
-                ui.label(label).classes("text-xs uppercase tracking-wide text-gray-500")
+                ui.label(label).classes("text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400")
                 ui.label(value).classes("text-xl sm:text-2xl font-semibold break-words")
 
 
@@ -55,13 +58,13 @@ def detail_cards(items: list[tuple[str, Any]]) -> None:
     with ui.element("div").classes(RESPONSIVE_CARD_GRID):
         for label, value in items:
             with ui.card().classes("w-full min-w-0 py-3"):
-                ui.label(label).classes("text-xs uppercase tracking-wide text-gray-500")
+                ui.label(label).classes("text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400")
                 ui.label(str(value)).classes("text-base font-medium break-words")
 
 
 def guidance_text(text: Any) -> None:
     if str(text or "").strip():
-        ui.label(str(text).strip()).classes("w-full rounded-lg bg-blue-50 p-3 text-sm leading-relaxed text-blue-900")
+        ui.label(str(text).strip()).classes("w-full rounded-lg bg-blue-50 p-3 text-sm leading-relaxed text-blue-900 dark:bg-blue-950 dark:text-blue-100")
 
 
 def records_table(records: list[dict[str, Any]], title: str | None = None) -> None:
@@ -72,7 +75,7 @@ def records_table(records: list[dict[str, Any]], title: str | None = None) -> No
         return
     columns, rows = format_table_records(records)
     if not columns:
-        ui.label("No displayable values are available.").classes("text-gray-500")
+        ui.label("No displayable values are available.").classes("text-gray-500 dark:text-gray-400")
         return
     with ui.element("div").classes(SCROLL_TABLE):
         ui.table(columns=columns, rows=rows, pagination=15).classes("w-full min-w-max").props("dense flat bordered")
@@ -81,6 +84,9 @@ def records_table(records: list[dict[str, Any]], title: str | None = None) -> No
 @ui.page("/")
 async def index() -> None:
     ui.colors(primary="#1d4ed8", secondary="#0f766e", accent="#d97706")
+    appearance_storage = app.storage.user
+    appearance_mode = restore_appearance(appearance_storage)
+    ui.dark_mode(value=appearance_mode).bind_value(appearance_storage, APPEARANCE_STORAGE_KEY)
     ui.add_css(".safe-rich-output, .safe-rich-output * { max-width: 100%; overflow-wrap: anywhere; word-break: break-word; } .safe-rich-output pre { overflow-x: auto; white-space: pre-wrap; }")
     ui.query("body").classes("overflow-x-hidden")
     holdings: list[dict[str, Any]] = []
@@ -156,8 +162,8 @@ async def index() -> None:
         with area:
             ui.label("Holdings").classes("text-2xl font-semibold")
             ui.label("Manage Holdings").classes("text-xl font-semibold")
-            ui.label("Add, edit, or remove rows, then click Save when finished.").classes("text-gray-500")
-            ui.label("HD rows are normalized on Save: regular/special contributions are zero, ESPP is enabled with a 15% discount and six-month cadence, and a non-positive ESPP contribution uses $100.").classes("w-full rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900")
+            ui.label("Add, edit, or remove rows, then click Save when finished.").classes("text-gray-500 dark:text-gray-400")
+            ui.label("HD rows are normalized on Save: regular/special contributions are zero, ESPP is enabled with a 15% discount and six-month cadence, and a non-positive ESPP contribution uses $100.").classes("w-full rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100")
             grid = ui.aggrid({
                 "columnDefs": column_defs,
                 "rowData": editor_rows,
@@ -218,7 +224,7 @@ async def index() -> None:
 
             metric_cards([("Portfolio value", currency(summary["portfolio_value"])), ("Cost basis", currency(summary["cost_basis"])), ("Unrealized gain/loss", currency(summary["unrealized_gain"])), ("Estimated annual income", currency(summary["annual_income"])), ("Weighted yield", percent(summary["weighted_yield_pct"])), ("Holdings", format_count(summary["holding_count"])), ("Largest holding", str(summary["largest_holding"])), ("Largest weight", percent(summary["largest_weight_pct"]))])
             ui.label("Live Calculated Fields").classes("text-xl font-semibold mt-3")
-            ui.label("Read-only market and portfolio calculations refresh after a successful Save.").classes("text-sm text-gray-500")
+            ui.label("Read-only market and portfolio calculations refresh after a successful Save.").classes("text-sm text-gray-500 dark:text-gray-400")
             live_fields = (("ticker", "Ticker"), ("shares", "Shares"), ("current_price", "Current Price"), ("market_value", "Market Value"), ("average_cost", "Average Cost"), ("cost_basis", "Cost Basis"), ("unrealized_gain", "Unrealized G/L"), ("dividend_yield_pct", "Dividend Yield %"), ("annual_income", "Annual Income"), ("employer_stock", "Employer Stock"), ("espp_enabled", "ESPP"))
             live_rows = [{key: row.get(key) for key, _label in live_fields} for row in display_holdings]
             live_columns, formatted_live_rows = format_table_records(live_rows)
@@ -256,8 +262,8 @@ async def index() -> None:
         except Exception as exc:
             area.clear()
             with area:
-                ui.label("Statement history status could not be loaded.").classes("text-red-600")
-                ui.label(str(exc)).classes("text-sm text-gray-600 break-words")
+                ui.label("Statement history status could not be loaded.").classes("text-red-600 dark:text-red-400")
+                ui.label(str(exc)).classes("text-sm text-gray-600 dark:text-gray-300 break-words")
             loaded["Statement History"] = True
             return
         area.clear()
@@ -268,7 +274,7 @@ async def index() -> None:
         manual_records = [row for row in records if row.get("source_type") == "manual_statement_review"]
         with area:
             ui.label("Statement History").classes("text-2xl font-semibold")
-            ui.label("Scanning and importing occur only when explicitly requested. Original PDFs are never moved or deleted.").classes("text-gray-500")
+            ui.label("Scanning and importing occur only when explicitly requested. Original PDFs are never moved or deleted.").classes("text-gray-500 dark:text-gray-400")
             metric_cards([
                 ("Folder", str(folder["status"])),
                 ("PDFs detected", format_count(state["detected_pdf_count"] or folder["pdf_count"])),
@@ -328,7 +334,7 @@ async def index() -> None:
                     await run.io_bound(statement_service.clear_scan)
                     await reload_statement_area()
                 ui.button("Clear Scan Preview", icon="clear", on_click=clear_preview).classes("w-full sm:w-auto min-h-11")
-            scan_status = ui.label("").classes("text-sm text-gray-600")
+            scan_status = ui.label("").classes("text-sm text-gray-600 dark:text-gray-300")
             verified_records = state.get("verified_records", [])
             if verified_records:
                 records_table(statement_verified_display_records(verified_records), "Verified / Resolved Statements")
@@ -352,7 +358,7 @@ async def index() -> None:
                 default_date = str(existing.get("statement_end_date")) if existing else date(year, month, calendar.monthrange(year, month)[1]).isoformat()
                 with ui.dialog() as dialog, ui.card().classes(DIALOG_CARD):
                     ui.label("Edit Manual Statement Review" if existing else "Manual Statement Review").classes("text-xl font-semibold")
-                    ui.label("Enter only values verified against the original statement. Total Priced Portfolio plus Net Account Balance must equal Total Equity Holdings.").classes("text-sm text-gray-600")
+                    ui.label("Enter only values verified against the original statement. Total Priced Portfolio plus Net Account Balance must equal Total Equity Holdings.").classes("text-sm text-gray-600 dark:text-gray-300")
                     review_month = ui.select(options, value=selected_default, label="Missing month").classes(FULL_WIDTH_CONTROL)
                     ending_date = ui.input("Statement ending date (YYYY-MM-DD)", value=default_date).classes(FULL_WIDTH_CONTROL)
                     invested = ui.number("Closing Total Priced Portfolio", value=float(existing.get("invested_value", 0) if existing else 0), min=0, step=0.01).classes(FULL_WIDTH_CONTROL)
@@ -386,7 +392,7 @@ async def index() -> None:
                 for manual in manual_records:
                     with ui.card().classes("w-full"):
                         ui.label(str(manual.get("review_month", ""))).classes("font-semibold")
-                        ui.label(f"{currency(manual.get('portfolio_value'))} · {manual.get('warning', '')}").classes("text-sm text-gray-600 break-words")
+                        ui.label(f"{currency(manual.get('portfolio_value'))} · {manual.get('warning', '')}").classes("text-sm text-gray-600 dark:text-gray-300 break-words")
                         with ui.element("div").classes(RESPONSIVE_ACTIONS):
                             ui.button("Edit Review", icon="edit", on_click=lambda row=manual: review_dialog(row)).classes("w-full sm:w-auto min-h-11")
                             async def remove_review(row: dict[str, Any] = manual) -> None:
@@ -412,12 +418,12 @@ async def index() -> None:
             import_button = ui.button("Import Ready Statements", icon="publish", on_click=import_ready).classes("w-full sm:w-auto min-h-11")
             if not state["can_import"]:
                 import_button.disable()
-                ui.label("Import remains disabled until the scan is complete, all PDFs are accounted for, and monthly continuity is complete.").classes("text-sm text-amber-700")
+                ui.label("Import remains disabled until the scan is complete, all PDFs are accounted for, and monthly continuity is complete.").classes("text-sm text-amber-700 dark:text-amber-300")
 
             def confirm_delete_history() -> None:
                 with ui.dialog() as dialog, ui.card().classes(CONFIRM_DIALOG_CARD):
                     ui.label("Delete all imported statement history?").classes("text-lg font-semibold")
-                    ui.label("Original PDFs and holdings will not be changed. Live snapshots remain intact.").classes("text-sm text-gray-600")
+                    ui.label("Original PDFs and holdings will not be changed. Live snapshots remain intact.").classes("text-sm text-gray-600 dark:text-gray-300")
                     async def remove_imported() -> None:
                         await run.io_bound(statement_service.delete_imported, confirmed=True)
                         dialog.close()
@@ -442,13 +448,13 @@ async def index() -> None:
         except Exception as exc:
             with area:
                 ui.label("Supplemental Research").classes("text-2xl font-semibold")
-                ui.label("Research state could not be loaded.").classes("text-red-700")
+                ui.label("Research state could not be loaded.").classes("text-red-700 dark:text-red-300")
                 ui.label(str(exc)).classes("text-sm break-words")
             loaded["Supplemental Research"] = True
             return
         with area:
             ui.label("Supplemental Research").classes("text-2xl font-semibold")
-            ui.label("Yahoo remains the primary financial-data source. Research runs only after an explicit action and supplements missing descriptive context.").classes("text-gray-500")
+            ui.label("Yahoo remains the primary financial-data source. Research runs only after an explicit action and supplements missing descriptive context.").classes("text-gray-500 dark:text-gray-400")
             metric_cards([
                 ("Active holdings", format_count(len(package["active"]))),
                 ("Enrolled", format_count(sum(bool(row["enrolled"]) for row in package["active"]))),
@@ -459,7 +465,7 @@ async def index() -> None:
             ])
             with ui.card().classes("w-full min-w-0"):
                 ui.label("Research Settings").classes("text-lg font-semibold")
-                ui.label("Only the production supplemental-research model setting is managed here. The existing background worker and cadence are unchanged.").classes("text-sm text-gray-500")
+                ui.label("Only the production supplemental-research model setting is managed here. The existing background worker and cadence are unchanged.").classes("text-sm text-gray-500 dark:text-gray-400")
                 model = ui.select(package["models"], value=package["model"], label="Supplemental Research Model").classes(FULL_WIDTH_CONTROL)
                 async def save_model() -> None:
                     try:
@@ -486,7 +492,7 @@ async def index() -> None:
 
             ui.label("Portfolio Holdings").classes("text-xl font-semibold mt-2")
             if not package["active"]:
-                ui.label("Add a holding before requesting supplemental research.").classes("text-gray-500")
+                ui.label("Add a holding before requesting supplemental research.").classes("text-gray-500 dark:text-gray-400")
             with ui.element("div").classes("w-full grid grid-cols-1 lg:grid-cols-2 gap-3"):
                 for row in package["active"]:
                     ticker = row["ticker"]
@@ -502,7 +508,7 @@ async def index() -> None:
                             ("Verified facts", row["verified_facts"]),
                         ])
                         if row["error"]:
-                            ui.label(f'Latest attempt: {row["error"]}').classes("w-full rounded bg-red-50 p-2 text-sm text-red-800 break-words")
+                            ui.label(f'Latest attempt: {row["error"]}').classes("w-full rounded bg-red-50 p-2 text-sm text-red-800 dark:bg-red-950 dark:text-red-200 break-words")
                         action = ui.button("Refresh Research" if row["enrolled"] else "Enroll & Research", icon="science").classes("w-full sm:w-auto min-h-11")
                         action.on_click(lambda _event, t=ticker, b=action: update_ticker(t, b))
                         if not row["can_update"]:
@@ -512,10 +518,10 @@ async def index() -> None:
                                 ui.markdown(row["research_markdown"]).classes(SAFE_RICH_OUTPUT)
             if package["archived"]:
                 ui.label("Archived Research").classes("text-xl font-semibold mt-2")
-                ui.label("Production retains research when a holding leaves the portfolio. Re-adding that ticker restores it through the normal holding synchronization path.").classes("text-sm text-gray-500")
+                ui.label("Production retains research when a holding leaves the portfolio. Re-adding that ticker restores it through the normal holding synchronization path.").classes("text-sm text-gray-500 dark:text-gray-400")
                 records_table([{key: row[key] for key in ("ticker", "status", "last_success_at", "model_used", "verified_facts")} for row in package["archived"]])
             with ui.expansion("Background Worker Status", icon="schedule").classes("w-full"):
-                ui.label(f'The existing worker checks every {package["worker_check_hours"]} hours. This page does not start or schedule a worker.').classes("text-sm text-gray-500")
+                ui.label(f'The existing worker checks every {package["worker_check_hours"]} hours. This page does not start or schedule a worker.').classes("text-sm text-gray-500 dark:text-gray-400")
                 records_table(package["jobs"])
         loaded["Supplemental Research"] = True
 
@@ -559,7 +565,7 @@ async def index() -> None:
                 with ui.expansion("Projections and milestones").classes("w-full"):
                     snapshot = package["snapshot"]
                     metric_cards([("Projected 10-year value", currency(snapshot["projected_10y_value"])), ("Projected 20-year value", currency(snapshot["projected_20y_value"])), ("Active contributors", format_count(summary.get("active_contributors", 0)))])
-                    ui.label(snapshot["projection_contribution_note"]).classes("text-gray-500")
+                    ui.label(snapshot["projection_contribution_note"]).classes("text-gray-500 dark:text-gray-400")
                 with ui.expansion("Yahoo intelligence and supplemental historical context").classes("w-full"):
                     ui.label("Network-heavy Yahoo intelligence is demand-driven. No research refresh controls are exposed.")
                     yahoo_area = ui.column().classes("w-full")
@@ -582,7 +588,7 @@ async def index() -> None:
                                     monthly = seasonality.get("monthly_income", {})
                                     ui.echart({"grid": {"left": 48, "right": 12, "top": 20, "bottom": 36, "containLabel": True}, "xAxis": {"type": "category", "data": list(monthly)}, "yAxis": {"type": "value"}, "series": [{"name": "Estimated income", "type": "bar", "data": list(monthly.values())}]}).classes("w-full min-w-0 h-64 sm:h-80")
                                 else:
-                                    ui.label(str(seasonality.get("message", "Dividend seasonality is unavailable."))).classes("text-gray-500")
+                                    ui.label(str(seasonality.get("message", "Dividend seasonality is unavailable."))).classes("text-gray-500 dark:text-gray-400")
                         except Exception as exc:
                             pending.set_text(f"Yahoo intelligence could not be loaded: {exc}")
                         finally:
@@ -591,7 +597,7 @@ async def index() -> None:
         except Exception as exc:
             area.clear()
             with area:
-                ui.label(f"Analysis could not be loaded: {exc}").classes("text-red-600")
+                ui.label(f"Analysis could not be loaded: {exc}").classes("text-red-600 dark:text-red-400")
         loaded["Portfolio Analysis"] = True
 
     def render_ai() -> None:
@@ -601,9 +607,9 @@ async def index() -> None:
         area = areas["AI Analysis"]
         with area:
             ui.label("AI Analysis").classes("text-2xl font-semibold")
-            ui.label("No request is sent until Analyze is clicked. Uses existing compact context and the 1min.AI provider.").classes("text-gray-500")
+            ui.label("No request is sent until Analyze is clicked. Uses existing compact context and the 1min.AI provider.").classes("text-gray-500 dark:text-gray-400")
             if not options["configured"]:
-                ui.label("ONEMIN_AI_API_KEY is not configured in the local environment.").classes("text-amber-700")
+                ui.label("ONEMIN_AI_API_KEY is not configured in the local environment.").classes("text-amber-700 dark:text-amber-300")
             with ui.element("div").classes("w-full grid grid-cols-1 md:grid-cols-2 gap-3"):
                 analysis_type = ui.select(options["analysis_types"], value=options["analysis_types"][0], label="Analysis type").classes(FULL_WIDTH_CONTROL)
                 model = ui.select(options["models"], value=options["default_model"], label="Model").classes(FULL_WIDTH_CONTROL)
@@ -611,8 +617,8 @@ async def index() -> None:
             with ui.card().classes("w-full min-w-0 min-h-32 overflow-hidden"):
                 ui.label("Latest analysis").classes("text-lg font-semibold")
                 output = ui.markdown("No analysis has been run yet. Choose an analysis type and select Analyze when you are ready.").classes(SAFE_RICH_OUTPUT)
-            status = ui.label("").classes("w-full text-sm text-gray-600 break-words")
-            context_size = ui.label("").classes("w-full text-xs text-gray-500 break-words")
+            status = ui.label("").classes("w-full text-sm text-gray-600 dark:text-gray-300 break-words")
+            context_size = ui.label("").classes("w-full text-xs text-gray-500 dark:text-gray-400 break-words")
             state = AIAnalysisState()
             request_active = {"value": False}
             async def analyze() -> None:
@@ -691,7 +697,7 @@ async def index() -> None:
             area.clear()
             with area:
                 ui.label("Portfolio Health").classes("text-2xl font-semibold")
-                ui.label(str(package.get("disclaimer", "Tracker-generated and not an objective investment rating."))).classes("w-full rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm font-medium text-amber-900 break-words")
+                ui.label(str(package.get("disclaimer", "Tracker-generated and not an objective investment rating."))).classes("w-full rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm font-medium text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100 break-words")
                 metric_cards([("Overall health score", format_score(package.get("health_score"), out_of_100=True)), ("Largest holding", str(package.get("largest_holding", "N/A"))), ("Largest holding weight", percent(package.get("largest_holding_weight", 0.0)))])
                 records_table([{"component": key, "score": value} for key, value in package.get("subscores", {}).items()], "Component scores")
                 records_table(package.get("strongest_areas", []), "Strongest areas")
@@ -701,11 +707,11 @@ async def index() -> None:
                     ui.label(f"• {alert}")
                 for note in package.get("notes", []):
                     ui.label(f"• {note}")
-                ui.label(str(package.get("data_quality_explanation", ""))).classes("text-gray-600")
+                ui.label(str(package.get("data_quality_explanation", ""))).classes("text-gray-600 dark:text-gray-300")
         except Exception as exc:
             area.clear()
             with area:
-                ui.label(f"Health could not be loaded: {exc}").classes("text-red-600")
+                ui.label(f"Health could not be loaded: {exc}").classes("text-red-600 dark:text-red-400")
         loaded["Portfolio Health"] = True
 
     def render_history(selected_range: str = DEFAULT_HISTORY_RANGE) -> None:
@@ -716,7 +722,7 @@ async def index() -> None:
         area.clear()
         with area:
             ui.label("Historical Portfolio Value").classes("text-2xl font-semibold")
-            ui.label("Nominal account value only—not investment return. No interpolation; monthly and live snapshot points are retained.").classes("text-gray-500")
+            ui.label("Nominal account value only—not investment return. No interpolation; monthly and live snapshot points are retained.").classes("text-gray-500 dark:text-gray-400")
             with ui.element("div").classes("w-full max-w-full overflow-x-auto"):
                 selector = ui.toggle(list(HISTORY_RANGE_OPTIONS), value=selected_range).classes("min-w-max")
             chart_area = ui.column().classes("w-full")
@@ -755,7 +761,12 @@ async def index() -> None:
         area = areas["System"]
         with area:
             ui.label("System").classes("text-2xl font-semibold")
-            ui.label("Read-only application and local storage status. Use the global Refresh Data action to refresh portfolio data.").classes("text-gray-500")
+            ui.label("Read-only application and local storage status. Use the global Refresh Data action to refresh portfolio data.").classes("text-gray-500 dark:text-gray-400")
+            ui.label("Appearance").classes("text-lg font-semibold mt-2")
+            ui.toggle(APPEARANCE_OPTIONS, value=appearance_storage[APPEARANCE_STORAGE_KEY]).bind_value(
+                appearance_storage, APPEARANCE_STORAGE_KEY
+            ).classes("w-full sm:w-auto")
+            ui.label("System follows your device's appearance setting.").classes("text-sm text-gray-500 dark:text-gray-400")
             ui.label("Runtime").classes("text-lg font-semibold mt-2")
             detail_cards([
                 ("Application", application["framework"]),
@@ -776,7 +787,7 @@ async def index() -> None:
                 ("Statement history database path", history_db["path"]),
             ])
             ui.label("Cache behavior").classes("text-lg font-semibold mt-2")
-            ui.label("These intervals are informational. Cache refreshes continue to use the application’s existing behavior.").classes("text-gray-500")
+            ui.label("These intervals are informational. Cache refreshes continue to use the application’s existing behavior.").classes("text-gray-500 dark:text-gray-400")
             detail_cards([(name, format_interval(seconds)) for name, seconds in package["cache_intervals_seconds"].items()])
         loaded["System"] = True
 
@@ -805,7 +816,7 @@ async def index() -> None:
             render_holdings()
             for name in ("Portfolio Analysis","Portfolio Insights","Portfolio Health"):
                 loaded[name]=False;areas[name].clear()
-                with areas[name]: ui.label("Portfolio values changed; this section will refresh when opened.").classes("text-gray-500")
+                with areas[name]: ui.label("Portfolio values changed; this section will refresh when opened.").classes("text-gray-500 dark:text-gray-400")
         if result.history_changed:
             history=result.history or []
             if loaded["History"]: render_history(history_range)
@@ -817,7 +828,7 @@ async def index() -> None:
             loaded[name] = False
             areas[name].clear()
             with areas[name]:
-                ui.label("Holdings changed; prior prepared output is stale and this section will refresh when opened.").classes("text-gray-500")
+                ui.label("Holdings changed; prior prepared output is stale and this section will refresh when opened.").classes("text-gray-500 dark:text-gray-400")
     async def refresh_history_after_statement_write() -> None:
         """Reload only history-derived state; do not reload holdings or Yahoo data."""
         nonlocal history
@@ -827,7 +838,7 @@ async def index() -> None:
         loaded["AI Analysis"] = False
         areas["AI Analysis"].clear()
         with areas["AI Analysis"]:
-            ui.label("Statement history changed; prior AI history context is stale and will refresh when opened.").classes("text-gray-500")
+            ui.label("Statement history changed; prior AI history context is stale and will refresh when opened.").classes("text-gray-500 dark:text-gray-400")
         status.set_text(f"History refreshed with {len(history)} points; holdings were not reloaded")
     refresh_button.on_click(lambda: refresh_data(True))
     ui.timer(DB_REFRESH_INTERVAL_SECONDS,lambda: refresh_data(False))
@@ -845,4 +856,4 @@ async def index() -> None:
 
 if __name__ in {"__main__", "__mp_main__"}:
     start_launcher_watchdog()
-    ui.run(host=HOST, port=PORT, title="Portfolio Tracker · NiceGUI Mirror", reload=False, show=False)
+    ui.run(host=HOST, port=PORT, title="Portfolio Tracker · NiceGUI Mirror", reload=False, show=False, storage_secret=STORAGE_SECRET)

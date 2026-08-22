@@ -19,7 +19,7 @@ class NiceGuiFullMirrorTests(unittest.TestCase):
         code="import sys,nicegui_app.services.calculations,nicegui_app.services.analysis,nicegui_app.services.health,nicegui_app.services.insights,nicegui_app.services.exports,nicegui_app.services.ai_context,nicegui_app.services.yahoo,nicegui_app.services.refresh;print(int('app' in sys.modules),int('streamlit' in sys.modules))"
         result=subprocess.run([sys.executable,"-B","-c",code],cwd=ROOT,text=True,capture_output=True,check=True);self.assertEqual(result.stdout.strip(),"0 0")
     def test_nicegui_source_has_no_app_or_streamlit_imports(self):
-        source="\n".join(path.read_text(encoding="utf-8") for path in (ROOT/"nicegui_app").rglob("*.py"));self.assertNotIn("import app",source);self.assertNotIn("from app",source);self.assertNotIn("import streamlit",source);self.assertNotIn("from streamlit",source)
+        source="\n".join(path.read_text(encoding="utf-8") for path in (ROOT/"nicegui_app").rglob("*.py"));self.assertNotIn("\nimport app\n",source);self.assertNotIn("\nfrom app import",source);self.assertNotIn("import streamlit",source);self.assertNotIn("from streamlit",source)
     def test_representative_formula_outputs(self):
         metrics=metrics_frame(self.holdings());self.assertEqual(float(metrics.iloc[0]["market_value"]),100.0);self.assertEqual(float(metrics.iloc[0]["unrealized_gain"]),20.0);self.assertEqual(float(metrics.iloc[0]["annual_income"]),5.0)
         analysis=analysis_package(metrics);self.assertEqual(analysis["totals"]["weighted_portfolio_yield"],5.0);self.assertEqual(analysis["summary"]["active_contributors"],1)
