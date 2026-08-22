@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Callable, Iterator
 
 
-GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS = 15
 SHUTDOWN_MESSAGE = "Portfolio Tracker is shutting down. No new changes can be started."
 SYNCHRONIZE = 0x00100000
 WAIT_OBJECT_0 = 0
@@ -57,12 +56,12 @@ class LifecycleCoordinator:
             self._shutting_down = True
             return self._active_operations > 0
 
-    def wait_for_critical_operations(self, timeout: float = GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS) -> bool:
-        deadline = time.monotonic() + max(float(timeout), 0.0)
+    def wait_for_critical_operations(self, timeout: float | None = None) -> bool:
+        deadline = None if timeout is None else time.monotonic() + max(float(timeout), 0.0)
         with self._condition:
             while self._active_operations:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
                     return False
                 self._condition.wait(remaining)
             return True
@@ -82,7 +81,6 @@ def start_shutdown_request_watcher(shutdown_callback: Callable[[], None]) -> Non
         while not lifecycle.is_shutting_down:
             if request_path.is_file():
                 has_active_work = lifecycle.begin_shutdown()
-                print("Stopping Portfolio Tracker safely...", flush=True)
                 if has_active_work:
                     wait_marker = os.environ.get("NICEGUI_SHUTDOWN_WAIT_FILE", "").strip()
                     if wait_marker:
@@ -90,7 +88,6 @@ def start_shutdown_request_watcher(shutdown_callback: Callable[[], None]) -> Non
                             Path(wait_marker).touch(exist_ok=True)
                         except OSError:
                             pass
-                    print("Waiting for active operations to finish...", flush=True)
                 if lifecycle.wait_for_critical_operations():
                     shutdown_callback()
                 return

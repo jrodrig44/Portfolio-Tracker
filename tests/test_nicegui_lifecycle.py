@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 import tempfile
@@ -7,8 +8,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from nicegui_app.main import critical_io
+
 from nicegui_app.process_lifecycle import (
-    GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS,
     LifecycleCoordinator,
     ShutdownInProgress,
     start_launcher_watchdog,
@@ -21,7 +23,6 @@ class LifecycleCoordinatorTests(unittest.TestCase):
         coordinator = LifecycleCoordinator()
         self.assertFalse(coordinator.is_shutting_down)
         self.assertEqual(coordinator.active_operations, 0)
-        self.assertEqual(GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS, 15)
 
     def test_critical_count_increments_and_decrements(self) -> None:
         coordinator = LifecycleCoordinator()
@@ -131,6 +132,31 @@ class LifecycleCoordinatorTests(unittest.TestCase):
         ) as thread:
             start_launcher_watchdog()
         thread.assert_not_called()
+
+    def test_rejected_critical_io_emits_one_warning_and_no_error(self) -> None:
+        coordinator = LifecycleCoordinator()
+        coordinator.begin_shutdown()
+        with patch("nicegui_app.main.lifecycle", coordinator), patch("nicegui_app.main.ui.notify") as notify:
+            with self.assertRaises(ShutdownInProgress):
+                asyncio.run(critical_io("late write", lambda: None))
+        notify.assert_called_once_with(
+            "Portfolio Tracker is shutting down. No new changes can be started.",
+            type="warning",
+        )
+        self.assertNotEqual(notify.call_args.kwargs.get("type"), "negative")
+
+    def test_request_watcher_does_not_print_launcher_messages(self) -> None:
+        coordinator = LifecycleCoordinator()
+        callback = threading.Event()
+        with tempfile.TemporaryDirectory() as directory:
+            request = Path(directory) / "stop.request"
+            request.touch()
+            with patch("nicegui_app.process_lifecycle.lifecycle", coordinator), patch.dict(
+                "os.environ", {"NICEGUI_SHUTDOWN_REQUEST_FILE": str(request)}, clear=False
+            ), patch("builtins.print") as output:
+                start_shutdown_request_watcher(callback.set)
+                self.assertTrue(callback.wait(1))
+        output.assert_not_called()
 
 
 if __name__ == "__main__":

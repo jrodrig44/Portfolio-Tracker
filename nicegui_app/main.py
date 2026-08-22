@@ -222,6 +222,8 @@ async def index() -> None:
                     await refresh_after_holding_write()
                     result = result or {"added": 0, "updated": 0, "deleted": 0}
                     ui.notify(f"Holdings saved: {result['added']} added, {result['updated']} updated, {result['deleted']} removed.", type="positive")
+                except ShutdownInProgress:
+                    pass
                 except Exception as exc:
                     ui.notify(str(exc), type="negative", timeout=0)
                 finally:
@@ -328,6 +330,8 @@ async def index() -> None:
                     await critical_io("statement_scan", statement_service.scan, restart=restart)
                     ui.notify("Statement scan completed.", type="positive")
                     await reload_statement_area()
+                except ShutdownInProgress:
+                    pass
                 except Exception as exc:
                     scan_status.set_text("The statement scan could not complete. Prior scan results were retained where production supports resume.")
                     ui.notify(str(exc), type="negative", timeout=0)
@@ -390,6 +394,8 @@ async def index() -> None:
                             dialog.close()
                             ui.notify("Manual review saved as Ready.", type="positive")
                             await reload_statement_area()
+                        except ShutdownInProgress:
+                            pass
                         except Exception as exc:
                             ui.notify(str(exc), type="negative", timeout=0)
                         finally:
@@ -427,6 +433,8 @@ async def index() -> None:
                     await refresh_history_after_statement_write()
                     ui.notify(f"Imported {int((result or {}).get('imported', 0))} statement history records.", type="positive")
                     await reload_statement_area()
+                except ShutdownInProgress:
+                    pass
                 except Exception as exc:
                     ui.notify(str(exc), type="negative", timeout=0)
                 finally:
@@ -491,6 +499,8 @@ async def index() -> None:
                     try:
                         await critical_io("research_settings_save", research_service.set_model, str(model.value or ""))
                         ui.notify("Supplemental research model saved.", type="positive")
+                    except ShutdownInProgress:
+                        pass
                     except Exception as exc:
                         ui.notify(str(exc), type="negative", timeout=0)
                 ui.button("Save Research Model", icon="save", on_click=save_model).classes("w-full sm:w-auto min-h-11")
@@ -506,6 +516,8 @@ async def index() -> None:
                     else:
                         ui.notify(str(result.get("error") or result.get("reason") or "Research did not complete."), type="negative", timeout=0)
                     await render_supplemental_research(True)
+                except ShutdownInProgress:
+                    button.enable()
                 except Exception as exc:
                     ui.notify(str(exc), type="negative", timeout=0)
                     button.enable()
