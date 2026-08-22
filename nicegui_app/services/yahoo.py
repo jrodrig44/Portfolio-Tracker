@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any
 import pandas as pd
 import yfinance as yf
+from yfinance.exceptions import YFDataException
 
 from nicegui_app.services.configuration import (
     DIVIDEND_TIMING_CACHE_TTL_SECONDS,
@@ -13,15 +15,29 @@ from nicegui_app.services.configuration import (
     PRICE_CACHE_TTL_SECONDS,
     YAHOO_METADATA_CACHE_TTL_SECONDS,
 )
-from portfolio_analysis import resolve_fund_lookthrough
+from portfolio_analysis import FUND_ASSET_TYPES, canonical_asset_type, resolve_fund_lookthrough
 
 _cache: dict[tuple[str,str],tuple[float,Any]]={}
+LOGGER = logging.getLogger("portfolio_tracker")
 
 
 def _cached(key:tuple[str,str],loader,ttl:float):
     now=time.monotonic(); existing=_cache.get(key)
     if existing and now-existing[0]<ttl:return existing[1]
     value=loader();_cache[key]=(now,value);return value
+
+
+def _load_fund_sector_weights(ticker: str, proxy: Any, asset_type: object) -> dict[str, float]:
+    """Return optional fund look-through data only for classified fund holdings."""
+    if canonical_asset_type(asset_type) not in FUND_ASSET_TYPES:
+        return {}
+    try:
+        funds_data = getattr(proxy, "funds_data", None)
+        raw = getattr(funds_data, "sector_weightings", None) if funds_data is not None else None
+    except YFDataException:
+        LOGGER.info("Fund sector weights unavailable for %s; continuing without fund look-through.", ticker)
+        return {}
+    return dict(raw) if hasattr(raw, "items") else {}
 
 
 def current_market_data(tickers:list[str]|tuple[str,...])->tuple[dict[str,float],dict[str,float]]:
@@ -79,9 +95,8 @@ def yahoo_intelligence_package(metrics:pd.DataFrame)->dict[str,Any]:
                 counts=dividends.groupby(dividends.index.month).sum(); total=float(counts.sum())
                 if total>0:
                     for month,value in counts.items():monthly[list(monthly)[int(month)-1]]+=float(row.get("annual_income",0) or 0)*float(value)/total
-        def load_fund_weights(p=proxy):
-            funds_data=getattr(p,"funds_data",None);raw=getattr(funds_data,"sector_weightings",None) if funds_data is not None else None
-            return dict(raw) if hasattr(raw,"items") else {}
+        def load_fund_weights(p=proxy, source=row):
+            return _load_fund_sector_weights(ticker, p, source.get("asset_type"))
         weights=_cached((ticker,"fund_sector_weights"),load_fund_weights,FUND_SECTOR_WEIGHTS_CACHE_TTL_SECONDS)
         if weights:fund_weights[ticker]=weights
     resolved=resolve_fund_lookthrough(metrics,fund_weights)
