@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
 from nicegui_app.services.portfolio_data import load_holdings
+from nicegui_app.main import current_aggrid_rows
 from portfolio_holdings_write import (
     HoldingConfirmationError,
     HoldingValidationError,
@@ -177,6 +179,88 @@ class Phase2BHoldingsTests(unittest.TestCase):
         self.assertIn("refresh_after_holding_write", source)
         self.assertIn('"AI Analysis"', source)
         self.assertIn("prior prepared output is stale", source)
+
+    def test_client_grid_rows_commit_active_edit_and_return_browser_values(self) -> None:
+        class FakeGrid:
+            def __init__(self) -> None:
+                self.options = {"rowData": [{"_holding_id": None, "ticker": "", "shares": 0}]}
+                self.calls: list[object] = []
+                self.committed = False
+
+            async def run_grid_method(self, name: str) -> None:
+                self.calls.append(("run_grid_method", name))
+                self.committed = True
+
+            async def get_client_data(self, *, method: str) -> list[dict[str, object]]:
+                self.calls.append(("get_client_data", method))
+                if not self.committed:
+                    return list(self.options["rowData"])
+                return [{
+                    "_holding_id": None,
+                    "_grid_key": "new-test",
+                    "ticker": "ZZZZ",
+                    "shares": 1,
+                    "amount_invested": 1,
+                    "asset_type": "Stock",
+                }]
+
+        grid = FakeGrid()
+        rows = asyncio.run(current_aggrid_rows(grid))
+        self.assertEqual(grid.calls, [
+            ("run_grid_method", "stopEditing"),
+            ("get_client_data", "all_unsorted"),
+        ])
+        self.assertEqual(rows[0]["ticker"], "ZZZZ")
+        self.assertEqual(rows[0]["shares"], 1)
+        self.assertEqual(rows[0]["amount_invested"], 1)
+        self.assertEqual(rows[0]["asset_type"], "Stock")
+        self.assertEqual(grid.options["rowData"][0]["ticker"], "")
+
+    def test_ui_save_uses_returned_client_rows_not_server_row_data(self) -> None:
+        source = (Path(__file__).parents[1] / "nicegui_app" / "main.py").read_text(encoding="utf-8")
+        handler = source.split("async def save_grid()", 1)[1].split("def clear_ai_outputs", 1)[0]
+        self.assertIn("client_rows = await current_aggrid_rows(grid)", handler)
+        self.assertIn("holdings_writer.save_grid,\n                        client_rows,", handler)
+        self.assertNotIn('list(grid.options["rowData"])', handler)
+
+    def test_browser_rows_persist_existing_edit_and_exact_new_row(self) -> None:
+        existing = self.service.add(valid("KEEP"))
+        expected = load_holdings(self.db)
+        edited = {
+            **expected[0],
+            "shares": 3.25,
+            "espp_contribution_biweekly": expected[0]["espp_biweekly_contribution"],
+            "is_espp": expected[0]["espp_enabled"],
+        }
+        new_row = {
+            "_holding_id": None, "_grid_key": "new-zzzz", "ticker": "ZZZZ",
+            "shares": 1, "espp_acquired_shares": 0, "amount_invested": 1,
+            "annual_div_per_share": 0, "regular_biweekly_contribution": 0,
+            "espp_contribution_biweekly": 0, "special_contribution": 0,
+            "is_espp": False, "espp_discount": 0,
+            "espp_purchase_frequency_months": 6, "sector": "", "asset_type": "Stock",
+        }
+
+        class FakeGrid:
+            async def run_grid_method(self, name: str) -> None:
+                self.stopped = name == "stopEditing"
+
+            async def get_client_data(self, *, method: str) -> list[dict[str, object]]:
+                self.assertions = (self.stopped, method)
+                return [edited, new_row]
+
+        grid = FakeGrid()
+        client_rows = asyncio.run(current_aggrid_rows(grid))
+        self.assertEqual(grid.assertions, (True, "all_unsorted"))
+        self.service.save_grid(client_rows, expected_rows=expected)
+        reloaded = load_holdings(self.db)
+        keep = next(row for row in reloaded if row["ticker"] == "KEEP")
+        bogus = next(row for row in reloaded if row["ticker"] == "ZZZZ")
+        self.assertEqual(keep["_holding_id"], existing["_holding_id"])
+        self.assertEqual(keep["shares"], 3.25)
+        self.assertEqual((bogus["shares"], bogus["amount_invested"], bogus["asset_type"]), (1, 1, "Stock"))
+        self.service.delete(bogus["_holding_id"], confirmed=True, expected_ticker="ZZZZ")
+        self.assertEqual([row["ticker"] for row in load_holdings(self.db)], ["KEEP"])
 
 
 if __name__ == "__main__":

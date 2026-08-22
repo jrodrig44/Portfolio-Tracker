@@ -110,6 +110,15 @@ async def critical_io(name: str, operation: Callable[..., Any], *args: Any, **kw
         raise
 
 
+async def current_aggrid_rows(grid: Any) -> list[dict[str, Any]]:
+    """Commit the active editor and return the browser's authoritative row data."""
+    await grid.run_grid_method("stopEditing")
+    rows = await grid.get_client_data(method="all_unsorted")
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise RuntimeError("Holdings grid data could not be read from the browser. Please try again.")
+    return rows
+
+
 @ui.page("/")
 async def index() -> None:
     ui.colors(primary="#1d4ed8", secondary="#0f766e", accent="#d97706")
@@ -231,11 +240,11 @@ async def index() -> None:
                 saving["value"] = True
                 save_button.disable()
                 try:
-                    await grid.get_client_data()
+                    client_rows = await current_aggrid_rows(grid)
                     result = await critical_io(
                         "holdings_save",
                         holdings_writer.save_grid,
-                        list(grid.options["rowData"]),
+                        client_rows,
                         expected_rows=list(holdings),
                         submission_token=uuid.uuid4().hex,
                     )
