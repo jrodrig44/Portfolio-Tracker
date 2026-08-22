@@ -134,7 +134,7 @@ class NiceGuiAIAnalysisSnapshotTests(unittest.TestCase):
                 asyncio.run(critical_io("ai_analysis_snapshot_clear", self.service.clear))
         self.assertEqual(self.service.load().result_markdown, "prior")
 
-    def test_ui_contract_has_empty_state_confirmation_safe_markdown_and_protected_writes(self) -> None:
+    def test_ui_contract_has_compact_summary_viewer_confirmation_and_protected_writes(self) -> None:
         source = (Path(__file__).resolve().parents[1] / "nicegui_app" / "main.py").read_text(encoding="utf-8")
         self.assertIn('ui.label("Last Analysis Snapshot")', source)
         self.assertIn("No saved AI analysis yet.", source)
@@ -143,7 +143,14 @@ class NiceGuiAIAnalysisSnapshotTests(unittest.TestCase):
         self.assertIn("It does not affect your portfolio data.", source)
         self.assertIn('critical_io("ai_analysis_snapshot_clear"', source)
         self.assertIn('"ai_analysis_snapshot_save",', source)
+        self.assertIn('ui.button("View", icon="visibility", on_click=open_snapshot_viewer)', source)
+        self.assertIn("def open_snapshot_viewer()", source)
+        self.assertIn("SNAPSHOT_VIEWER_CARD", source)
+        self.assertIn('for heading in ("Analysis Type", "Run Date/Time", "Model", "Action")', source)
+        self.assertEqual(source.count("with ui.card().classes(\"w-full min-w-0 overflow-hidden p-0\")"), 1)
         self.assertIn("ui.markdown(snapshot.result_markdown).classes(SAFE_RICH_OUTPUT)", source)
+        summary = source.split("with ui.card().classes(\"w-full min-w-0 overflow-hidden p-0\")", 1)[1].split("async def analyze", 1)[0]
+        self.assertNotIn("ui.markdown(snapshot.result_markdown)", summary)
         self.assertIn("Intl.DateTimeFormat", source)
 
 

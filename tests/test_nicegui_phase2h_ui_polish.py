@@ -11,6 +11,7 @@ from nicegui_app.services.formatting import (
     RESPONSIVE_ACTIONS,
     SAFE_RICH_OUTPUT,
     SCROLL_TABLE,
+    SNAPSHOT_VIEWER_CARD,
 )
 from nicegui_app.services.ui_state import PageUIState
 
@@ -44,6 +45,11 @@ class NiceGUIPhase2HPolishTests(unittest.TestCase):
         self.assertIn("96vw", DIALOG_CARD)
         self.assertIn("90dvh", DIALOG_CARD)
         self.assertIn("overflow-y-auto", DIALOG_CARD)
+        self.assertIn("96vw", SNAPSHOT_VIEWER_CARD)
+        self.assertIn("72rem", SNAPSHOT_VIEWER_CARD)
+        self.assertIn("90dvh", SNAPSHOT_VIEWER_CARD)
+        self.assertIn("overflow-y-auto", SNAPSHOT_VIEWER_CARD)
+        self.assertIn("dark:bg-gray-900", SNAPSHOT_VIEWER_CARD)
         self.assertIn("90dvh", CONFIRM_DIALOG_CARD)
         self.assertGreaterEqual(MAIN.count("classes(DIALOG_CARD)"), 1)
         self.assertGreaterEqual(MAIN.count("classes(CONFIRM_DIALOG_CARD)"), 1)

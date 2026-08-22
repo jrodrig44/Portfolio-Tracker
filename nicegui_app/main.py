@@ -26,7 +26,7 @@ from nicegui_app.services.appearance import APPEARANCE_OPTIONS, APPEARANCE_STORA
 from nicegui_app.services.analysis import analysis_package
 from nicegui_app.services.configuration import DB_REFRESH_INTERVAL_SECONDS
 from nicegui_app.services.exports import export_package
-from nicegui_app.services.formatting import CONFIRM_DIALOG_CARD, DIALOG_CARD, EMPTY_STATE, FULL_WIDTH_CONTROL, RESPONSIVE_ACTIONS, RESPONSIVE_CARD_GRID, SAFE_RICH_OUTPUT, SCROLL_TABLE, SYSTEM_CARD, SYSTEM_CARD_GRID, SYSTEM_LABEL, SYSTEM_PATH_VALUE, SYSTEM_VALUE, format_count, format_currency, format_field_value, format_percentage, format_score, format_status, format_table_records, human_label
+from nicegui_app.services.formatting import CONFIRM_DIALOG_CARD, DIALOG_CARD, EMPTY_STATE, FULL_WIDTH_CONTROL, RESPONSIVE_ACTIONS, RESPONSIVE_CARD_GRID, SAFE_RICH_OUTPUT, SCROLL_TABLE, SNAPSHOT_VIEWER_CARD, SYSTEM_CARD, SYSTEM_CARD_GRID, SYSTEM_LABEL, SYSTEM_PATH_VALUE, SYSTEM_VALUE, format_count, format_currency, format_field_value, format_percentage, format_score, format_status, format_table_records, human_label
 from nicegui_app.services.health import health_package
 from nicegui_app.services.history import history_package
 from nicegui_app.services.insights import insights_package
@@ -675,6 +675,15 @@ async def index() -> None:
             request_active = {"value": False}
             snapshot_area = ui.column().classes("w-full min-w-0 gap-2")
 
+            def localize_snapshot_timestamp(label: Any, timestamp: str) -> None:
+                ui.run_javascript(
+                    f"""const target = document.getElementById('c{label.id}');
+                    if (target) {{
+                        const value = new Date({json.dumps(timestamp)});
+                        target.textContent = new Intl.DateTimeFormat(undefined, {{dateStyle: 'medium', timeStyle: 'short'}}).format(value);
+                    }}"""
+                )
+
             def render_snapshot() -> None:
                 snapshot_area.clear()
                 snapshot = snapshot_service.load()
@@ -685,43 +694,72 @@ async def index() -> None:
                             ui.label("No saved AI analysis yet.").classes("font-medium")
                             ui.label("Run an analysis to create the first snapshot.").classes("text-sm text-gray-500 dark:text-gray-400")
                         return
-                    with ui.card().classes("w-full min-w-0 overflow-hidden"):
-                        ui.label(f"Analysis: {snapshot.analysis_type}").classes("font-medium break-words")
-                        run_label = ui.label(f"Run: {friendly_utc_timestamp(snapshot.completed_at_utc)}").classes("text-sm text-gray-600 dark:text-gray-300 break-words")
-                        ui.run_javascript(
-                            f"""const target = document.getElementById('c{run_label.id}');
-                            if (target) {{
-                                const value = new Date({json.dumps(snapshot.completed_at_utc)});
-                                target.textContent = 'Run: ' + new Intl.DateTimeFormat(undefined, {{dateStyle: 'long', timeStyle: 'short'}}).format(value);
-                            }}"""
-                        )
-                        ui.label(f"Model: {snapshot.model}").classes("text-sm text-gray-600 dark:text-gray-300 break-words")
-                        ui.separator()
-                        ui.markdown(snapshot.result_markdown).classes(SAFE_RICH_OUTPUT)
 
-                        def confirm_clear_snapshot() -> None:
-                            with ui.dialog() as dialog, ui.card().classes(CONFIRM_DIALOG_CARD):
-                                ui.label("Clear the saved AI Analysis snapshot?").classes("text-lg font-semibold")
-                                ui.label("This removes the saved last analysis result. It does not affect your portfolio data.").classes("text-sm text-gray-600 dark:text-gray-300")
+                    def confirm_clear_snapshot(viewer: Any | None = None) -> None:
+                        with ui.dialog() as dialog, ui.card().classes(CONFIRM_DIALOG_CARD):
+                            ui.label("Clear the saved AI Analysis snapshot?").classes("text-lg font-semibold")
+                            ui.label("This removes the saved last analysis result. It does not affect your portfolio data.").classes("text-sm text-gray-600 dark:text-gray-300")
 
-                                async def clear_snapshot() -> None:
-                                    try:
-                                        await critical_io("ai_analysis_snapshot_clear", snapshot_service.clear)
-                                    except ShutdownInProgress:
-                                        return
-                                    except Exception as exc:
-                                        ui.notify(f"Snapshot could not be cleared: {exc}", type="negative", timeout=0)
-                                        return
-                                    dialog.close()
-                                    render_snapshot()
-                                    ui.notify("Last AI Analysis snapshot cleared.", type="positive")
+                            async def clear_snapshot() -> None:
+                                try:
+                                    await critical_io("ai_analysis_snapshot_clear", snapshot_service.clear)
+                                except ShutdownInProgress:
+                                    return
+                                except Exception as exc:
+                                    ui.notify(f"Snapshot could not be cleared: {exc}", type="negative", timeout=0)
+                                    return
+                                dialog.close()
+                                if viewer is not None:
+                                    viewer.close()
+                                render_snapshot()
+                                ui.notify("Last AI Analysis snapshot cleared.", type="positive")
 
-                                with ui.element("div").classes(RESPONSIVE_ACTIONS):
-                                    ui.button("Clear Snapshot", icon="delete", color="negative", on_click=clear_snapshot).classes("w-full sm:w-auto min-h-11")
-                                    ui.button("Cancel", on_click=dialog.close).props("flat").classes("w-full sm:w-auto min-h-11")
-                            dialog.open()
+                            with ui.element("div").classes(RESPONSIVE_ACTIONS):
+                                ui.button("Clear Snapshot", icon="delete", color="negative", on_click=clear_snapshot).classes("w-full sm:w-auto min-h-11")
+                                ui.button("Cancel", on_click=dialog.close).props("flat").classes("w-full sm:w-auto min-h-11")
+                        dialog.open()
 
-                        ui.button("Clear Snapshot…", icon="delete_outline", on_click=confirm_clear_snapshot).props("outline color=negative").classes("w-full sm:w-auto min-h-11")
+                    def open_snapshot_viewer() -> None:
+                        with ui.dialog() as viewer, ui.card().classes(SNAPSHOT_VIEWER_CARD):
+                            with ui.row().classes("w-full items-start justify-between gap-3"):
+                                ui.label("Last Analysis Snapshot").classes("text-xl sm:text-2xl font-semibold")
+                                ui.button(icon="close", on_click=viewer.close).props("flat round aria-label='Close snapshot viewer'")
+                            with ui.element("div").classes("w-full grid grid-cols-1 sm:grid-cols-3 gap-3 rounded-lg bg-gray-50 p-3 dark:bg-gray-800"):
+                                with ui.column().classes("min-w-0 gap-1"):
+                                    ui.label("Analysis Type").classes("text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400")
+                                    ui.label(snapshot.analysis_type).classes("font-medium break-words")
+                                with ui.column().classes("min-w-0 gap-1"):
+                                    ui.label("Run Date/Time").classes("text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400")
+                                    viewer_run_label = ui.label(friendly_utc_timestamp(snapshot.completed_at_utc)).classes("break-words")
+                                    localize_snapshot_timestamp(viewer_run_label, snapshot.completed_at_utc)
+                                with ui.column().classes("min-w-0 gap-1"):
+                                    ui.label("Model").classes("text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400")
+                                    ui.label(snapshot.model).classes("break-words")
+                            ui.separator()
+                            ui.markdown(snapshot.result_markdown).classes(SAFE_RICH_OUTPUT)
+                            with ui.element("div").classes(RESPONSIVE_ACTIONS):
+                                ui.button("Clear Snapshot…", icon="delete_outline", on_click=lambda: confirm_clear_snapshot(viewer)).props("outline color=negative").classes("w-full sm:w-auto min-h-11")
+                                ui.button("Close", on_click=viewer.close).props("outline").classes("w-full sm:w-auto min-h-11")
+                        viewer.open()
+
+                    with ui.card().classes("w-full min-w-0 overflow-hidden p-0"):
+                        with ui.element("div").classes("hidden md:grid w-full grid-cols-[minmax(0,2fr)_minmax(0,1.4fr)_minmax(0,1fr)_auto] gap-3 border-b px-4 py-2 text-xs font-semibold uppercase tracking-wide text-gray-500 dark:border-gray-700 dark:text-gray-400"):
+                            for heading in ("Analysis Type", "Run Date/Time", "Model", "Action"):
+                                ui.label(heading)
+                        with ui.element("div").classes("w-full grid grid-cols-1 md:grid-cols-[minmax(0,2fr)_minmax(0,1.4fr)_minmax(0,1fr)_auto] items-center gap-3 px-4 py-3"):
+                            with ui.column().classes("min-w-0 gap-0"):
+                                ui.label("Analysis Type").classes("md:hidden text-xs uppercase text-gray-500 dark:text-gray-400")
+                                ui.label(snapshot.analysis_type).classes("font-medium break-words")
+                            with ui.column().classes("min-w-0 gap-0"):
+                                ui.label("Run Date/Time").classes("md:hidden text-xs uppercase text-gray-500 dark:text-gray-400")
+                                run_label = ui.label(friendly_utc_timestamp(snapshot.completed_at_utc)).classes("text-sm break-words")
+                                localize_snapshot_timestamp(run_label, snapshot.completed_at_utc)
+                            with ui.column().classes("min-w-0 gap-0"):
+                                ui.label("Model").classes("md:hidden text-xs uppercase text-gray-500 dark:text-gray-400")
+                                ui.label(snapshot.model).classes("text-sm break-words")
+                            with ui.element("div").classes("flex flex-col sm:flex-row md:flex-col lg:flex-row gap-2"):
+                                ui.button("View", icon="visibility", on_click=open_snapshot_viewer).classes("min-h-11")
+                                ui.button("Clear…", icon="delete_outline", on_click=confirm_clear_snapshot).props("flat color=negative").classes("min-h-11")
 
             async def analyze() -> None:
                 if request_active["value"]:
