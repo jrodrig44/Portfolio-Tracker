@@ -12,7 +12,6 @@ import sqlite3
 import time
 from typing import Any, Iterable
 
-from dotenv import load_dotenv
 import pandas as pd
 import datetime as dt
 import streamlit as st
@@ -55,9 +54,10 @@ from supplemental_research import (
     validated_research_model,
 )
 from logging_setup import configure_structured_logging, log_event
+from project_environment import initialize_project_environment
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-load_dotenv(dotenv_path=PROJECT_ROOT / ".env")
+initialize_project_environment(PROJECT_ROOT)
 
 DATA_DIR = PROJECT_ROOT / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)

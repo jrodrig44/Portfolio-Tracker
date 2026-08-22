@@ -18,6 +18,7 @@ from nicegui_app.services.configuration import (
     YAHOO_METADATA_CACHE_TTL_SECONDS,
 )
 from nicegui_app.services.operations import CACHE_INTERVALS_SECONDS, format_interval, operational_status
+from nicegui_app.services.formatting import SYSTEM_CARD, SYSTEM_CARD_GRID, SYSTEM_PATH_VALUE, SYSTEM_VALUE
 from nicegui_app.services.yahoo import current_market_data, yahoo_intelligence_package
 
 
@@ -136,6 +137,28 @@ class NiceGUIPhase2FSystemTests(unittest.TestCase):
         self.assertNotIn("run_statement_scan", source)
         self.assertNotIn("yfinance", source)
         self.assertIn("PORT = 8502", source)
+
+    def test_system_cards_are_responsive_and_wrap_long_values(self) -> None:
+        source = (ROOT / "nicegui_app" / "main.py").read_text(encoding="utf-8")
+        self.assertIn("grid-cols-1", SYSTEM_CARD_GRID)
+        self.assertIn("md:grid-cols-2", SYSTEM_CARD_GRID)
+        self.assertIn("xl:grid-cols-3", SYSTEM_CARD_GRID)
+        self.assertIn("max-w-full", SYSTEM_CARD_GRID)
+        self.assertIn("min-w-0", SYSTEM_CARD)
+        self.assertIn("h-auto", SYSTEM_CARD)
+        self.assertIn("whitespace-normal", SYSTEM_VALUE)
+        self.assertIn("break-words", SYSTEM_VALUE)
+        self.assertIn("break-all", SYSTEM_PATH_VALUE)
+        self.assertIn("system_detail_cards", source)
+        self.assertNotIn("fixed-width", SYSTEM_CARD_GRID)
+
+    def test_ai_status_uses_shared_system_layout_and_existing_sections_remain(self) -> None:
+        source = (ROOT / "nicegui_app" / "main.py").read_text(encoding="utf-8")
+        for heading in ("Appearance", "Runtime", "AI Analysis", "Portfolio database", "Statement storage", "Cache behavior"):
+            self.assertIn(f'ui.label("{heading}")', source)
+        self.assertIn("ai_provider_status(ENVIRONMENT_STATUS)", source)
+        self.assertIn('(\"API configuration\", ai_status[\"api_configuration\"]', source)
+        self.assertNotIn('ai_status["api_key"]', source)
 
 
 if __name__ == "__main__":

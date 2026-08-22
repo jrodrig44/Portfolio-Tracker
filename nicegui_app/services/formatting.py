@@ -133,6 +133,11 @@ def format_table_records(records: Iterable[dict[str, Any]]) -> tuple[list[dict[s
 
 
 RESPONSIVE_CARD_GRID = "w-full grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3"
+SYSTEM_CARD_GRID = "w-full max-w-full grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3"
+SYSTEM_CARD = "w-full min-w-0 max-w-full h-auto py-3"
+SYSTEM_LABEL = "text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400 whitespace-normal break-words"
+SYSTEM_VALUE = "w-full min-w-0 max-w-full text-base font-medium whitespace-normal break-words"
+SYSTEM_PATH_VALUE = f"{SYSTEM_VALUE} break-all"
 RESPONSIVE_ACTIONS = "w-full flex flex-col sm:flex-row gap-2 sm:items-center"
 SCROLL_TABLE = "w-full max-w-full overflow-x-auto"
 FULL_WIDTH_CONTROL = "w-full sm:max-w-xl"

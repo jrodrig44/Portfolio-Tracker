@@ -12,6 +12,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from project_environment import ai_provider_status, initialize_project_environment
+
+ENVIRONMENT_STATUS = initialize_project_environment(PROJECT_ROOT)
+
 from nicegui import app, run, ui
 from nicegui_app.process_lifecycle import ShutdownInProgress, lifecycle, start_launcher_watchdog, start_shutdown_request_watcher
 from nicegui_app.services.ai_context import AIAnalysisState,ai_options,run_ai_analysis
@@ -19,7 +23,7 @@ from nicegui_app.services.appearance import APPEARANCE_OPTIONS, APPEARANCE_STORA
 from nicegui_app.services.analysis import analysis_package
 from nicegui_app.services.configuration import DB_REFRESH_INTERVAL_SECONDS
 from nicegui_app.services.exports import export_package
-from nicegui_app.services.formatting import CONFIRM_DIALOG_CARD, DIALOG_CARD, EMPTY_STATE, FULL_WIDTH_CONTROL, RESPONSIVE_ACTIONS, RESPONSIVE_CARD_GRID, SAFE_RICH_OUTPUT, SCROLL_TABLE, format_count, format_currency, format_field_value, format_percentage, format_score, format_status, format_table_records, human_label
+from nicegui_app.services.formatting import CONFIRM_DIALOG_CARD, DIALOG_CARD, EMPTY_STATE, FULL_WIDTH_CONTROL, RESPONSIVE_ACTIONS, RESPONSIVE_CARD_GRID, SAFE_RICH_OUTPUT, SCROLL_TABLE, SYSTEM_CARD, SYSTEM_CARD_GRID, SYSTEM_LABEL, SYSTEM_PATH_VALUE, SYSTEM_VALUE, format_count, format_currency, format_field_value, format_percentage, format_score, format_status, format_table_records, human_label
 from nicegui_app.services.health import health_package
 from nicegui_app.services.history import history_package
 from nicegui_app.services.insights import insights_package
@@ -60,6 +64,14 @@ def detail_cards(items: list[tuple[str, Any]]) -> None:
             with ui.card().classes("w-full min-w-0 py-3"):
                 ui.label(label).classes("text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400")
                 ui.label(str(value)).classes("text-base font-medium break-words")
+
+
+def system_detail_cards(items: list[tuple[str, Any, bool]]) -> None:
+    with ui.element("div").classes(SYSTEM_CARD_GRID):
+        for label, value, is_path in items:
+            with ui.card().classes(SYSTEM_CARD):
+                ui.label(label).classes(SYSTEM_LABEL)
+                ui.label(str(value)).classes(SYSTEM_PATH_VALUE if is_path else SYSTEM_VALUE)
 
 
 def guidance_text(text: Any) -> None:
@@ -641,7 +653,7 @@ async def index() -> None:
             ui.label("AI Analysis").classes("text-2xl font-semibold")
             ui.label("No request is sent until Analyze is clicked. Uses existing compact context and the 1min.AI provider.").classes("text-gray-500 dark:text-gray-400")
             if not options["configured"]:
-                ui.label("ONEMIN_AI_API_KEY is not configured in the local environment.").classes("text-amber-700 dark:text-amber-300")
+                ui.label("1min.AI is not configured. ONEMIN_AI_API_KEY is missing from the local environment.").classes("text-amber-700 dark:text-amber-300")
             with ui.element("div").classes("w-full grid grid-cols-1 md:grid-cols-2 gap-3"):
                 analysis_type = ui.select(options["analysis_types"], value=options["analysis_types"][0], label="Analysis type").classes(FULL_WIDTH_CONTROL)
                 model = ui.select(options["models"], value=options["default_model"], label="Model").classes(FULL_WIDTH_CONTROL)
@@ -790,6 +802,7 @@ async def index() -> None:
         statement_folder = storage["folder"]
         history_db = storage["history_database"]
         application = package["application"]
+        ai_status = ai_provider_status(ENVIRONMENT_STATUS)
         area = areas["System"]
         with area:
             ui.label("System").classes("text-2xl font-semibold")
@@ -800,27 +813,35 @@ async def index() -> None:
             ).classes("w-full sm:w-auto")
             ui.label("System follows your device's appearance setting.").classes("text-sm text-gray-500 dark:text-gray-400")
             ui.label("Runtime").classes("text-lg font-semibold mt-2")
-            detail_cards([
-                ("Application", application["framework"]),
-                ("Application port", application["port"]),
-                ("Database refresh interval", f'{application["database_refresh_interval_seconds"]} seconds'),
+            system_detail_cards([
+                ("Application", application["framework"], False),
+                ("Application port", application["port"], False),
+                ("Database refresh interval", f'{application["database_refresh_interval_seconds"]} seconds', False),
+            ])
+            ui.label("AI Analysis").classes("text-lg font-semibold mt-2")
+            system_detail_cards([
+                ("Provider", ai_status["provider"], False),
+                ("API configuration", ai_status["api_configuration"], False),
+                ("Status", ai_status["status"], False),
+                ("Current/default model", ai_status["model"], False),
+                ("Configuration source", ai_status["configuration_source"], False),
             ])
             ui.label("Portfolio database").classes("text-lg font-semibold mt-2")
-            detail_cards([
-                ("Status", portfolio_db["status"]),
-                ("Configured path", portfolio_db["path"]),
+            system_detail_cards([
+                ("Status", portfolio_db["status"], False),
+                ("Configured path", portfolio_db["path"], True),
             ])
             ui.label("Statement storage").classes("text-lg font-semibold mt-2")
-            detail_cards([
-                ("Statements folder", statement_folder["status"]),
-                ("Statements folder path", statement_folder["path"]),
-                ("PDFs detected", format_count(statement_folder["pdf_count"])),
-                ("Statement history database", history_db["status"]),
-                ("Statement history database path", history_db["path"]),
+            system_detail_cards([
+                ("Statements folder", statement_folder["status"], False),
+                ("Statements folder path", statement_folder["path"], True),
+                ("PDFs detected", format_count(statement_folder["pdf_count"]), False),
+                ("Statement history database", history_db["status"], False),
+                ("Statement history database path", history_db["path"], True),
             ])
             ui.label("Cache behavior").classes("text-lg font-semibold mt-2")
             ui.label("These intervals are informational. Cache refreshes continue to use the application’s existing behavior.").classes("text-gray-500 dark:text-gray-400")
-            detail_cards([(name, format_interval(seconds)) for name, seconds in package["cache_intervals_seconds"].items()])
+            system_detail_cards([(name, format_interval(seconds), False) for name, seconds in package["cache_intervals_seconds"].items()])
         loaded["System"] = True
 
     async def navigate(event: Any) -> None:
