@@ -85,10 +85,20 @@ class NiceGuiPhase2APresentationTests(unittest.TestCase):
         self.assertNotIn("hidden lg:block", source)
         self.assertIn("w-full sm:w-auto min-h-11", source)
 
-    def test_no_database_write_statements_were_added(self) -> None:
-        source = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "nicegui_app").rglob("*.py")).upper()
+    def test_database_writes_remain_isolated_to_snapshot_persistence(self) -> None:
+        service = ROOT / "nicegui_app" / "services" / "ai_snapshot.py"
+        source = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (ROOT / "nicegui_app").rglob("*.py")
+            if path != service
+        ).upper()
         for statement in ("INSERT INTO", "UPDATE HOLDINGS", "DELETE FROM", "ALTER TABLE", "CREATE TABLE"):
             self.assertNotIn(statement, source)
+        snapshot_source = service.read_text(encoding="utf-8").upper()
+        self.assertIn("CREATE TABLE IF NOT EXISTS", snapshot_source)
+        self.assertIn("INSERT INTO", snapshot_source)
+        self.assertIn("ON CONFLICT(SNAPSHOT_ID) DO UPDATE", snapshot_source)
+        self.assertNotIn("UPDATE HOLDINGS", snapshot_source)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ import os
 import sys
 import uuid
 import calendar
+import json
 from datetime import date
 from pathlib import Path
 from typing import Any, Callable
@@ -19,6 +20,7 @@ ENVIRONMENT_STATUS = initialize_project_environment(PROJECT_ROOT)
 from nicegui import app, run, ui
 from nicegui_app.process_lifecycle import ShutdownInProgress, lifecycle, start_launcher_watchdog, start_shutdown_request_watcher
 from nicegui_app.services.ai_context import AIAnalysisState,ai_options,run_ai_analysis
+from nicegui_app.services.ai_snapshot import AIAnalysisSnapshotService, friendly_utc_timestamp, save_successful_analysis_snapshot
 from nicegui_app.services.appearance import APPEARANCE_OPTIONS, APPEARANCE_STORAGE_KEY, restore_appearance
 from nicegui_app.services.analysis import analysis_package
 from nicegui_app.services.configuration import DB_REFRESH_INTERVAL_SECONDS
@@ -118,6 +120,7 @@ async def index() -> None:
     metrics = None
     coordinator = ReadOnlyRefreshCoordinator(market_loader=current_market_data)
     holdings_writer = HoldingsWriteService(coordinator.portfolio_path)
+    snapshot_service = AIAnalysisSnapshotService(coordinator.portfolio_path)
     statement_service = StatementHistoryService(db_path=coordinator.history_path)
     research_service = PortfolioResearchService(coordinator.portfolio_path)
     loaded = {name: False for name in NAVIGATION_AREAS}
@@ -665,6 +668,56 @@ async def index() -> None:
             context_size = ui.label("").classes("w-full text-xs text-gray-500 dark:text-gray-400 break-words")
             state = AIAnalysisState()
             request_active = {"value": False}
+            snapshot_area = ui.column().classes("w-full min-w-0 gap-2")
+
+            def render_snapshot() -> None:
+                snapshot_area.clear()
+                snapshot = snapshot_service.load()
+                with snapshot_area:
+                    ui.label("Last Analysis Snapshot").classes("text-lg font-semibold mt-2")
+                    if snapshot is None:
+                        with ui.card().classes("w-full min-w-0"):
+                            ui.label("No saved AI analysis yet.").classes("font-medium")
+                            ui.label("Run an analysis to create the first snapshot.").classes("text-sm text-gray-500 dark:text-gray-400")
+                        return
+                    with ui.card().classes("w-full min-w-0 overflow-hidden"):
+                        ui.label(f"Analysis: {snapshot.analysis_type}").classes("font-medium break-words")
+                        run_label = ui.label(f"Run: {friendly_utc_timestamp(snapshot.completed_at_utc)}").classes("text-sm text-gray-600 dark:text-gray-300 break-words")
+                        ui.run_javascript(
+                            f"""const target = document.getElementById('c{run_label.id}');
+                            if (target) {{
+                                const value = new Date({json.dumps(snapshot.completed_at_utc)});
+                                target.textContent = 'Run: ' + new Intl.DateTimeFormat(undefined, {{dateStyle: 'long', timeStyle: 'short'}}).format(value);
+                            }}"""
+                        )
+                        ui.label(f"Model: {snapshot.model}").classes("text-sm text-gray-600 dark:text-gray-300 break-words")
+                        ui.separator()
+                        ui.markdown(snapshot.result_markdown).classes(SAFE_RICH_OUTPUT)
+
+                        def confirm_clear_snapshot() -> None:
+                            with ui.dialog() as dialog, ui.card().classes(CONFIRM_DIALOG_CARD):
+                                ui.label("Clear the saved AI Analysis snapshot?").classes("text-lg font-semibold")
+                                ui.label("This removes the saved last analysis result. It does not affect your portfolio data.").classes("text-sm text-gray-600 dark:text-gray-300")
+
+                                async def clear_snapshot() -> None:
+                                    try:
+                                        await critical_io("ai_analysis_snapshot_clear", snapshot_service.clear)
+                                    except ShutdownInProgress:
+                                        return
+                                    except Exception as exc:
+                                        ui.notify(f"Snapshot could not be cleared: {exc}", type="negative", timeout=0)
+                                        return
+                                    dialog.close()
+                                    render_snapshot()
+                                    ui.notify("Last AI Analysis snapshot cleared.", type="positive")
+
+                                with ui.element("div").classes(RESPONSIVE_ACTIONS):
+                                    ui.button("Clear Snapshot", icon="delete", color="negative", on_click=clear_snapshot).classes("w-full sm:w-auto min-h-11")
+                                    ui.button("Cancel", on_click=dialog.close).props("flat").classes("w-full sm:w-auto min-h-11")
+                            dialog.open()
+
+                        ui.button("Clear Snapshot…", icon="delete_outline", on_click=confirm_clear_snapshot).props("outline color=negative").classes("w-full sm:w-auto min-h-11")
+
             async def analyze() -> None:
                 if request_active["value"]:
                     return
@@ -680,9 +733,21 @@ async def index() -> None:
                         status.set_text(state.error_message)
                         ui.notify(state.error_message, type="negative")
                     else:
+                        await critical_io(
+                            "ai_analysis_snapshot_save",
+                            save_successful_analysis_snapshot,
+                            snapshot_service,
+                            state,
+                        )
                         output.set_content(state.result_markdown)
+                        render_snapshot()
                         status.set_text(f"Completed with {state.result_model} at {state.generated_at}.")
                         ui.notify(f"Analysis completed with {state.result_model}", type="positive")
+                except ShutdownInProgress:
+                    pass
+                except Exception as exc:
+                    status.set_text("AI Analysis could not be completed and saved.")
+                    ui.notify(str(exc), type="negative", timeout=0)
                 finally:
                     request_active["value"] = False
                     button.enable()
@@ -695,6 +760,7 @@ async def index() -> None:
                 button = ui.button("Analyze", on_click=analyze, icon="auto_awesome", color="primary").classes("w-full sm:w-auto min-h-11")
                 ui.button("Clear analysis", icon="clear", on_click=clear_analysis).classes("w-full sm:w-auto min-h-11")
                 ui.button("Download Markdown", icon="download", on_click=lambda: ui.download(state.result_markdown.encode("utf-8"), "ai_analysis.md")).classes("w-full sm:w-auto min-h-11")
+            render_snapshot()
         loaded["AI Analysis"] = True
 
     async def render_insights() -> None:
