@@ -32,11 +32,12 @@ from nicegui_app.services.insights import insights_package
 from nicegui_app.services.portfolio_data import DEFAULT_HISTORY_RANGE,HISTORY_RANGE_OPTIONS,portfolio_summary
 from nicegui_app.services.refresh import ReadOnlyRefreshCoordinator
 from nicegui_app.services.ui_state import PageUIState
-from nicegui_app.services.yahoo import current_market_data,yahoo_intelligence_package
+from nicegui_app.services.yahoo import clear_market_data_cache,current_market_data,yahoo_intelligence_package
 from portfolio_holdings_write import ASSET_TYPES, HoldingsWriteService, summarize_contributions
 from nicegui_app.services.operations import format_interval, operational_status
 from portfolio_research import PortfolioResearchService, research_contexts
 from portfolio_statement_history import StatementHistoryService, statement_scan_diagnostic_records, statement_verified_display_records
+from shared_data_preparation import prepare_shared_data
 
 HOST = "0.0.0.0"
 PORT = 8502
@@ -878,6 +879,58 @@ async def index() -> None:
                 appearance_storage, APPEARANCE_STORAGE_KEY
             ).classes("w-full sm:w-auto")
             ui.label("System follows your device's appearance setting.").classes("text-sm text-gray-500 dark:text-gray-400")
+            ui.label("Shared Data").classes("text-lg font-semibold mt-2")
+            ui.label("Refreshes and verifies shared Portfolio Tracker data before switching between NiceGUI and Streamlit.").classes("text-sm text-gray-500 dark:text-gray-400")
+            preparation_status = ui.column().classes("w-full min-w-0 gap-1")
+            preparation_active = {"value": False}
+
+            async def prepare_for_switch() -> None:
+                if preparation_active["value"]:
+                    return
+                if lifecycle.active_operations:
+                    ui.notify("Another protected write is active. Try preparing shared data again when it finishes.", type="warning")
+                    return
+                preparation_active["value"] = True
+                prepare_button.disable()
+                preparation_status.clear()
+                with preparation_status:
+                    ui.label("Preparing shared Portfolio Tracker data...").classes("text-sm text-blue-700 dark:text-blue-300")
+                try:
+                    result = await critical_io(
+                        "prepare_shared_data",
+                        prepare_shared_data,
+                        coordinator.portfolio_path,
+                        coordinator.history_path,
+                        market_loader=current_market_data,
+                        market_cache_clearer=clear_market_data_cache,
+                    )
+                    preparation_status.clear()
+                    with preparation_status:
+                        ui.label("Shared data is ready.").classes("font-semibold text-green-700 dark:text-green-300")
+                        system_detail_cards([
+                            ("Holdings", f"{result.holdings_status} ({result.holdings_count})", False),
+                            ("Portfolio database", result.portfolio_database_status, False),
+                            ("History database", result.history_database_status, False),
+                            ("Market refresh", result.market_refresh_status, False),
+                            ("Live snapshot", result.live_snapshot_status, False),
+                            ("SQLite checkpoint", result.sqlite_checkpoint_status, False),
+                        ])
+                        ui.label("You can safely stop this app and start the other Portfolio Tracker interface.").classes("text-sm text-green-700 dark:text-green-300")
+                    ui.notify("Shared data is ready.", type="positive")
+                except ShutdownInProgress:
+                    pass
+                except Exception as exc:
+                    preparation_status.clear()
+                    stage = getattr(exc, "stage", "Shared data preparation")
+                    with preparation_status:
+                        ui.label("Shared data preparation did not complete.").classes("font-semibold text-red-600 dark:text-red-400")
+                        ui.label(f"{stage} failed. Your existing data was not replaced.").classes("text-sm text-red-600 dark:text-red-400 break-words")
+                    ui.notify(f"{stage} failed.", type="negative", timeout=0)
+                finally:
+                    preparation_active["value"] = False
+                    prepare_button.enable()
+
+            prepare_button = ui.button("Prepare Shared Data", icon="fact_check", on_click=prepare_for_switch).classes("w-full sm:w-auto min-h-11")
             ui.label("Runtime").classes("text-lg font-semibold mt-2")
             system_detail_cards([
                 ("Application", application["framework"], False),

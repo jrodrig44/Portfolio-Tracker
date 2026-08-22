@@ -55,6 +55,7 @@ from supplemental_research import (
 )
 from logging_setup import configure_structured_logging, log_event
 from project_environment import initialize_project_environment
+from shared_data_preparation import persist_live_snapshot_if_ready, prepare_shared_data
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 initialize_project_environment(PROJECT_ROOT)
@@ -5568,12 +5569,7 @@ def _persist_live_snapshot_if_ready(metrics: pd.DataFrame, total_value: float, *
     strict_export_accuracy_mode = bool(st.session_state.get("strict_export_accuracy_mode", False)) if strict_export_accuracy_mode is None else strict_export_accuracy_mode
     if use_export_json_data or strict_export_accuracy_mode or total_value <= 0:
         return False
-    shares = pd.to_numeric(metrics["shares"] if "shares" in metrics.columns else pd.Series(0.0, index=metrics.index), errors="coerce").fillna(0.0)
-    prices = pd.to_numeric(metrics["current_price"] if "current_price" in metrics.columns else pd.Series(0.0, index=metrics.index), errors="coerce")
-    if bool(((shares > 0) & (prices.isna() | ~prices.apply(math.isfinite) | (prices <= 0))).any()):
-        return False
-    upsert_live_portfolio_snapshot(total_value, db_path=db_path)
-    return True
+    return persist_live_snapshot_if_ready(metrics, db_path, total_value=total_value) != "Not applicable"
 
 
 def _render_statement_history_import(total_value: float) -> None:
@@ -7532,6 +7528,54 @@ def _local_statement_status() -> tuple[int, bool]:
         return 0, STATEMENT_HISTORY_DB_PATH.exists()
 
 
+def _clear_all_market_data_caches() -> None:
+    for cached_loader in (
+        _latest_prices,
+        _latest_yahoo_metadata,
+        _latest_sectors,
+        _latest_dividend_yields,
+        _latest_asset_type_hints,
+        _latest_dividend_month_weights,
+        _latest_historical_context,
+        _latest_fund_sector_weights,
+        _latest_investment_intelligence,
+    ):
+        cached_loader.clear()
+    log_event(LOGGER, "market_cache_cleared", "All Yahoo market-data caches cleared", cache_name="all_market_data", operation="clear")
+
+
+def _streamlit_shared_market_data(tickers: list[str]) -> tuple[dict[str, float], dict[str, float]]:
+    normalized = _to_ticker_tuple(pd.Series(tickers, dtype=str))
+    return _latest_prices(normalized), _latest_dividend_yields(normalized)
+
+
+def _render_shared_data_preparation() -> None:
+    st.subheader("Shared Data")
+    st.caption("Refreshes and verifies shared Portfolio Tracker data before switching between NiceGUI and Streamlit.")
+    if not st.button("Prepare Shared Data", key="prepare_shared_data"):
+        return
+    with st.spinner("Preparing shared Portfolio Tracker data..."):
+        try:
+            result = prepare_shared_data(
+                DEFAULT_DB_PATH,
+                STATEMENT_HISTORY_DB_PATH,
+                market_loader=_streamlit_shared_market_data,
+                market_cache_clearer=_clear_all_market_data_caches,
+            )
+        except Exception as exc:
+            stage = getattr(exc, "stage", "Shared data preparation")
+            st.error(f"Shared data preparation did not complete. {stage} failed. Your existing data was not replaced.")
+            return
+    st.success("Shared data is ready.")
+    st.caption(f"Holdings: {result.holdings_status} ({result.holdings_count})")
+    st.caption(f"Portfolio database: {result.portfolio_database_status}")
+    st.caption(f"History database: {result.history_database_status}")
+    st.caption(f"Market refresh: {result.market_refresh_status}")
+    st.caption(f"Live snapshot: {result.live_snapshot_status}")
+    st.caption(f"SQLite checkpoint: {result.sqlite_checkpoint_status}")
+    st.info("You can safely stop this app and start the other Portfolio Tracker interface.")
+
+
 def main() -> None:
     if not getattr(LOGGER, "_application_started_logged", False):
         log_event(LOGGER, "application_started", "Portfolio Tracker started")
@@ -7562,16 +7606,7 @@ def main() -> None:
         if mobile_mode:
             st.caption("Compact mobile layouts are enabled.")
         if st.button("Force refresh all market data"):
-            _latest_prices.clear()
-            _latest_yahoo_metadata.clear()
-            _latest_sectors.clear()
-            _latest_dividend_yields.clear()
-            _latest_asset_type_hints.clear()
-            _latest_dividend_month_weights.clear()
-            _latest_historical_context.clear()
-            _latest_fund_sector_weights.clear()
-            _latest_investment_intelligence.clear()
-            log_event(LOGGER, "market_cache_cleared", "All Yahoo market-data caches cleared", cache_name="all_market_data", operation="clear")
+            _clear_all_market_data_caches()
             st.success("All market-data caches cleared. Data will be fetched fresh now.")
         if st.button("Force price refresh"):
             _latest_prices.clear()
@@ -7598,6 +7633,7 @@ def main() -> None:
         if st.button("Reload holdings from disk"):
             st.session_state["holdings"] = _load_saved_holdings()
             st.rerun()
+        _render_shared_data_preparation()
 
 
     if "holdings" not in st.session_state:

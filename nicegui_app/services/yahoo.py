@@ -27,6 +27,11 @@ def _cached(key:tuple[str,str],loader,ttl:float):
     value=loader();_cache[key]=(now,value);return value
 
 
+def clear_market_data_cache() -> None:
+    """Clear NiceGUI's in-process Yahoo cache for an explicit fresh preparation run."""
+    _cache.clear()
+
+
 def _load_fund_sector_weights(ticker: str, proxy: Any, asset_type: object) -> dict[str, float]:
     """Return optional fund look-through data only for classified fund holdings."""
     if canonical_asset_type(asset_type) not in FUND_ASSET_TYPES:
