@@ -7,6 +7,9 @@ data/*.csv
 .env.*
 !.env.example
 
+# NiceGUI local runtime/user storage
+.nicegui/
+
 # Local runtime databases
 data/portfolio.db
 data/portfolio.db-wal
