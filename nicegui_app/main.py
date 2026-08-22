@@ -721,10 +721,10 @@ async def index() -> None:
 
                     def open_snapshot_viewer() -> None:
                         with ui.dialog() as viewer, ui.card().classes(SNAPSHOT_VIEWER_CARD):
-                            with ui.row().classes("w-full items-start justify-between gap-3"):
+                            with ui.row().classes("w-full shrink-0 items-start justify-between gap-3"):
                                 ui.label("Last Analysis Snapshot").classes("text-xl sm:text-2xl font-semibold")
                                 ui.button(icon="close", on_click=viewer.close).props("flat round aria-label='Close snapshot viewer'")
-                            with ui.element("div").classes("w-full grid grid-cols-1 sm:grid-cols-3 gap-3 rounded-lg bg-gray-50 p-3 dark:bg-gray-800"):
+                            with ui.element("div").classes("w-full shrink-0 grid grid-cols-1 sm:grid-cols-3 gap-3 rounded-lg bg-gray-50 p-3 dark:bg-gray-800"):
                                 with ui.column().classes("min-w-0 gap-1"):
                                     ui.label("Analysis Type").classes("text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400")
                                     ui.label(snapshot.analysis_type).classes("font-medium break-words")
@@ -735,9 +735,10 @@ async def index() -> None:
                                 with ui.column().classes("min-w-0 gap-1"):
                                     ui.label("Model").classes("text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400")
                                     ui.label(snapshot.model).classes("break-words")
-                            ui.separator()
-                            ui.markdown(snapshot.result_markdown).classes(SAFE_RICH_OUTPUT)
-                            with ui.element("div").classes(RESPONSIVE_ACTIONS):
+                            ui.separator().classes("shrink-0")
+                            with ui.element("div").classes("w-full flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain"):
+                                ui.markdown(snapshot.result_markdown).classes(SAFE_RICH_OUTPUT)
+                            with ui.element("div").classes(f"{RESPONSIVE_ACTIONS} shrink-0"):
                                 ui.button("Clear Snapshot…", icon="delete_outline", on_click=lambda: confirm_clear_snapshot(viewer)).props("outline color=negative").classes("w-full sm:w-auto min-h-11")
                                 ui.button("Close", on_click=viewer.close).props("outline").classes("w-full sm:w-auto min-h-11")
                         viewer.open()

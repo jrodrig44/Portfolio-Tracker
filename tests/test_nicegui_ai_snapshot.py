@@ -149,6 +149,12 @@ class NiceGuiAIAnalysisSnapshotTests(unittest.TestCase):
         self.assertIn('for heading in ("Analysis Type", "Run Date/Time", "Model", "Action")', source)
         self.assertEqual(source.count("with ui.card().classes(\"w-full min-w-0 overflow-hidden p-0\")"), 1)
         self.assertIn("ui.markdown(snapshot.result_markdown).classes(SAFE_RICH_OUTPUT)", source)
+        viewer = source.split("def open_snapshot_viewer()", 1)[1].split("viewer.open()", 1)[0]
+        scroll_region = 'classes("w-full flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain")'
+        self.assertIn(scroll_region, viewer)
+        self.assertLess(viewer.index(scroll_region), viewer.index("ui.markdown(snapshot.result_markdown)"))
+        self.assertLess(viewer.index("ui.markdown(snapshot.result_markdown)"), viewer.index("Clear Snapshot…"))
+        self.assertIn('classes(f"{RESPONSIVE_ACTIONS} shrink-0")', viewer)
         summary = source.split("with ui.card().classes(\"w-full min-w-0 overflow-hidden p-0\")", 1)[1].split("async def analyze", 1)[0]
         self.assertNotIn("ui.markdown(snapshot.result_markdown)", summary)
         self.assertIn("Intl.DateTimeFormat", source)
