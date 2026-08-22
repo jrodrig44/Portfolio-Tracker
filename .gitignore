@@ -1,11 +1,31 @@
+# Python bytecode and tool caches
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtual environments and local package caches
 .venv/
 venv/
+.uv-cache/
+.uv-python/
+env/
+
+# Runtime CSV data
 data/*.csv
+
+# Local environment and secrets
 .env
 .env.*
 !.env.example
+.streamlit/secrets.toml
+.streamlit/credentials.toml
 
 # NiceGUI local runtime/user storage
 .nicegui/
@@ -29,8 +49,43 @@ data/app_access_log.jsonl
 # Local dependency-install fingerprint
 data/.requirements.sha256
 
+# Generated exports (tracked sample_export files are intentional fixtures)
+data/portfolio_export.json
+/portfolio_export.json
+/portfolio_export.md
+/holdings.csv
+
 # Local rotating logs
 logs/
 *.log
 *.log.*
+*.jsonl
 *.jsonl.*
+
+# Runtime process/state files
+*.pid
+*.lock
+*.request
+
+# Editors and IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Build and package output
+build/
+dist/
+*.egg-info/
+
+# Temporary and backup files
+*.tmp
+*.temp
+*.bak
+*.orig
+~$*
