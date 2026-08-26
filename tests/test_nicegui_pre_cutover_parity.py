@@ -183,7 +183,8 @@ class HoldingsGridSaveTests(unittest.TestCase):
         self.assertIn('ui.button("Remove Selected Rows"', active)
         self.assertIn('ui.button("Save Holdings"', active)
         self.assertIn('ui.label("Live Calculated Fields")', active)
-        self.assertIn('{"field": "_holding_id", "hide": True}', active)
+        self.assertIn("holding_grid_column_defs()", active)
+        self.assertIn('{"field": "_holding_id", "hide": True}', source)
         self.assertNotIn('ui.button("Edit"', active)
         self.assertNotIn("Edit or delete a holding", active)
 

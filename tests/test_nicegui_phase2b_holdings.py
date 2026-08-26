@@ -8,7 +8,14 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from nicegui_app.services.portfolio_data import load_holdings
-from nicegui_app.main import add_aggrid_holding_row, current_aggrid_rows, remove_selected_aggrid_rows
+from nicegui_app.main import (
+    HOLDING_NUMERIC_FIELDS,
+    HOLDING_NUMERIC_VALUE_PARSER,
+    add_aggrid_holding_row,
+    current_aggrid_rows,
+    holding_grid_column_defs,
+    remove_selected_aggrid_rows,
+)
 from portfolio_holdings_write import (
     HoldingConfirmationError,
     HoldingValidationError,
@@ -191,6 +198,31 @@ class Phase2BHoldingsTests(unittest.TestCase):
         self.assertNotIn('grid.options["rowData"].append', holdings_ui)
         self.assertNotIn("grid.update()", holdings_ui)
         self.assertIn("Removed rows are not deleted from the database until you click Save Holdings.", holdings_ui)
+
+    def test_holding_column_definitions_use_valid_dynamic_numeric_parser(self) -> None:
+        columns = {column["field"]: column for column in holding_grid_column_defs()}
+        expected_numeric = {
+            "shares", "espp_acquired_shares", "amount_invested", "annual_div_per_share",
+            "regular_biweekly_contribution", "espp_contribution_biweekly", "special_contribution",
+            "espp_discount", "espp_purchase_frequency_months",
+        }
+        self.assertEqual(HOLDING_NUMERIC_FIELDS, expected_numeric)
+        for field in expected_numeric:
+            self.assertEqual(columns[field]["type"], "numericColumn")
+            self.assertEqual(columns[field][":valueParser"], HOLDING_NUMERIC_VALUE_PARSER)
+            self.assertNotIn("valueParser", columns[field])
+        self.assertNotIn("Number(params.newValue)", HOLDING_NUMERIC_VALUE_PARSER)
+        self.assertIn("Number.isFinite(parsed)", HOLDING_NUMERIC_VALUE_PARSER)
+        self.assertIn("params.oldValue", HOLDING_NUMERIC_VALUE_PARSER)
+        self.assertNotIn(":valueParser", columns["ticker"])
+        self.assertEqual(columns["is_espp"]["cellEditor"], "agCheckboxCellEditor")
+        self.assertEqual(columns["is_espp"]["cellRenderer"], "agCheckboxCellRenderer")
+        self.assertEqual(columns["asset_type"]["cellEditor"], "agSelectCellEditor")
+        self.assertIn("ETF", columns["asset_type"]["cellEditorParams"]["values"])
+
+        parser = lambda new_value: float(new_value)
+        self.assertEqual(parser("1.123456789"), 1.123456789)
+        self.assertEqual(parser("10"), 10.0)
 
     def test_add_and_remove_sync_server_membership_with_client_transactions(self) -> None:
         existing_edit = {"_holding_id": 3, "_grid_key": "existing-3", "ticker": "KEEP", "shares": 9.75}

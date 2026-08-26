@@ -44,6 +44,25 @@ HOST = "0.0.0.0"
 PORT = int(os.environ.get("PORTFOLIO_TRACKER_PORT", "8501"))
 STORAGE_SECRET = os.environ.get("NICEGUI_STORAGE_SECRET", "portfolio-tracker-local-appearance-storage")
 NAVIGATION_AREAS = ("Holdings", "Portfolio Analysis", "AI Analysis", "Portfolio Insights", "Portfolio Health", "History", "Statement History", "Supplemental Research", "System")
+HOLDING_EDITABLE_FIELDS = (
+    "ticker", "shares", "espp_acquired_shares", "amount_invested",
+    "annual_div_per_share", "regular_biweekly_contribution",
+    "espp_contribution_biweekly", "special_contribution", "is_espp",
+    "espp_discount", "espp_purchase_frequency_months", "sector", "asset_type",
+)
+HOLDING_FIELD_LABELS = {
+    "ticker": "Ticker", "shares": "Shares", "espp_acquired_shares": "ESPP-Acquired Shares",
+    "amount_invested": "Amount Invested", "annual_div_per_share": "Annual Div/Share (Manual Override)",
+    "regular_biweekly_contribution": "Regular Bi-Weekly Contribution",
+    "espp_contribution_biweekly": "ESPP Bi-Weekly Contribution", "special_contribution": "Special Contribution",
+    "is_espp": "ESPP Holding", "espp_discount": "ESPP Discount (decimal)",
+    "espp_purchase_frequency_months": "ESPP Purchase Frequency (months)", "sector": "Sector", "asset_type": "Asset Type",
+}
+HOLDING_NUMERIC_FIELDS = set(HOLDING_EDITABLE_FIELDS) - {"ticker", "sector", "asset_type", "is_espp"}
+HOLDING_NUMERIC_VALUE_PARSER = (
+    "params => { const input = String(params.newValue).trim(); "
+    "const parsed = Number(input); return input !== '' && Number.isFinite(parsed) ? parsed : params.oldValue; }"
+)
 
 app.on_startup(start_research_worker)
 app.on_shutdown(stop_research_worker)
@@ -129,6 +148,21 @@ def new_holding_grid_row() -> dict[str, Any]:
     }
 
 
+def holding_grid_column_defs() -> list[dict[str, Any]]:
+    column_defs: list[dict[str, Any]] = [{"field": "_holding_id", "hide": True}, {"field": "_grid_key", "hide": True}]
+    for field in HOLDING_EDITABLE_FIELDS:
+        definition: dict[str, Any] = {"field": field, "headerName": HOLDING_FIELD_LABELS[field], "editable": True, "minWidth": 145}
+        if field in HOLDING_NUMERIC_FIELDS:
+            definition["type"] = "numericColumn"
+            definition[":valueParser"] = HOLDING_NUMERIC_VALUE_PARSER
+        elif field == "is_espp":
+            definition.update({"cellDataType": "boolean", "cellEditor": "agCheckboxCellEditor", "cellRenderer": "agCheckboxCellRenderer"})
+        elif field == "asset_type":
+            definition.update({"cellEditor": "agSelectCellEditor", "cellEditorParams": {"values": sorted(ASSET_TYPES)}})
+        column_defs.append(definition)
+    return column_defs
+
+
 async def add_aggrid_holding_row(grid: Any) -> dict[str, Any]:
     row = new_holding_grid_row()
     with grid.props.suspend_updates():
@@ -195,41 +229,16 @@ async def index() -> None:
         area.clear()
         display_holdings = metrics.to_dict(orient="records") if metrics is not None else holdings
         summary = portfolio_summary(display_holdings)
-        editable_fields = (
-            "ticker", "shares", "espp_acquired_shares", "amount_invested",
-            "annual_div_per_share", "regular_biweekly_contribution",
-            "espp_contribution_biweekly", "special_contribution", "is_espp",
-            "espp_discount", "espp_purchase_frequency_months", "sector", "asset_type",
-        )
         editor_rows = []
         for stored in holdings:
             editor_rows.append({
                 "_holding_id": stored["_holding_id"],
                 "_grid_key": f"existing-{stored['_holding_id']}",
-                **{field: stored.get(field, "") for field in editable_fields},
+                **{field: stored.get(field, "") for field in HOLDING_EDITABLE_FIELDS},
                 "espp_contribution_biweekly": stored.get("espp_biweekly_contribution", stored.get("espp_contribution_biweekly", 0.0)),
                 "is_espp": bool(stored.get("espp_enabled", stored.get("is_espp", False))),
             })
-        labels = {
-            "ticker": "Ticker", "shares": "Shares", "espp_acquired_shares": "ESPP-Acquired Shares",
-            "amount_invested": "Amount Invested", "annual_div_per_share": "Annual Div/Share (Manual Override)",
-            "regular_biweekly_contribution": "Regular Bi-Weekly Contribution",
-            "espp_contribution_biweekly": "ESPP Bi-Weekly Contribution", "special_contribution": "Special Contribution",
-            "is_espp": "ESPP Holding", "espp_discount": "ESPP Discount (decimal)",
-            "espp_purchase_frequency_months": "ESPP Purchase Frequency (months)", "sector": "Sector", "asset_type": "Asset Type",
-        }
-        numeric_fields = set(editable_fields) - {"ticker", "sector", "asset_type", "is_espp"}
-        column_defs = [{"field": "_holding_id", "hide": True}, {"field": "_grid_key", "hide": True}]
-        for field in editable_fields:
-            definition: dict[str, Any] = {"field": field, "headerName": labels[field], "editable": True, "minWidth": 145}
-            if field in numeric_fields:
-                definition["type"] = "numericColumn"
-                definition["valueParser"] = "Number(params.newValue)"
-            elif field == "is_espp":
-                definition.update({"cellDataType": "boolean", "cellEditor": "agCheckboxCellEditor", "cellRenderer": "agCheckboxCellRenderer"})
-            elif field == "asset_type":
-                definition.update({"cellEditor": "agSelectCellEditor", "cellEditorParams": {"values": sorted(ASSET_TYPES)}})
-            column_defs.append(definition)
+        column_defs = holding_grid_column_defs()
         with area:
             ui.label("Holdings").classes("text-2xl font-semibold")
             ui.label("Manage Holdings").classes("text-xl font-semibold")
