@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from nicegui_app.services.portfolio_data import load_holdings
-from nicegui_app.main import current_aggrid_rows
+from nicegui_app.main import add_aggrid_holding_row, current_aggrid_rows, remove_selected_aggrid_rows
 from portfolio_holdings_write import (
     HoldingConfirmationError,
     HoldingValidationError,
@@ -63,11 +63,15 @@ class Phase2BHoldingsTests(unittest.TestCase):
         self.assertAlmostEqual(rows[0]["shares"], 1.123456789)
 
     def test_invalid_ticker_and_numeric_inputs_are_rejected_without_writes(self) -> None:
-        for field, value in (("ticker", "  "), ("shares", "bad"), ("shares", -1), ("shares", float("inf"))):
+        for field, value in (("ticker", "  "), ("shares", "bad"), ("shares", -1), ("shares", float("inf")), ("espp_discount", 1.01)):
             payload = valid()
             payload[field] = value
             with self.assertRaises(HoldingValidationError):
                 self.service.add(payload)
+        acquired = valid()
+        acquired.update({"shares": 1, "espp_acquired_shares": 2})
+        with self.assertRaises(HoldingValidationError):
+            self.service.add(acquired)
         with sqlite3.connect(self.db) as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM holdings").fetchone()[0], 0)
 
@@ -179,6 +183,64 @@ class Phase2BHoldingsTests(unittest.TestCase):
         self.assertIn("refresh_after_holding_write", source)
         self.assertIn('"AI Analysis"', source)
         self.assertIn("prior prepared output is stale", source)
+        holdings_ui = source.split("def render_holdings()", 1)[1].split("async def render_statement_history", 1)[0]
+        self.assertIn('":getRowId": "params => params.data._grid_key"', holdings_ui)
+        self.assertIn("add_aggrid_holding_row(grid)", holdings_ui)
+        self.assertIn("remove_selected_aggrid_rows(grid)", holdings_ui)
+        self.assertNotIn('grid.options["rowData"].append', holdings_ui)
+        self.assertNotIn("grid.update()", holdings_ui)
+        self.assertIn("Removed rows are not deleted from the database until you click Save Holdings.", holdings_ui)
+
+    def test_add_and_remove_use_client_transactions_without_rebuilding_row_data(self) -> None:
+        class FakeGrid:
+            def __init__(self) -> None:
+                self.calls = []
+                self.selected = [{"_holding_id": 7, "_grid_key": "existing-7", "ticker": "DUP"}]
+
+            async def run_grid_method(self, name: str, transaction: dict[str, object]) -> None:
+                self.calls.append((name, transaction))
+
+            async def get_selected_rows(self) -> list[dict[str, object]]:
+                return self.selected
+
+        grid = FakeGrid()
+        added = asyncio.run(add_aggrid_holding_row(grid))
+        removed = asyncio.run(remove_selected_aggrid_rows(grid))
+        self.assertTrue(str(added["_grid_key"]).startswith("new-"))
+        self.assertEqual(removed, 1)
+        self.assertEqual(grid.calls[0], ("applyTransaction", {"add": [added]}))
+        self.assertEqual(grid.calls[1], ("applyTransaction", {"remove": grid.selected}))
+
+    def test_combined_grid_save_adds_edits_and_deletes_by_stable_id(self) -> None:
+        edited = self.service.add(valid("DUP"))
+        removed = self.service.add(valid("DUP"))
+        expected = load_holdings(self.db)
+        edited_row = {**expected[0], "shares": 9.75, "espp_contribution_biweekly": 0, "is_espp": False}
+        new_row = {**valid("NEW"), "_holding_id": None, "_grid_key": "new-combined"}
+
+        result = self.service.save_grid([edited_row, new_row], expected_rows=expected)
+
+        self.assertEqual(result, {"added": 1, "updated": 1, "unchanged": 0, "deleted": 1})
+        reloaded = load_holdings(self.db)
+        self.assertEqual({row["ticker"] for row in reloaded}, {"DUP", "NEW"})
+        surviving_duplicate = next(row for row in reloaded if row["ticker"] == "DUP")
+        self.assertEqual(surviving_duplicate["_holding_id"], edited["_holding_id"])
+        self.assertNotEqual(surviving_duplicate["_holding_id"], removed["_holding_id"])
+        self.assertEqual(surviving_duplicate["shares"], 9.75)
+
+    def test_combined_grid_save_rolls_back_every_operation_on_failure(self) -> None:
+        existing = self.service.add(valid("KEEP"))
+        expected = load_holdings(self.db)
+        with sqlite3.connect(self.db) as connection:
+            connection.execute("CREATE TRIGGER fail_grid_edit BEFORE UPDATE ON holdings BEGIN SELECT RAISE(ABORT, 'failure'); END")
+        new_row = {**valid("NEW"), "_holding_id": None, "_grid_key": "new-rollback"}
+        edited_row = {**expected[0], "shares": 99, "espp_contribution_biweekly": 0, "is_espp": False}
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.service.save_grid([new_row, edited_row], expected_rows=expected)
+
+        reloaded = load_holdings(self.db)
+        self.assertEqual([(row["_holding_id"], row["ticker"], row["shares"]) for row in reloaded], [(existing["_holding_id"], "KEEP", expected[0]["shares"])])
 
     def test_client_grid_rows_commit_active_edit_and_return_browser_values(self) -> None:
         class FakeGrid:

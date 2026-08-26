@@ -119,6 +119,29 @@ async def current_aggrid_rows(grid: Any) -> list[dict[str, Any]]:
     return rows
 
 
+def new_holding_grid_row() -> dict[str, Any]:
+    return {
+        "_holding_id": None, "_grid_key": f"new-{uuid.uuid4().hex}", "ticker": "", "shares": 0.0, "espp_acquired_shares": 0.0,
+        "amount_invested": 0.0, "annual_div_per_share": 0.0,
+        "regular_biweekly_contribution": 0.0, "espp_contribution_biweekly": 0.0,
+        "special_contribution": 0.0, "is_espp": False, "espp_discount": 0.0,
+        "espp_purchase_frequency_months": 6.0, "sector": "", "asset_type": "Stock",
+    }
+
+
+async def add_aggrid_holding_row(grid: Any) -> dict[str, Any]:
+    row = new_holding_grid_row()
+    await grid.run_grid_method("applyTransaction", {"add": [row]})
+    return row
+
+
+async def remove_selected_aggrid_rows(grid: Any) -> int:
+    selected = await grid.get_selected_rows()
+    if selected:
+        await grid.run_grid_method("applyTransaction", {"remove": selected})
+    return len(selected)
+
+
 @ui.page("/")
 async def index() -> None:
     ui.colors(primary="#1d4ed8", secondary="#0f766e", accent="#d97706")
@@ -207,33 +230,20 @@ async def index() -> None:
             grid = ui.aggrid({
                 "columnDefs": column_defs,
                 "rowData": editor_rows,
+                ":getRowId": "params => params.data._grid_key",
                 "defaultColDef": {"resizable": True, "sortable": True},
                 "rowSelection": {"mode": "multiRow"},
                 "stopEditingWhenCellsLoseFocus": True,
             }).classes("w-full h-96")
             saving = {"value": False}
 
-            def add_grid_row() -> None:
-                grid.options["rowData"].append({
-                    "_holding_id": None, "_grid_key": f"new-{uuid.uuid4().hex}", "ticker": "", "shares": 0.0, "espp_acquired_shares": 0.0,
-                    "amount_invested": 0.0, "annual_div_per_share": 0.0,
-                    "regular_biweekly_contribution": 0.0, "espp_contribution_biweekly": 0.0,
-                    "special_contribution": 0.0, "is_espp": False, "espp_discount": 0.0,
-                    "espp_purchase_frequency_months": 6.0, "sector": "", "asset_type": "Stock",
-                })
-                grid.update()
+            async def add_grid_row() -> None:
+                await add_aggrid_holding_row(grid)
 
             async def remove_grid_rows() -> None:
-                selected = await grid.get_selected_rows()
-                if not selected:
+                removed = await remove_selected_aggrid_rows(grid)
+                if not removed:
                     ui.notify("Select one or more grid rows to remove.", type="warning")
-                    return
-                selected_keys = {row.get("_grid_key") for row in selected}
-                grid.options["rowData"] = [
-                    row for row in grid.options["rowData"]
-                    if row.get("_grid_key") not in selected_keys
-                ]
-                grid.update()
 
             async def save_grid() -> None:
                 if saving["value"]:
@@ -264,6 +274,7 @@ async def index() -> None:
                 ui.button("Add Row", icon="add", on_click=add_grid_row).classes("w-full sm:w-auto min-h-11")
                 ui.button("Remove Selected Rows", icon="delete", color="negative", on_click=remove_grid_rows).classes("w-full sm:w-auto min-h-11")
                 save_button = ui.button("Save Holdings", icon="save", on_click=save_grid).classes("w-full sm:w-auto min-h-11")
+            ui.label("Removed rows are not deleted from the database until you click Save Holdings.").classes("text-xs text-gray-500 dark:text-gray-400")
 
             metric_cards([("Portfolio value", currency(summary["portfolio_value"])), ("Cost basis", currency(summary["cost_basis"])), ("Unrealized gain/loss", currency(summary["unrealized_gain"])), ("Estimated annual income", currency(summary["annual_income"])), ("Weighted yield", percent(summary["weighted_yield_pct"])), ("Holdings", format_count(summary["holding_count"])), ("Largest holding", str(summary["largest_holding"])), ("Largest weight", percent(summary["largest_weight_pct"]))])
             ui.label("Live Calculated Fields").classes("text-xl font-semibold mt-3")
