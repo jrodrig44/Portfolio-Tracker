@@ -4,6 +4,7 @@ import asyncio
 import sqlite3
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 
 from nicegui_app.services.portfolio_data import load_holdings
@@ -191,13 +192,46 @@ class Phase2BHoldingsTests(unittest.TestCase):
         self.assertNotIn("grid.update()", holdings_ui)
         self.assertIn("Removed rows are not deleted from the database until you click Save Holdings.", holdings_ui)
 
-    def test_add_and_remove_use_client_transactions_without_rebuilding_row_data(self) -> None:
+    def test_add_and_remove_sync_server_membership_with_client_transactions(self) -> None:
+        existing_edit = {"_holding_id": 3, "_grid_key": "existing-3", "ticker": "KEEP", "shares": 9.75}
+        removed_row = {"_holding_id": 7, "_grid_key": "existing-7", "ticker": "DUP", "shares": 1}
+
+        class FakeProps:
+            def __init__(self, grid: object) -> None:
+                self.grid = grid
+
+            @contextmanager
+            def suspend_updates(self):
+                self.grid.calls.append(("suspend_updates", "enter"))
+                self.grid.updates_suspended = True
+                try:
+                    yield
+                finally:
+                    self.grid.updates_suspended = False
+                    self.grid.calls.append(("suspend_updates", "exit"))
+
         class FakeGrid:
             def __init__(self) -> None:
                 self.calls = []
-                self.selected = [{"_holding_id": 7, "_grid_key": "existing-7", "ticker": "DUP"}]
+                self.updates_suspended = False
+                grid = self
 
-            async def run_grid_method(self, name: str, transaction: dict[str, object]) -> None:
+                class SuspendedList(list):
+                    def append(self, item: object) -> None:
+                        if not grid.updates_suspended:
+                            raise AssertionError("rowData append was not suspended")
+                        super().append(item)
+
+                    def __delitem__(self, index: object) -> None:
+                        if not grid.updates_suspended:
+                            raise AssertionError("rowData removal was not suspended")
+                        super().__delitem__(index)
+
+                self.options = {"rowData": SuspendedList([existing_edit, removed_row])}
+                self.selected = [removed_row.copy()]
+                self.props = FakeProps(self)
+
+            def run_grid_method(self, name: str, transaction: dict[str, object]) -> None:
                 self.calls.append((name, transaction))
 
             async def get_selected_rows(self) -> list[dict[str, object]]:
@@ -208,8 +242,18 @@ class Phase2BHoldingsTests(unittest.TestCase):
         removed = asyncio.run(remove_selected_aggrid_rows(grid))
         self.assertTrue(str(added["_grid_key"]).startswith("new-"))
         self.assertEqual(removed, 1)
-        self.assertEqual(grid.calls[0], ("applyTransaction", {"add": [added]}))
-        self.assertEqual(grid.calls[1], ("applyTransaction", {"remove": grid.selected}))
+        self.assertEqual(grid.options["rowData"], [existing_edit, added])
+        self.assertIs(grid.options["rowData"][0], existing_edit)
+        self.assertEqual(existing_edit["shares"], 9.75)
+        self.assertEqual(grid.calls, [
+            ("suspend_updates", "enter"),
+            ("suspend_updates", "exit"),
+            ("applyTransaction", {"add": [added]}),
+            ("suspend_updates", "enter"),
+            ("suspend_updates", "exit"),
+            ("applyTransaction", {"remove": grid.selected}),
+        ])
+        self.assertFalse(hasattr(grid, "update"))
 
     def test_combined_grid_save_adds_edits_and_deletes_by_stable_id(self) -> None:
         edited = self.service.add(valid("DUP"))

@@ -131,14 +131,22 @@ def new_holding_grid_row() -> dict[str, Any]:
 
 async def add_aggrid_holding_row(grid: Any) -> dict[str, Any]:
     row = new_holding_grid_row()
-    await grid.run_grid_method("applyTransaction", {"add": [row]})
+    with grid.props.suspend_updates():
+        grid.options["rowData"].append(row)
+    grid.run_grid_method("applyTransaction", {"add": [row]})
     return row
 
 
 async def remove_selected_aggrid_rows(grid: Any) -> int:
     selected = await grid.get_selected_rows()
     if selected:
-        await grid.run_grid_method("applyTransaction", {"remove": selected})
+        selected_keys = {row["_grid_key"] for row in selected}
+        with grid.props.suspend_updates():
+            row_data = grid.options["rowData"]
+            for index in range(len(row_data) - 1, -1, -1):
+                if row_data[index].get("_grid_key") in selected_keys:
+                    del row_data[index]
+        grid.run_grid_method("applyTransaction", {"remove": selected})
     return len(selected)
 
 
