@@ -44,6 +44,9 @@ from shared_data_preparation import prepare_shared_data
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("PORTFOLIO_TRACKER_PORT", "8501"))
 STORAGE_SECRET = os.environ.get("NICEGUI_STORAGE_SECRET", "portfolio-tracker-local-appearance-storage")
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+FAVICON_PATH = STATIC_DIR / "favicon.ico"
+APPLE_TOUCH_ICON_PATH = STATIC_DIR / "apple-touch-icon.png"
 NAVIGATION_AREAS = ("Holdings", "Portfolio Analysis", "AI Analysis", "Portfolio Insights", "Portfolio Health", "History", "Statement History", "Supplemental Research", "System")
 HOLDING_EDITABLE_FIELDS = (
     "ticker", "shares", "espp_acquired_shares", "amount_invested",
@@ -67,6 +70,10 @@ HOLDING_NUMERIC_VALUE_PARSER = (
 
 app.on_startup(start_research_worker)
 app.on_shutdown(stop_research_worker)
+app.add_static_files("/branding", STATIC_DIR)
+app.add_static_file(local_file=FAVICON_PATH, url_path="/favicon.ico")
+app.add_static_file(local_file=APPLE_TOUCH_ICON_PATH, url_path="/apple-touch-icon.png")
+app.add_static_file(local_file=APPLE_TOUCH_ICON_PATH, url_path="/apple-touch-icon-precomposed.png")
 
 
 def currency(value: Any) -> str:
@@ -194,6 +201,10 @@ async def remove_selected_aggrid_rows(grid: Any) -> int:
 
 @ui.page("/")
 async def index() -> None:
+    ui.add_head_html(
+        '<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">'
+        '<link rel="icon" type="image/png" sizes="32x32" href="/branding/favicon-32x32.png">'
+    )
     ui.colors(primary="#1d4ed8", secondary="#0f766e", accent="#d97706")
     appearance_storage = app.storage.user
     appearance_mode = restore_appearance(appearance_storage)
@@ -1211,4 +1222,4 @@ async def index() -> None:
 if __name__ in {"__main__", "__mp_main__"}:
     start_launcher_watchdog()
     start_shutdown_request_watcher(app.shutdown)
-    ui.run(host=HOST, port=PORT, title="Portfolio Tracker · NiceGUI", reload=False, show=False, storage_secret=STORAGE_SECRET)
+    ui.run(host=HOST, port=PORT, title="Portfolio Tracker", favicon=FAVICON_PATH, reload=False, show=False, storage_secret=STORAGE_SECRET)
