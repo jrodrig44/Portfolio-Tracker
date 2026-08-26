@@ -48,8 +48,9 @@ class NiceGuiPhase1ParityTests(unittest.TestCase):
             holdings_loader=holdings_loader,
             history_loader=Mock(return_value=[]),
             market_loader=market_loader,
+            snapshot_persister=Mock(return_value="Already current"),
         )
-        with patch("nicegui_app.services.refresh.database_fingerprint", side_effect=[(1,1),(2,2),(1,1),(2,2)]):
+        with patch("nicegui_app.services.refresh.database_fingerprint", side_effect=[(1,1),(2,2),(2,2),(1,1),(2,2),(2,2)]):
             first=coordinator.refresh()
             second=coordinator.refresh()
         self.assertEqual(first.metrics.iloc[0]["market_value"],90.0)
