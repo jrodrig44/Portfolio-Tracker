@@ -25,7 +25,7 @@ from nicegui_app.services.ai_snapshot import AIAnalysisSnapshotService, friendly
 from nicegui_app.services.appearance import APPEARANCE_OPTIONS, APPEARANCE_STORAGE_KEY, restore_appearance
 from nicegui_app.services.analysis import analysis_package
 from nicegui_app.services.configuration import DB_REFRESH_INTERVAL_SECONDS
-from nicegui_app.services.exports import export_package
+from nicegui_app.services.exports import YahooExportEnrichmentState,export_package
 from nicegui_app.services.formatting import CONFIRM_DIALOG_CARD, DIALOG_CARD, EMPTY_STATE, FULL_WIDTH_CONTROL, RESPONSIVE_ACTIONS, RESPONSIVE_CARD_GRID, SAFE_RICH_OUTPUT, SCROLL_TABLE, SNAPSHOT_VIEWER_CARD, SYSTEM_CARD, SYSTEM_CARD_GRID, SYSTEM_LABEL, SYSTEM_PATH_VALUE, SYSTEM_VALUE, format_count, format_currency, format_field_value, format_percentage, format_score, format_status, format_table_records, human_label
 from nicegui_app.services.health import health_package
 from nicegui_app.services.history import history_package
@@ -137,6 +137,7 @@ async def index() -> None:
     snapshot_service = AIAnalysisSnapshotService(coordinator.portfolio_path)
     statement_service = StatementHistoryService(db_path=coordinator.history_path)
     research_service = PortfolioResearchService(coordinator.portfolio_path)
+    yahoo_export_state = YahooExportEnrichmentState()
     loaded = {name: False for name in NAVIGATION_AREAS}
 
     with ui.header().classes("flex-wrap items-center justify-between gap-2 shadow-sm px-3 sm:px-5"):
@@ -281,7 +282,13 @@ async def index() -> None:
             ui.label("Read-only exports").classes("text-lg font-semibold mt-3")
             async def download_export(filename: str) -> None:
                 try:
-                    package = await run.io_bound(export_package, holdings, metrics, history=history)
+                    export_kwargs: dict[str, Any] = {"history": history}
+                    if filename != "holdings.csv":
+                        tickers = [str(row.get("ticker") or "") for row in holdings]
+                        research_rows = await run.io_bound(research_service.successful_export_rows, tickers)
+                        fund_weights, external_context = yahoo_export_state.export_inputs(metrics, research_rows)
+                        export_kwargs.update(fund_weights=fund_weights, external_context=external_context)
+                    package = await run.io_bound(export_package, holdings, metrics, **export_kwargs)
                     ui.download(package[filename].encode("utf-8"), filename)
                 except Exception as exc:
                     ui.notify(f"Export failed: {exc}", type="negative")
@@ -636,6 +643,7 @@ async def index() -> None:
                             pending = ui.label("Loading existing Yahoo-backed intelligence…")
                         try:
                             intelligence = await run.io_bound(yahoo_intelligence_package, metrics)
+                            yahoo_export_state.retain(metrics, intelligence)
                             yahoo_area.clear()
                             with yahoo_area:
                                 fund_context = intelligence.get("fund_lookthrough", {})
@@ -1037,6 +1045,7 @@ async def index() -> None:
             holdings=result.holdings or []
         if result.metrics_changed:
             metrics=result.metrics
+            yahoo_export_state.invalidate()
             render_holdings()
             for name in ("Portfolio Analysis","Portfolio Insights","Portfolio Health"):
                 loaded[name]=False;areas[name].clear()

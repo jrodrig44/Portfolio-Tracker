@@ -143,6 +143,26 @@ class PortfolioResearchService:
             "worker_check_hours": int(WORKER_CHECK_INTERVAL.total_seconds() // 3600),
         }
 
+    def successful_export_rows(self, tickers: Iterable[str]) -> list[dict[str, Any]]:
+        """Read persisted successful research in an export-safe shape without starting work."""
+        active = {str(ticker or "").strip().upper() for ticker in tickers if str(ticker or "").strip()}
+        exported: list[dict[str, Any]] = []
+        for row in get_research_rows(self.db_path):
+            ticker = str(row.get("ticker") or "").strip().upper()
+            if ticker not in active or row.get("archived") or not row.get("last_success_at"):
+                continue
+            display = research_display_row(row)
+            markdown = str(display.get("research_markdown") or "").strip()
+            if not markdown:
+                continue
+            exported.append({
+                "ticker": ticker,
+                "source_type": "persisted_supplemental_research",
+                "last_success_at": display["last_success_at"],
+                "research_summary": markdown,
+            })
+        return exported
+
     def set_model(self, model: str) -> str:
         selected = str(model or "").strip()
         if selected not in SUPPORTED_RESEARCH_MODELS:

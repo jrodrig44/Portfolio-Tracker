@@ -1,16 +1,70 @@
 import json
 import math
 import unittest
+from pathlib import Path
 from unittest.mock import Mock
 
 import pandas as pd
 
 from nicegui_app.services.calculations import metrics_frame
-from nicegui_app.services.exports import build_export_payload, export_package
+from nicegui_app.services.exports import YahooExportEnrichmentState, build_export_payload, export_package, yahoo_export_enrichment
 from portfolio_export import build_export_markdown, build_export_package, build_export_payload as shared_payload
 
 
 class NiceGuiPhase1FExportTests(unittest.TestCase):
+    def test_nicegui_yahoo_mapping_populates_json_and_markdown(self):
+        holdings, metrics, history, _, _ = self.inputs()
+        yahoo = {
+            "fund_weights": {"FUND": {"Technology": 0.6, "Financials": 0.3}},
+            "investment_intelligence": [{"ticker": "CORE", "trailing_pe": 20}],
+            "historical_context": [{"ticker": "CORE", "return_pct": 25}],
+            "seasonality": {"monthly_income": {"Jan": 12.5}, "chart_available": True},
+        }
+        weights, external = yahoo_export_enrichment(yahoo)
+        package = export_package(holdings, metrics, history=history, fund_weights=weights, external_context=external)
+        payload = json.loads(package["portfolio_export.json"])
+        self.assertTrue(payload["exposure"]["look_through_exposure"])
+        self.assertEqual(payload["supplemental_investment_intelligence"][0]["ticker"], "CORE")
+        self.assertEqual(payload["historical_security_context"][0]["return_pct"], 25)
+        self.assertEqual(payload["dividend_seasonality"]["monthly_income"]["Jan"], 12.5)
+        self.assertEqual(payload["dividend_data_metadata"]["source"], "Yahoo Finance")
+        for value in ("CORE", "25", "Jan", "Yahoo Finance"):
+            self.assertIn(value, package["portfolio_export.md"])
+
+    def test_enrichment_state_reuses_loaded_package_and_invalidates_on_metrics_change(self):
+        _, metrics, _, _, _ = self.inputs()
+        package = {"fund_weights": {"FUND": {"Technology": 1.0}}, "investment_intelligence": []}
+        state = YahooExportEnrichmentState()
+        state.retain(metrics, package)
+        self.assertIs(state.available(metrics.copy()), package)
+        changed = metrics.copy()
+        changed.loc[0, "current_price"] += 1
+        self.assertIsNone(state.available(changed))
+        weights, external = state.export_inputs(changed)
+        self.assertEqual(weights, {})
+        self.assertIn("not been loaded", external["notes"][0])
+
+    def test_missing_yahoo_does_not_fabricate_data_and_persisted_research_is_retained(self):
+        research = [{"ticker": "CORE", "source_type": "persisted_supplemental_research", "research_summary": "Verified fact."}]
+        weights, external = yahoo_export_enrichment(None, research)
+        self.assertEqual(weights, {})
+        self.assertEqual(external["historical_security_context"], [])
+        self.assertEqual(external["dividend_seasonality"], {})
+        self.assertEqual(external["yahoo_metadata"], [])
+        self.assertEqual(external["supplemental_investment_intelligence"], research)
+        self.assertEqual(external["investor_profile"], {})
+        self.assertEqual(external["recommendation_constraints"], {})
+
+    def test_nicegui_download_reuses_state_without_calling_or_clearing_yahoo(self):
+        source = (Path(__file__).resolve().parents[1] / "nicegui_app" / "main.py").read_text(encoding="utf-8")
+        start = source.index("            async def download_export")
+        download = source[start:source.index("            with ui.element", start)]
+        self.assertIn("yahoo_export_state.export_inputs", download)
+        self.assertNotIn("yahoo_intelligence_package", download)
+        self.assertNotIn("clear_market_data_cache", download)
+        self.assertIn("yahoo_export_state.retain(metrics, intelligence)", source)
+        self.assertIn("yahoo_export_state.invalidate()", source)
+
     def holdings(self):
         return [
             {"ticker": "CORE", "shares": 10, "current_price": 100, "amount_invested": 800, "annual_div_per_share": 2, "asset_type": "Stock", "sector": "Technology", "regular_biweekly_contribution": 280, "special_contribution": 500},

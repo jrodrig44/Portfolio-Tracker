@@ -9,7 +9,7 @@ import tempfile
 import threading
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from portfolio_research import PortfolioResearchService, research_contexts, research_display_row
 from supplemental_research import (
@@ -23,6 +23,24 @@ from supplemental_research import (
 
 
 class NiceGUIPhase2EResearchTests(unittest.TestCase):
+    def test_successful_export_rows_are_persisted_display_safe_and_do_not_start_research(self) -> None:
+        rows = [{
+            "ticker": "O", "archived": 0, "manual_initial_research_completed": 1,
+            "research_status": "current", "last_success_at": self.now.isoformat(),
+            "next_due_at": (self.now + timedelta(days=30)).isoformat(),
+            "research_json": '{"verified_facts": [{"fact": "Safe"}]}',
+            "research_markdown": "## Verified Supplemental Facts\n- Safe fact",
+            "model_used": "provider-model", "provider_metadata": "secret", "lease_token": "secret",
+        }]
+        shared = MagicMock()
+        service = PortfolioResearchService(self.db_path, shared)
+        with patch("portfolio_research.get_research_rows", return_value=rows):
+            exported = service.successful_export_rows(["O"])
+        self.assertEqual(exported[0]["ticker"], "O")
+        self.assertIn("Safe fact", exported[0]["research_summary"])
+        self.assertEqual(set(exported[0]), {"ticker", "source_type", "last_success_at", "research_summary"})
+        shared.research_ticker.assert_not_called()
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temp.name) / "portfolio.db"
