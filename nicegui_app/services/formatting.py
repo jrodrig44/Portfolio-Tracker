@@ -160,6 +160,8 @@ DIALOG_CARD = "w-[min(96vw,48rem)] max-h-[90dvh] overflow-y-auto p-4 sm:p-6 dark
 CONFIRM_DIALOG_CARD = "w-[min(94vw,30rem)] max-h-[90dvh] overflow-y-auto p-4 sm:p-6 dark:bg-gray-900 dark:text-gray-100"
 SNAPSHOT_VIEWER_CARD = "snapshot-viewer-card w-[96vw] max-w-[72rem] h-[90dvh] max-h-[90dvh] min-w-0 overflow-hidden flex flex-col p-4 sm:p-6 dark:bg-gray-900 dark:text-gray-100"
 SNAPSHOT_VIEWER_BODY = "snapshot-viewer-body w-full max-w-full min-w-0 flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain"
+TICKER_CHART_CARD = "ticker-chart-card w-[96vw] max-w-[64rem] h-[min(86dvh,48rem)] max-h-[86dvh] min-w-0 overflow-hidden flex flex-col p-4 sm:p-6 dark:bg-gray-900 dark:text-gray-100"
+TICKER_CHART_BODY = "w-full max-w-full min-w-0 flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain"
 SAFE_RICH_OUTPUT = "w-full max-w-full min-w-0 break-words overflow-hidden safe-rich-output"
 SNAPSHOT_RICH_OUTPUT = f"{SAFE_RICH_OUTPUT} snapshot-rich-output"
 RICH_OUTPUT_CSS = """
@@ -210,8 +212,28 @@ RICH_OUTPUT_CSS = """
     overflow-wrap: anywhere;
     word-break: break-word;
 }
+.ticker-chart-card {
+    width: min(96vw, 64rem) !important;
+    max-width: min(96vw, 64rem) !important;
+}
+.ticker-chart-link {
+    color: var(--q-primary);
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 0.18em;
+}
+.ticker-chart-link:focus-visible {
+    outline: 2px solid currentColor;
+    outline-offset: 2px;
+}
 @media (max-width: 639px) {
     .snapshot-viewer-card {
+        width: calc(100vw - 16px) !important;
+        max-width: calc(100vw - 16px) !important;
+        height: calc(100dvh - 16px);
+        max-height: calc(100dvh - 16px);
+    }
+    .ticker-chart-card {
         width: calc(100vw - 16px) !important;
         max-width: calc(100vw - 16px) !important;
         height: calc(100dvh - 16px);

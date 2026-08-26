@@ -32,6 +32,11 @@ def clear_market_data_cache() -> None:
     _cache.clear()
 
 
+def ticker_price_history(ticker: str, period: str, interval: str = "1d") -> pd.DataFrame:
+    """Load on-demand daily history through the application's Yahoo adapter."""
+    return yf.Ticker(ticker).history(period=period, interval=interval, auto_adjust=False)
+
+
 def _load_fund_sector_weights(ticker: str, proxy: Any, asset_type: object) -> dict[str, float]:
     """Return optional fund look-through data only for classified fund holdings."""
     if canonical_asset_type(asset_type) not in FUND_ASSET_TYPES:

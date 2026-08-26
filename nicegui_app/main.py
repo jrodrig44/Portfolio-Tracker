@@ -26,7 +26,7 @@ from nicegui_app.services.appearance import APPEARANCE_OPTIONS, APPEARANCE_STORA
 from nicegui_app.services.analysis import analysis_package
 from nicegui_app.services.configuration import DB_REFRESH_INTERVAL_SECONDS
 from nicegui_app.services.exports import YahooExportEnrichmentState,export_package
-from nicegui_app.services.formatting import CONFIRM_DIALOG_CARD, DIALOG_CARD, EMPTY_STATE, FULL_WIDTH_CONTROL, RESPONSIVE_ACTIONS, RESPONSIVE_CARD_GRID, RICH_OUTPUT_CSS, SAFE_RICH_OUTPUT, SCROLL_TABLE, SNAPSHOT_RICH_OUTPUT, SNAPSHOT_VIEWER_BODY, SNAPSHOT_VIEWER_CARD, SYSTEM_CARD, SYSTEM_CARD_GRID, SYSTEM_LABEL, SYSTEM_PATH_VALUE, SYSTEM_VALUE, dividend_seasonality_chart_options, format_count, format_currency, format_field_value, format_percentage, format_score, format_status, format_table_records, human_label
+from nicegui_app.services.formatting import CONFIRM_DIALOG_CARD, DIALOG_CARD, EMPTY_STATE, FULL_WIDTH_CONTROL, RESPONSIVE_ACTIONS, RESPONSIVE_CARD_GRID, RICH_OUTPUT_CSS, SAFE_RICH_OUTPUT, SCROLL_TABLE, SNAPSHOT_RICH_OUTPUT, SNAPSHOT_VIEWER_BODY, SNAPSHOT_VIEWER_CARD, SYSTEM_CARD, SYSTEM_CARD_GRID, SYSTEM_LABEL, SYSTEM_PATH_VALUE, SYSTEM_VALUE, TICKER_CHART_BODY, TICKER_CHART_CARD, dividend_seasonality_chart_options, format_count, format_currency, format_field_value, format_percentage, format_score, format_status, format_table_records, human_label
 from nicegui_app.services.health import health_package
 from nicegui_app.services.history import history_package
 from nicegui_app.services.insights import insights_package
@@ -34,6 +34,7 @@ from nicegui_app.services.portfolio_data import DEFAULT_HISTORY_RANGE,HISTORY_RA
 from nicegui_app.services.refresh import ReadOnlyRefreshCoordinator
 from nicegui_app.services.ui_state import PageUIState, refresh_view_plan
 from nicegui_app.services.yahoo import clear_market_data_cache,current_market_data,yahoo_intelligence_package
+from nicegui_app.services.ticker_chart import DEFAULT_TICKER_CHART_RANGE, TICKER_CHART_RANGES, load_ticker_chart
 from portfolio_holdings_write import ASSET_TYPES, HoldingsWriteService, summarize_contributions
 from nicegui_app.services.operations import format_interval, operational_status
 from portfolio_research import PortfolioResearchService, research_contexts
@@ -310,9 +311,62 @@ async def index() -> None:
             live_labels = dict(live_fields)
             for column in live_columns:
                 column["label"] = live_labels.get(column["name"], column["label"])
+            current_prices = {str(row.get("ticker") or "").strip().upper(): row.get("current_price") for row in live_rows}
+
+            async def open_ticker_chart(ticker: str) -> None:
+                normalized_ticker = str(ticker or "").strip().upper()
+                if not normalized_ticker:
+                    return
+                with ui.dialog() as chart_dialog, ui.card().classes(TICKER_CHART_CARD):
+                    with ui.row().classes("w-full shrink-0 items-start justify-between gap-3"):
+                        with ui.column().classes("min-w-0 gap-0"):
+                            ui.label(f"{normalized_ticker} Price Chart").classes("text-xl sm:text-2xl font-semibold break-words")
+                            ui.label(f"Current price: {currency(current_prices.get(normalized_ticker))}").classes("text-sm text-gray-500 dark:text-gray-400")
+                        ui.button(icon="close", on_click=chart_dialog.close).props("flat round aria-label='Close price chart'")
+                    range_selector = ui.toggle(list(TICKER_CHART_RANGES), value=DEFAULT_TICKER_CHART_RANGE).classes("w-full shrink-0 overflow-x-auto")
+                    chart_body = ui.column().classes(TICKER_CHART_BODY)
+
+                    async def load_chart_range(range_name: str) -> None:
+                        chart_body.clear()
+                        with chart_body:
+                            ui.spinner(size="lg")
+                            ui.label(f"Loading {normalized_ticker} price history…").classes("text-sm text-gray-500 dark:text-gray-400")
+                        package = await run.io_bound(load_ticker_chart, normalized_ticker, range_name)
+                        chart_body.clear()
+                        with chart_body:
+                            if package["error"]:
+                                ui.label("Price history is not available for this ticker.").classes(EMPTY_STATE)
+                                return
+                            summary = package["summary"]
+                            metric_cards([
+                                ("First price", currency(summary["first_price"])),
+                                ("Latest price", currency(summary["latest_price"])),
+                                ("Period change", currency(summary["change"])),
+                                ("Period change %", percent(summary["change_pct"])),
+                            ])
+                            ui.echart(package["options"]).classes("w-full min-w-0 h-72 sm:h-96")
+
+                    range_selector.on_value_change(lambda event: load_chart_range(str(event.value)))
+                    with ui.element("div").classes(f"{RESPONSIVE_ACTIONS} shrink-0 justify-end"):
+                        ui.button("Close", on_click=chart_dialog.close).props("outline").classes("w-full sm:w-auto min-h-11")
+                chart_dialog.open()
+                await load_chart_range(DEFAULT_TICKER_CHART_RANGE)
+
             if formatted_live_rows:
                 with ui.element("div").classes(SCROLL_TABLE):
-                    ui.table(columns=live_columns, rows=formatted_live_rows, pagination=25).classes("w-full min-w-max").props("dense flat bordered")
+                    live_table = ui.table(columns=live_columns, rows=formatted_live_rows, pagination=25).classes("w-full min-w-max").props("dense flat bordered")
+                    live_table.add_slot("body-cell-ticker", r'''
+                        <q-td :props="props">
+                            <q-btn
+                                :label="props.value"
+                                :title="'View ' + props.value + ' price chart'"
+                                flat dense no-caps
+                                class="ticker-chart-link"
+                                @click.stop="$parent.$emit('ticker-chart', props.value)"
+                            />
+                        </q-td>
+                    ''')
+                    live_table.on("ticker-chart", lambda event: open_ticker_chart(str(event.args)))
             else:
                 ui.label("Your portfolio has no holdings. Add a row in Manage Holdings to begin.").classes(EMPTY_STATE)
             ui.label("Read-only exports").classes("text-lg font-semibold mt-3")
