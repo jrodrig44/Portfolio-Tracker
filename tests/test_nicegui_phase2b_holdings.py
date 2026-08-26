@@ -14,6 +14,7 @@ from nicegui_app.main import (
     add_aggrid_holding_row,
     current_aggrid_rows,
     holding_grid_column_defs,
+    release_save_guard,
     remove_selected_aggrid_rows,
 )
 from portfolio_holdings_write import (
@@ -223,6 +224,25 @@ class Phase2BHoldingsTests(unittest.TestCase):
         parser = lambda new_value: float(new_value)
         self.assertEqual(parser("1.123456789"), 1.123456789)
         self.assertEqual(parser("10"), 10.0)
+
+    def test_save_guard_does_not_touch_button_when_success_rebuilds_holdings(self) -> None:
+        class FakeButton:
+            def __init__(self) -> None:
+                self.enable_calls = 0
+
+            def enable(self) -> None:
+                self.enable_calls += 1
+
+        button = FakeButton()
+        saving = {"value": True}
+        release_save_guard(saving, button, ui_will_be_rebuilt=True)
+        self.assertFalse(saving["value"])
+        self.assertEqual(button.enable_calls, 0)
+
+        saving["value"] = True
+        release_save_guard(saving, button, ui_will_be_rebuilt=False)
+        self.assertFalse(saving["value"])
+        self.assertEqual(button.enable_calls, 1)
 
     def test_add_and_remove_sync_server_membership_with_client_transactions(self) -> None:
         existing_edit = {"_holding_id": 3, "_grid_key": "existing-3", "ticker": "KEEP", "shares": 9.75}

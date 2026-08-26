@@ -13,7 +13,7 @@ from nicegui_app.services.formatting import (
     SCROLL_TABLE,
     SNAPSHOT_VIEWER_CARD,
 )
-from nicegui_app.services.ui_state import PageUIState
+from nicegui_app.services.ui_state import PageUIState, refresh_view_plan
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -107,6 +107,23 @@ class NiceGUIPhase2HPolishTests(unittest.TestCase):
         self.assertNotIn("busy", PageUIState.__dataclass_fields__)
         self.assertIn("ui_state.selected_navigation = name", MAIN)
         self.assertIn("ui_state.history_range = range_name", MAIN)
+        self.assertIn('tabs.bind_value(ui_state, "selected_navigation")', MAIN)
+
+    def test_refresh_plan_preserves_active_view_and_lazily_invalidates_inactive_views(self) -> None:
+        analysis = refresh_view_plan("Portfolio Analysis", metrics_changed=True, history_changed=False)
+        self.assertEqual(analysis["active"], ("Portfolio Analysis",))
+        self.assertIn("Holdings", analysis["inactive"])
+        self.assertNotIn("Portfolio Analysis", analysis["inactive"])
+
+        history = refresh_view_plan("History", metrics_changed=False, history_changed=True)
+        self.assertEqual(history["active"], ("History",))
+        self.assertEqual(history["inactive"], ())
+
+        forced = refresh_view_plan("AI Analysis", metrics_changed=True, history_changed=True)
+        self.assertEqual(forced["active"], ())
+        self.assertIn("Holdings", forced["inactive"])
+        self.assertIn("History", forced["inactive"])
+        self.assertEqual("AI Analysis", PageUIState(selected_navigation="AI Analysis").selected_navigation)
 
     def test_phase_boundaries_and_canonical_runtime_remain_intact(self) -> None:
         self.assertIn('PORT = int(os.environ.get("PORTFOLIO_TRACKER_PORT", "8501"))', MAIN)

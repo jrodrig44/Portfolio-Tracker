@@ -32,7 +32,7 @@ from nicegui_app.services.history import history_package
 from nicegui_app.services.insights import insights_package
 from nicegui_app.services.portfolio_data import DEFAULT_HISTORY_RANGE,HISTORY_RANGE_OPTIONS,portfolio_summary
 from nicegui_app.services.refresh import ReadOnlyRefreshCoordinator
-from nicegui_app.services.ui_state import PageUIState
+from nicegui_app.services.ui_state import PageUIState, refresh_view_plan
 from nicegui_app.services.yahoo import clear_market_data_cache,current_market_data,yahoo_intelligence_package
 from portfolio_holdings_write import ASSET_TYPES, HoldingsWriteService, summarize_contributions
 from nicegui_app.services.operations import format_interval, operational_status
@@ -163,6 +163,13 @@ def holding_grid_column_defs() -> list[dict[str, Any]]:
     return column_defs
 
 
+def release_save_guard(saving: dict[str, bool], button: Any, *, ui_will_be_rebuilt: bool) -> None:
+    """Release double-submit protection without touching an element about to be deleted."""
+    saving["value"] = False
+    if not ui_will_be_rebuilt:
+        button.enable()
+
+
 async def add_aggrid_holding_row(grid: Any) -> dict[str, Any]:
     row = new_holding_grid_row()
     with grid.props.suspend_updates():
@@ -217,6 +224,7 @@ async def index() -> None:
             tabs = ui.tabs().classes("w-max min-w-full").props("mobile-arrows outside-arrows")
         with tabs:
             tab_objects = {name: ui.tab(name) for name in NAVIGATION_AREAS}
+        tabs.bind_value(ui_state, "selected_navigation")
         with ui.tab_panels(tabs, value=tab_objects[ui_state.selected_navigation]).classes("w-full"):
             areas: dict[str, Any] = {}
             for name in NAVIGATION_AREAS:
@@ -276,16 +284,16 @@ async def index() -> None:
                         expected_rows=list(holdings),
                         submission_token=uuid.uuid4().hex,
                     )
-                    await refresh_after_holding_write()
-                    result = result or {"added": 0, "updated": 0, "deleted": 0}
-                    ui.notify(f"Holdings saved: {result['added']} added, {result['updated']} updated, {result['deleted']} removed.", type="positive")
                 except ShutdownInProgress:
-                    pass
+                    release_save_guard(saving, save_button, ui_will_be_rebuilt=False)
                 except Exception as exc:
                     ui.notify(str(exc), type="negative", timeout=0)
-                finally:
-                    saving["value"] = False
-                    save_button.enable()
+                    release_save_guard(saving, save_button, ui_will_be_rebuilt=False)
+                else:
+                    result = result or {"added": 0, "updated": 0, "deleted": 0}
+                    ui.notify(f"Holdings saved: {result['added']} added, {result['updated']} updated, {result['deleted']} removed.", type="positive")
+                    release_save_guard(saving, save_button, ui_will_be_rebuilt=True)
+                    await refresh_after_holding_write()
 
             with ui.element("div").classes(RESPONSIVE_ACTIONS):
                 ui.button("Add Row", icon="add", on_click=add_grid_row).classes("w-full sm:w-auto min-h-11")
@@ -390,9 +398,12 @@ async def index() -> None:
                 scan_button.disable()
                 resume_button.disable()
                 scan_status.set_text("Scanning statements…")
+                ui_will_be_rebuilt = False
                 try:
                     await critical_io("statement_scan", statement_service.scan, restart=restart)
                     ui.notify("Statement scan completed.", type="positive")
+                    action_busy["value"] = False
+                    ui_will_be_rebuilt = True
                     await reload_statement_area()
                 except ShutdownInProgress:
                     pass
@@ -400,10 +411,11 @@ async def index() -> None:
                     scan_status.set_text("The statement scan could not complete. Prior scan results were retained where production supports resume.")
                     ui.notify(str(exc), type="negative", timeout=0)
                 finally:
-                    action_busy["value"] = False
-                    scan_button.enable()
-                    if state["scan_status"] in {"interrupted", "running"}:
-                        resume_button.enable()
+                    if not ui_will_be_rebuilt:
+                        action_busy["value"] = False
+                        scan_button.enable()
+                        if state["scan_status"] in {"interrupted", "running"}:
+                            resume_button.enable()
             with ui.element("div").classes(RESPONSIVE_ACTIONS):
                 scan_button = ui.button("Scan Statements", icon="document_scanner", on_click=lambda: scan_statements(True)).classes("w-full sm:w-auto min-h-11")
                 resume_button = ui.button("Resume Scan", icon="play_arrow", on_click=lambda: scan_statements(False)).classes("w-full sm:w-auto min-h-11")
@@ -453,18 +465,22 @@ async def index() -> None:
                             return
                         saving["value"] = True
                         save_button.disable()
+                        ui_will_be_rebuilt = False
                         try:
                             await critical_io("statement_review_save", statement_service.save_review, str(review_month.value), str(ending_date.value), float(invested.value), float(cash.value), float(total.value), bool(confirmed.value), manual_id=str(existing["source_hash"]) if existing else None)
                             dialog.close()
                             ui.notify("Manual review saved as Ready.", type="positive")
+                            saving["value"] = False
+                            ui_will_be_rebuilt = True
                             await reload_statement_area()
                         except ShutdownInProgress:
                             pass
                         except Exception as exc:
                             ui.notify(str(exc), type="negative", timeout=0)
                         finally:
-                            saving["value"] = False
-                            save_button.enable()
+                            if not ui_will_be_rebuilt:
+                                saving["value"] = False
+                                save_button.enable()
                     with ui.element("div").classes(RESPONSIVE_ACTIONS):
                         save_button = ui.button("Save Manual Review", icon="save", on_click=save_review).classes("w-full sm:w-auto min-h-11")
                         ui.button("Cancel", on_click=dialog.close).props("flat").classes("w-full sm:w-auto min-h-11")
@@ -492,18 +508,22 @@ async def index() -> None:
                     return
                 action_busy["value"] = True
                 import_button.disable()
+                ui_will_be_rebuilt = False
                 try:
                     result = await critical_io("statement_import", statement_service.import_ready, submission_token=uuid.uuid4().hex)
                     await refresh_history_after_statement_write()
                     ui.notify(f"Imported {int((result or {}).get('imported', 0))} statement history records.", type="positive")
+                    action_busy["value"] = False
+                    ui_will_be_rebuilt = True
                     await reload_statement_area()
                 except ShutdownInProgress:
                     pass
                 except Exception as exc:
                     ui.notify(str(exc), type="negative", timeout=0)
                 finally:
-                    action_busy["value"] = False
-                    import_button.enable()
+                    if not ui_will_be_rebuilt:
+                        action_busy["value"] = False
+                        import_button.enable()
             import_button = ui.button("Import Ready Statements", icon="publish", on_click=import_ready).classes("w-full sm:w-auto min-h-11")
             if not state["can_import"]:
                 import_button.disable()
@@ -1061,7 +1081,8 @@ async def index() -> None:
     async def navigate(event: Any) -> None:
         name = str(event.value)
         ui_state.selected_navigation = name
-        if name == "Portfolio Analysis": await render_analysis()
+        if name == "Holdings" and not loaded["Holdings"]: render_holdings()
+        elif name == "Portfolio Analysis": await render_analysis()
         elif name == "AI Analysis": render_ai()
         elif name == "Portfolio Insights": await render_insights()
         elif name == "Portfolio Health": await render_health()
@@ -1081,22 +1102,33 @@ async def index() -> None:
         if result.metrics_changed:
             metrics=result.metrics
             yahoo_export_state.invalidate_if_changed(metrics)
-            render_holdings()
-            for name in ("Portfolio Analysis","Portfolio Insights","Portfolio Health"):
-                loaded[name]=False;areas[name].clear()
-                with areas[name]: ui.label("Portfolio values changed; this section will refresh when opened.").classes("text-gray-500 dark:text-gray-400")
         if result.history_changed:
             history=result.history or []
-            if loaded["History"]: render_history(history_range)
+        plan = refresh_view_plan(
+            ui_state.selected_navigation,
+            metrics_changed=result.metrics_changed,
+            history_changed=result.history_changed,
+        )
+        for name in plan["stale"]:
+            loaded[name] = False
+        for name in plan["inactive"]:
+            areas[name].clear()
+            with areas[name]:
+                ui.label("Data changed; this section will refresh when opened.").classes("text-gray-500 dark:text-gray-400")
+        if result.history_changed and ui_state.selected_navigation == "History":
+            render_history(history_range)
         status.set_text(f"Refreshed {len(holdings)} holdings and {len(history)} history points")
     async def refresh_after_holding_write() -> None:
         """Reload writes and invalidate every holdings-derived lazy view."""
         await refresh_data(True)
         for name in ("Portfolio Analysis", "AI Analysis", "Portfolio Insights", "Portfolio Health", "Supplemental Research"):
             loaded[name] = False
-            areas[name].clear()
-            with areas[name]:
-                ui.label("Holdings changed; prior prepared output is stale and this section will refresh when opened.").classes("text-gray-500 dark:text-gray-400")
+            if name != ui_state.selected_navigation:
+                areas[name].clear()
+                with areas[name]:
+                    ui.label("Holdings changed; prior prepared output is stale and this section will refresh when opened.").classes("text-gray-500 dark:text-gray-400")
+        if ui_state.selected_navigation == "Holdings":
+            render_holdings()
     async def refresh_history_after_statement_write() -> None:
         """Reload only history-derived state; do not reload holdings or Yahoo data."""
         nonlocal history

@@ -5,6 +5,26 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+METRICS_DERIVED_VIEWS = (
+    "Holdings",
+    "Portfolio Analysis",
+    "Portfolio Insights",
+    "Portfolio Health",
+)
+
+
+def refresh_view_plan(selected_navigation: str, *, metrics_changed: bool, history_changed: bool) -> dict[str, tuple[str, ...]]:
+    """Identify stale views while preserving the currently visible DOM."""
+    stale = list(METRICS_DERIVED_VIEWS if metrics_changed else ())
+    if history_changed:
+        stale.append("History")
+    return {
+        "stale": tuple(stale),
+        "active": tuple(name for name in stale if name == selected_navigation),
+        "inactive": tuple(name for name in stale if name != selected_navigation),
+    }
+
+
 @dataclass
 class PageUIState:
     selected_navigation: str = "Holdings"
@@ -28,4 +48,4 @@ class PageUIState:
             raise KeyError(name)
 
 
-__all__ = ["PageUIState"]
+__all__ = ["METRICS_DERIVED_VIEWS", "PageUIState", "refresh_view_plan"]
