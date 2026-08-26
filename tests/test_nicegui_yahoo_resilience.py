@@ -20,7 +20,7 @@ class FundDataTicker:
 
     @property
     def info(self) -> dict[str, object]:
-        return {"sector": "Technology" if self.ticker == "APLE" else None}
+        return {"sector": "Technology" if self.ticker == "APLE" else None, "trailingAnnualDividendYield": 0.025, "dividendRate": 2.5, "payoutRatio": 0.45}
 
     def history(self, period: str = "2y") -> pd.DataFrame:
         return pd.DataFrame()
@@ -85,6 +85,9 @@ class NiceGuiYahooResilienceTests(unittest.TestCase):
 
         self.assertEqual(package["fund_weights"], {"JEPI": {"technology": 1.0}})
         self.assertEqual({row["ticker"] for row in package["investment_intelligence"]}, {"APLE", "JEPI"})
+        self.assertEqual(package["dividend_metadata"][0]["dividend_yield_pct"], 2.5)
+        self.assertEqual(package["dividend_metadata"][0]["dividend_rate"], 2.5)
+        self.assertEqual(package["dividend_metadata"][0]["payout_ratio"], 0.45)
         self.assertNotIn("APLE", FundDataTicker.fund_accesses)
 
     def test_export_context_completes_and_ai_provider_layer_is_reached(self) -> None:

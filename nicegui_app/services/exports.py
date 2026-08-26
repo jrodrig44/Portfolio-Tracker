@@ -28,12 +28,7 @@ def yahoo_export_enrichment(
         "supplemental_investment_intelligence": yahoo_intelligence + research,
         "historical_security_context": [dict(row) for row in yahoo_package.get("historical_context", []) if isinstance(row, dict)],
         "dividend_seasonality": dict(yahoo_package.get("seasonality") or {}),
-        "yahoo_metadata": {
-            "source": "Yahoo Finance",
-            "data_type": "cached_on_demand_intelligence",
-            "method": "Yahoo intelligence explicitly loaded for the current NiceGUI portfolio state",
-            "verified": False,
-        },
+        "yahoo_metadata": [dict(row) for row in yahoo_package.get("dividend_metadata", []) if isinstance(row, dict)],
         "investor_profile": {},
         "recommendation_constraints": {},
         "notes": [],
@@ -41,9 +36,12 @@ def yahoo_export_enrichment(
 
 
 def _metrics_signature(metrics: pd.DataFrame) -> tuple[tuple[Any, ...], ...]:
-    columns = ("ticker", "shares", "current_price", "market_value", "annual_income", "asset_type", "sector")
+    # Yahoo identity/classification inputs plus the annual-income weight used by
+    # dividend seasonality. Live prices and derived market values are excluded.
+    columns = ("ticker", "asset_type", "sector", "annual_income")
     records = metrics.to_dict(orient="records") if metrics is not None and not metrics.empty else []
-    return tuple(tuple(row.get(column) for column in columns) for row in records)
+    signature = [tuple(row.get(column) for column in columns) for row in records]
+    return tuple(sorted(signature, key=lambda row: str(row[0]).strip().upper()))
 
 
 @dataclass
@@ -58,6 +56,10 @@ class YahooExportEnrichmentState:
     def invalidate(self) -> None:
         self.package = None
         self.signature = None
+
+    def invalidate_if_changed(self, metrics: pd.DataFrame) -> None:
+        if self.signature is not None and self.signature != _metrics_signature(metrics):
+            self.invalidate()
 
     def available(self, metrics: pd.DataFrame) -> dict[str, Any] | None:
         return self.package if self.signature == _metrics_signature(metrics) else None

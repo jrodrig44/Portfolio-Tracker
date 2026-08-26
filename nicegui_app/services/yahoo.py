@@ -83,13 +83,22 @@ def current_market_data(tickers:list[str]|tuple[str,...])->tuple[dict[str,float]
 
 
 def yahoo_intelligence_package(metrics:pd.DataFrame)->dict[str,Any]:
-    intelligence=[]; historical=[]; fund_weights={}; monthly={month:0.0 for month in ("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec")}
+    intelligence=[]; dividend_metadata=[]; historical=[]; fund_weights={}; monthly={month:0.0 for month in ("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec")}
     for row in metrics.to_dict(orient="records"):
         ticker=str(row.get("ticker","")).upper(); proxy=yf.Ticker(ticker)
         def load_intelligence(p=proxy, source=row):
             info=p.info or {}
-            return {"ticker":ticker,"asset_type":source.get("asset_type"),"sector":info.get("sector") or source.get("sector"),"market_cap":info.get("marketCap"),"trailing_pe":info.get("trailingPE"),"analyst_target":info.get("targetMeanPrice")}
-        intelligence.append(_cached((ticker,"investment_intelligence"),load_intelligence,INVESTMENT_INTELLIGENCE_CACHE_TTL_SECONDS))
+            raw_yield=info.get("trailingAnnualDividendYield")
+            if raw_yield is None or (raw_yield in {0,0.0} and info.get("dividendYield") not in {None,0,0.0}):raw_yield=info.get("dividendYield")
+            try:
+                dividend_yield=max(float(raw_yield or 0.0),0.0)
+                if dividend_yield<=1:dividend_yield*=100.0
+                if dividend_yield>50:dividend_yield=0.0
+            except (TypeError,ValueError):dividend_yield=0.0
+            return {"ticker":ticker,"asset_type":source.get("asset_type"),"sector":info.get("sector") or source.get("sector"),"market_cap":info.get("marketCap"),"trailing_pe":info.get("trailingPE"),"analyst_target":info.get("targetMeanPrice"),"dividend_yield_pct":dividend_yield,"dividend_rate":info.get("dividendRate"),"trailing_annual_dividend_rate":info.get("trailingAnnualDividendRate"),"payout_ratio":info.get("payoutRatio"),"ex_dividend_date":info.get("exDividendDate"),"five_year_avg_dividend_yield_pct":info.get("fiveYearAvgDividendYield")}
+        intelligence_record=_cached((ticker,"investment_intelligence"),load_intelligence,INVESTMENT_INTELLIGENCE_CACHE_TTL_SECONDS)
+        intelligence.append(intelligence_record)
+        dividend_metadata.append({"ticker":ticker,"source":"Yahoo Finance","data_type":"current_dividend_data","method":"Cached Ticker.info values used by the explicitly loaded Yahoo intelligence package","dividend_yield_pct":intelligence_record.get("dividend_yield_pct"),"dividend_rate":intelligence_record.get("dividend_rate"),"trailing_annual_dividend_rate":intelligence_record.get("trailing_annual_dividend_rate"),"payout_ratio":intelligence_record.get("payout_ratio"),"ex_dividend_date":intelligence_record.get("ex_dividend_date"),"five_year_avg_dividend_yield_pct":intelligence_record.get("five_year_avg_dividend_yield_pct")})
         context_history=_cached((ticker,"historical_context_history"),lambda p=proxy: p.history(period="2y"),HISTORICAL_CONTEXT_CACHE_TTL_SECONDS)
         if isinstance(context_history,pd.DataFrame) and not context_history.empty:
             start=float(context_history["Close"].iloc[0]);end=float(context_history["Close"].iloc[-1]);historical.append({"ticker":ticker,"start_price":start,"end_price":end,"return_pct":((end/start)-1)*100 if start else 0})
@@ -105,4 +114,4 @@ def yahoo_intelligence_package(metrics:pd.DataFrame)->dict[str,Any]:
         weights=_cached((ticker,"fund_sector_weights"),load_fund_weights,FUND_SECTOR_WEIGHTS_CACHE_TTL_SECONDS)
         if weights:fund_weights[ticker]=weights
     resolved=resolve_fund_lookthrough(metrics,fund_weights)
-    return {"investment_intelligence":intelligence,"lookthrough":resolved["records"],"unresolved_lookthrough":resolved["unresolved_records"],"fund_lookthrough":resolved,"fund_weights":fund_weights,"seasonality":{"monthly_income":monthly,"chart_available":any(monthly.values()),"message":"Estimated distribution of current annual portfolio income based on available historical dividend timing."},"historical_context":historical}
+    return {"investment_intelligence":intelligence,"dividend_metadata":dividend_metadata,"lookthrough":resolved["records"],"unresolved_lookthrough":resolved["unresolved_records"],"fund_lookthrough":resolved,"fund_weights":fund_weights,"seasonality":{"monthly_income":monthly,"chart_available":any(monthly.values()),"message":"Estimated distribution of current annual portfolio income based on available historical dividend timing."},"historical_context":historical}

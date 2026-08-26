@@ -1045,7 +1045,7 @@ async def index() -> None:
             holdings=result.holdings or []
         if result.metrics_changed:
             metrics=result.metrics
-            yahoo_export_state.invalidate()
+            yahoo_export_state.invalidate_if_changed(metrics)
             render_holdings()
             for name in ("Portfolio Analysis","Portfolio Insights","Portfolio Health"):
                 loaded[name]=False;areas[name].clear()

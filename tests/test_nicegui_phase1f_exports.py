@@ -19,6 +19,7 @@ class NiceGuiPhase1FExportTests(unittest.TestCase):
             "investment_intelligence": [{"ticker": "CORE", "trailing_pe": 20}],
             "historical_context": [{"ticker": "CORE", "return_pct": 25}],
             "seasonality": {"monthly_income": {"Jan": 12.5}, "chart_available": True},
+            "dividend_metadata": [{"ticker": "CORE", "source": "Yahoo Finance", "data_type": "current_dividend_data", "dividend_yield_pct": 2.5}],
         }
         weights, external = yahoo_export_enrichment(yahoo)
         package = export_package(holdings, metrics, history=history, fund_weights=weights, external_context=external)
@@ -27,11 +28,13 @@ class NiceGuiPhase1FExportTests(unittest.TestCase):
         self.assertEqual(payload["supplemental_investment_intelligence"][0]["ticker"], "CORE")
         self.assertEqual(payload["historical_security_context"][0]["return_pct"], 25)
         self.assertEqual(payload["dividend_seasonality"]["monthly_income"]["Jan"], 12.5)
-        self.assertEqual(payload["dividend_data_metadata"]["source"], "Yahoo Finance")
+        self.assertEqual(payload["dividend_data_metadata"][0]["source"], "Yahoo Finance")
+        self.assertEqual(payload["dividend_data_metadata"][0]["dividend_yield_pct"], 2.5)
+        self.assertNotIn("cached_on_demand_intelligence", package["portfolio_export.md"])
         for value in ("CORE", "25", "Jan", "Yahoo Finance"):
             self.assertIn(value, package["portfolio_export.md"])
 
-    def test_enrichment_state_reuses_loaded_package_and_invalidates_on_metrics_change(self):
+    def test_enrichment_state_ignores_live_value_changes_but_tracks_enrichment_inputs(self):
         _, metrics, _, _, _ = self.inputs()
         package = {"fund_weights": {"FUND": {"Technology": 1.0}}, "investment_intelligence": []}
         state = YahooExportEnrichmentState()
@@ -39,10 +42,22 @@ class NiceGuiPhase1FExportTests(unittest.TestCase):
         self.assertIs(state.available(metrics.copy()), package)
         changed = metrics.copy()
         changed.loc[0, "current_price"] += 1
+        self.assertIs(state.available(changed), package)
+        changed.loc[0, "market_value"] += 100
+        self.assertIs(state.available(changed), package)
+        changed.loc[0, "sector"] = "Industrials"
+        state.invalidate_if_changed(changed)
         self.assertIsNone(state.available(changed))
-        weights, external = state.export_inputs(changed)
-        self.assertEqual(weights, {})
-        self.assertIn("not been loaded", external["notes"][0])
+        self.assertIsNone(state.package)
+
+    def test_enrichment_state_tracks_dividend_seasonality_income_and_shares_only_when_income_changes(self):
+        _, metrics, _, _, _ = self.inputs()
+        package = {"investment_intelligence": []}
+        state = YahooExportEnrichmentState(); state.retain(metrics, package)
+        shares_only = metrics.copy(); shares_only.loc[0, "shares"] += 1
+        self.assertIs(state.available(shares_only), package)
+        shares_only.loc[0, "annual_income"] += 2
+        self.assertIsNone(state.available(shares_only))
 
     def test_missing_yahoo_does_not_fabricate_data_and_persisted_research_is_retained(self):
         research = [{"ticker": "CORE", "source_type": "persisted_supplemental_research", "research_summary": "Verified fact."}]
@@ -63,7 +78,9 @@ class NiceGuiPhase1FExportTests(unittest.TestCase):
         self.assertNotIn("yahoo_intelligence_package", download)
         self.assertNotIn("clear_market_data_cache", download)
         self.assertIn("yahoo_export_state.retain(metrics, intelligence)", source)
-        self.assertIn("yahoo_export_state.invalidate()", source)
+        refresh = source[source.index("    async def refresh_data"):source.index("    async def refresh_after_holding_write")]
+        self.assertIn("yahoo_export_state.invalidate_if_changed(metrics)", refresh)
+        self.assertNotIn("yahoo_export_state.invalidate()", refresh)
 
     def holdings(self):
         return [
