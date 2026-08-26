@@ -156,15 +156,30 @@ def save_successful_analysis_snapshot(
     state: Any,
 ) -> AIAnalysisSnapshot | None:
     """Persist only a provider-validated, fully successful analysis state."""
-    if (
-        bool(getattr(state, "busy", False))
-        or str(getattr(state, "last_stage", "")) != "success"
-        or str(getattr(state, "error_message", "")).strip()
-        or not str(getattr(state, "result_markdown", "")).strip()
-    ):
+    if not is_successful_analysis_state(state):
         return None
     return service.save(
         str(getattr(state, "result_type", "")),
         str(getattr(state, "result_model", "")),
         str(getattr(state, "result_markdown", "")),
     )
+
+
+def is_successful_analysis_state(state: Any) -> bool:
+    """Use one success contract for snapshot persistence and current-result downloads."""
+    return not (
+        bool(getattr(state, "busy", False))
+        or str(getattr(state, "last_stage", "")) != "success"
+        or str(getattr(state, "error_message", "")).strip()
+        or not str(getattr(state, "result_markdown", "")).strip()
+    )
+
+
+def resolve_analysis_download(service: AIAnalysisSnapshotService, state: Any) -> str | None:
+    """Resolve display-ready Markdown without creating or modifying persistence."""
+    if is_successful_analysis_state(state):
+        return str(getattr(state, "result_markdown", ""))
+    snapshot = service.load()
+    if snapshot is not None and snapshot.result_markdown.strip():
+        return snapshot.result_markdown
+    return None

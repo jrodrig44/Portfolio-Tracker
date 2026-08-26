@@ -21,7 +21,7 @@ from nicegui import app, run, ui
 from nicegui_app.process_lifecycle import ShutdownInProgress, lifecycle, start_launcher_watchdog, start_shutdown_request_watcher
 from nicegui_app.research_worker_lifecycle import start_research_worker, stop_research_worker
 from nicegui_app.services.ai_context import AIAnalysisState,ai_options,run_ai_analysis
-from nicegui_app.services.ai_snapshot import AIAnalysisSnapshotService, friendly_utc_timestamp, save_successful_analysis_snapshot
+from nicegui_app.services.ai_snapshot import AIAnalysisSnapshotService, friendly_utc_timestamp, resolve_analysis_download, save_successful_analysis_snapshot
 from nicegui_app.services.appearance import APPEARANCE_OPTIONS, APPEARANCE_STORAGE_KEY, restore_appearance
 from nicegui_app.services.analysis import analysis_package
 from nicegui_app.services.configuration import DB_REFRESH_INTERVAL_SECONDS
@@ -817,10 +817,16 @@ async def index() -> None:
                 output.set_content("No analysis has been run yet. Choose an analysis type and select Analyze when you are ready.")
                 status.set_text("")
                 context_size.set_text("")
+            def download_analysis() -> None:
+                markdown = resolve_analysis_download(snapshot_service, state)
+                if markdown is None:
+                    ui.notify("No AI analysis is available to download.", type="warning")
+                    return
+                ui.download(markdown.encode("utf-8"), "ai_analysis.md")
             with ui.element("div").classes(RESPONSIVE_ACTIONS):
                 button = ui.button("Analyze", on_click=analyze, icon="auto_awesome", color="primary").classes("w-full sm:w-auto min-h-11")
                 ui.button("Clear analysis", icon="clear", on_click=clear_analysis).classes("w-full sm:w-auto min-h-11")
-                ui.button("Download Markdown", icon="download", on_click=lambda: ui.download(state.result_markdown.encode("utf-8"), "ai_analysis.md")).classes("w-full sm:w-auto min-h-11")
+                ui.button("Download Markdown", icon="download", on_click=download_analysis).classes("w-full sm:w-auto min-h-11")
             render_snapshot()
         loaded["AI Analysis"] = True
 

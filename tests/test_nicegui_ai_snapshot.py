@@ -15,6 +15,7 @@ from nicegui_app.services.ai_snapshot import (
     AIAnalysisSnapshotService,
     SNAPSHOT_SCHEMA_VERSION,
     friendly_utc_timestamp,
+    resolve_analysis_download,
     save_successful_analysis_snapshot,
 )
 from portfolio_ai import AIAnalysisState
@@ -69,6 +70,47 @@ class NiceGuiAIAnalysisSnapshotTests(unittest.TestCase):
 
         self.assertEqual(another_browser.load().result_markdown, "# Shared result")
         self.assertEqual(another_browser.count(), 1)
+
+    def test_download_prefers_current_success_over_older_snapshot(self) -> None:
+        self.service.save("Old", "old-model", "# Persisted result")
+        state = self.successful_state("# Current result")
+
+        self.assertEqual(resolve_analysis_download(self.service, state), "# Current result")
+
+    def test_download_falls_back_to_exact_snapshot_after_current_is_cleared(self) -> None:
+        expected = "# Persisted result\n\nExact saved body."
+        self.service.save("Risk Analysis", "model", expected)
+        state = self.successful_state("# Current result")
+        state.clear()
+
+        self.assertEqual(resolve_analysis_download(self.service, state), expected)
+
+    def test_failed_incomplete_and_busy_current_states_do_not_override_snapshot(self) -> None:
+        self.service.save("Prior", "model", "# Last known good")
+        states = (
+            AIAnalysisState(last_stage="error", error_message="failed", result_markdown="# Partial"),
+            AIAnalysisState(last_stage="preparing", result_markdown="# Partial"),
+            AIAnalysisState(last_stage="success", busy=True, result_markdown="# Partial"),
+            AIAnalysisState(last_stage="success", error_message="failed", result_markdown="# Partial"),
+        )
+
+        for state in states:
+            with self.subTest(stage=state.last_stage, busy=state.busy):
+                self.assertEqual(resolve_analysis_download(self.service, state), "# Last known good")
+
+    def test_no_download_when_current_and_snapshot_are_unavailable(self) -> None:
+        state = AIAnalysisState()
+        self.assertIsNone(resolve_analysis_download(self.service, state))
+        self.service.save("Risk Analysis", "model", "# Saved")
+        self.assertTrue(self.service.clear())
+        self.assertIsNone(resolve_analysis_download(self.service, state))
+
+    def test_snapshot_download_survives_service_and_view_recreation(self) -> None:
+        self.service.save("Risk Analysis", "model", "# Recreated view result")
+        recreated_service = AIAnalysisSnapshotService(self.db_path)
+        recreated_state = AIAnalysisState()
+
+        self.assertEqual(resolve_analysis_download(recreated_service, recreated_state), "# Recreated view result")
 
     def test_timestamp_is_stored_in_utc_and_has_friendly_fallback(self) -> None:
         local_time = datetime(2026, 8, 22, 16, 18, tzinfo=timezone(timedelta(hours=-4)))
@@ -158,6 +200,10 @@ class NiceGuiAIAnalysisSnapshotTests(unittest.TestCase):
         summary = source.split("with ui.card().classes(\"w-full min-w-0 overflow-hidden p-0\")", 1)[1].split("async def analyze", 1)[0]
         self.assertNotIn("ui.markdown(snapshot.result_markdown)", summary)
         self.assertIn("Intl.DateTimeFormat", source)
+        self.assertIn('on_click=download_analysis', source)
+        self.assertIn('resolve_analysis_download(snapshot_service, state)', source)
+        self.assertIn('No AI analysis is available to download.', source)
+        self.assertNotIn('ui.download(state.result_markdown.encode("utf-8")', source)
 
 
 if __name__ == "__main__":
