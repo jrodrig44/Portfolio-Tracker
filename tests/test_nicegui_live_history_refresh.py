@@ -91,6 +91,23 @@ class NiceGuiLiveHistoryRefreshTests(unittest.TestCase):
                     ).fetchone()[0]
                 self.assertEqual(count, 0)
 
+    def test_transient_incomplete_prices_preserve_metrics_then_recover(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            portfolio, history_db = self.databases(Path(directory))
+            market_loader = Mock(side_effect=[({"ABC": 50.0}, {}), ({}, {}), ({"ABC": 60.0}, {})])
+            coordinator = ReadOnlyRefreshCoordinator(portfolio, history_db, market_loader=market_loader)
+
+            good = coordinator.refresh()
+            transient = coordinator.refresh()
+            recovered = coordinator.refresh()
+
+            self.assertFalse(transient.metrics_changed)
+            self.assertTrue(transient.metrics.equals(good.metrics))
+            self.assertFalse(transient.live_snapshot_changed)
+            self.assertTrue(recovered.metrics_changed)
+            self.assertFalse(recovered.metrics.equals(good.metrics))
+            self.assertTrue(recovered.live_snapshot_changed)
+
     def test_loaded_history_is_rerendered_when_coordinator_reports_change(self) -> None:
         source = (ROOT / "nicegui_app" / "main.py").read_text(encoding="utf-8")
         refresh_block = source[source.index("    async def refresh_data"):source.index("    async def refresh_after_holding_write")]

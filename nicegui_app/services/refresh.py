@@ -52,13 +52,17 @@ class ReadOnlyRefreshCoordinator:
         prices,yields=(None,None)
         if self.market_loader and self._holdings:
             prices,yields=self.market_loader([row.get("ticker","") for row in self._holdings])
-        recalculated=metrics_frame(self._holdings,prices,yields) if self._holdings else pd.DataFrame()
-        metrics_changed=self._metrics is None or not recalculated.equals(self._metrics)
-        self._metrics=recalculated
         priced_tickers={str(row.get("ticker","")).strip().upper() for row in self._holdings if _positive_number(row.get("shares",0))}
         valid_live_prices={str(ticker).strip().upper() for ticker,value in (prices or {}).items() if _positive_number(value)}
+        market_data_complete=not self.market_loader or not priced_tickers or priced_tickers.issubset(valid_live_prices)
+        if not market_data_complete and self._metrics is not None:
+            recalculated=self._metrics
+        else:
+            recalculated=metrics_frame(self._holdings,prices,yields) if self._holdings else pd.DataFrame()
+        metrics_changed=self._metrics is None or not recalculated.equals(self._metrics)
+        self._metrics=recalculated
         live_snapshot_changed=False
-        snapshot_attempted=bool(self.market_loader and priced_tickers and priced_tickers.issubset(valid_live_prices))
+        snapshot_attempted=bool(self.market_loader and priced_tickers and market_data_complete)
         if snapshot_attempted:
             live_snapshot_changed=self.snapshot_persister(recalculated,self.history_path)=="Updated"
         final_history_fp=database_fingerprint(self.history_path) if snapshot_attempted else history_fp

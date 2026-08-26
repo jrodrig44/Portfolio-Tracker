@@ -31,6 +31,7 @@ from nicegui_app.services.health import health_package
 from nicegui_app.services.history import history_package
 from nicegui_app.services.insights import insights_package
 from nicegui_app.services.portfolio_data import DEFAULT_HISTORY_RANGE,HISTORY_RANGE_OPTIONS,portfolio_summary
+from nicegui_app.services.page_runtime import PageRefreshGuard, client_is_alive
 from nicegui_app.services.refresh import ReadOnlyRefreshCoordinator
 from nicegui_app.services.ui_state import PageUIState, refresh_view_plan
 from nicegui_app.services.yahoo import clear_market_data_cache,current_market_data,yahoo_intelligence_package
@@ -201,6 +202,7 @@ async def remove_selected_aggrid_rows(grid: Any) -> int:
 
 @ui.page("/")
 async def index() -> None:
+    page_client = ui.context.client
     ui.add_head_html(
         '<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">'
         '<link rel="icon" type="image/png" sizes="32x32" href="/branding/favicon-32x32.png">'
@@ -217,6 +219,7 @@ async def index() -> None:
     history_range = ui_state.history_range
     metrics = None
     coordinator = ReadOnlyRefreshCoordinator(market_loader=current_market_data)
+    refresh_guard = PageRefreshGuard(lifecycle)
     holdings_writer = HoldingsWriteService(coordinator.portfolio_path)
     snapshot_service = AIAnalysisSnapshotService(coordinator.portfolio_path)
     statement_service = StatementHistoryService(db_path=coordinator.history_path)
@@ -1157,9 +1160,14 @@ async def index() -> None:
         elif name == "System": render_system()
 
     tabs.on_value_change(navigate)
-    async def refresh_data(force: bool = False) -> None:
+    async def refresh_data(force: bool = False, *, timer_tick: bool = False) -> None:
         nonlocal holdings,history,metrics
-        result = await run.io_bound(coordinator.refresh,force)
+        result = await refresh_guard.run(
+            lambda: run.io_bound(coordinator.refresh, force),
+            wait_if_busy=not timer_tick,
+        )
+        if result is None or not client_is_alive(page_client, lifecycle):
+            return
         if not result.portfolio_changed and not result.history_changed and not result.metrics_changed:
             return
         if result.portfolio_changed:
@@ -1182,10 +1190,13 @@ async def index() -> None:
                 ui.label("Data changed; this section will refresh when opened.").classes("text-gray-500 dark:text-gray-400")
         if result.history_changed and ui_state.selected_navigation == "History":
             render_history(history_range)
-        status.set_text(f"Refreshed {len(holdings)} holdings and {len(history)} history points")
+        if client_is_alive(page_client, lifecycle):
+            status.set_text(f"Refreshed {len(holdings)} holdings and {len(history)} history points")
     async def refresh_after_holding_write() -> None:
         """Reload writes and invalidate every holdings-derived lazy view."""
         await refresh_data(True)
+        if not client_is_alive(page_client, lifecycle):
+            return
         for name in ("Portfolio Analysis", "AI Analysis", "Portfolio Insights", "Portfolio Health", "Supplemental Research"):
             loaded[name] = False
             if name != ui_state.selected_navigation:
@@ -1197,7 +1208,11 @@ async def index() -> None:
     async def refresh_history_after_statement_write() -> None:
         """Reload only history-derived state; do not reload holdings or Yahoo data."""
         nonlocal history
+        if lifecycle.is_shutting_down:
+            return
         history = await run.io_bound(statement_service.performance_history)
+        if not client_is_alive(page_client, lifecycle):
+            return
         if loaded["History"]:
             render_history(history_range)
         loaded["AI Analysis"] = False
@@ -1206,17 +1221,25 @@ async def index() -> None:
             ui.label("Statement history changed; prior AI history context is stale and will refresh when opened.").classes("text-gray-500 dark:text-gray-400")
         status.set_text(f"History refreshed with {len(history)} points; holdings were not reloaded")
     refresh_button.on_click(lambda: refresh_data(True))
-    ui.timer(DB_REFRESH_INTERVAL_SECONDS,lambda: refresh_data(False))
+    refresh_timer = ui.timer(DB_REFRESH_INTERVAL_SECONDS, lambda: refresh_data(False, timer_tick=True))
+    page_client.on_disconnect(refresh_timer.deactivate)
     try:
-        initial=await run.io_bound(coordinator.refresh,True)
+        initial = await refresh_guard.run(
+            lambda: run.io_bound(coordinator.refresh, True),
+            wait_if_busy=True,
+        )
+        if initial is None or not client_is_alive(page_client, lifecycle):
+            return
         holdings=initial.holdings or [];history=initial.history or [];metrics=initial.metrics
         render_holdings()
         status.set_text(f"Loaded {len(holdings)} holdings and {len(history)} history points")
     except Exception as exc:
-        status.set_text("Unable to load the read-only portfolio sources.")
-        ui.notify(str(exc), type="negative", timeout=0)
+        if client_is_alive(page_client, lifecycle):
+            status.set_text("Unable to load the read-only portfolio sources.")
+            ui.notify(str(exc), type="negative", timeout=0)
     finally:
-        spinner.set_visibility(False)
+        if client_is_alive(page_client, lifecycle):
+            spinner.set_visibility(False)
 
 
 if __name__ in {"__main__", "__mp_main__"}:
