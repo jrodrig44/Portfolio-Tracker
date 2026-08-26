@@ -132,6 +132,21 @@ def format_table_records(records: Iterable[dict[str, Any]]) -> tuple[list[dict[s
     return columns, rows
 
 
+def dividend_seasonality_chart_options(monthly_income: dict[str, Any]) -> dict[str, Any]:
+    """Build presentation-only chart options for estimated monthly income dollars."""
+    months = list(monthly_income)
+    values = [float(monthly_income[month] or 0.0) for month in months]
+    currency_formatter = "value => '$' + Number(value).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})"
+    return {
+        "title": {"text": "Dividend Seasonality", "left": "center"},
+        "tooltip": {"trigger": "axis", ":valueFormatter": currency_formatter},
+        "grid": {"left": 64, "right": 20, "top": 56, "bottom": 64, "containLabel": True},
+        "xAxis": {"type": "category", "name": "Month", "nameLocation": "middle", "nameGap": 36, "data": months},
+        "yAxis": {"type": "value", "name": "Estimated Dividend Income", "axisLabel": {"formatter": "${value}"}},
+        "series": [{"name": "Estimated Dividend Income", "type": "bar", "data": values}],
+    }
+
+
 RESPONSIVE_CARD_GRID = "w-full grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3"
 SYSTEM_CARD_GRID = "w-full max-w-full grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3"
 SYSTEM_CARD = "w-full min-w-0 max-w-full h-auto py-3"

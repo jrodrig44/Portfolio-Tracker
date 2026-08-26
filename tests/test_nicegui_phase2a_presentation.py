@@ -8,6 +8,7 @@ from nicegui_app.services.formatting import (
     RESPONSIVE_ACTIONS,
     RESPONSIVE_CARD_GRID,
     SCROLL_TABLE,
+    dividend_seasonality_chart_options,
     format_count,
     format_currency,
     format_percentage,
@@ -59,6 +60,19 @@ class NiceGuiPhase2APresentationTests(unittest.TestCase):
         self.assertNotIn("{", nested_rows[0]["details"])
         self.assertIn("Technology", nested_rows[0]["details"])
         self.assertIn("40.80%", nested_rows[0]["details"])
+
+    def test_dividend_seasonality_chart_explains_and_labels_income_dollars(self) -> None:
+        options = dividend_seasonality_chart_options({"Jan": 214.94887198997495, "Feb": 0})
+        self.assertEqual(options["title"]["text"], "Dividend Seasonality")
+        self.assertEqual(options["xAxis"]["name"], "Month")
+        self.assertEqual(options["yAxis"]["name"], "Estimated Dividend Income")
+        self.assertEqual(options["series"][0]["data"], [214.94887198997495, 0.0])
+        self.assertIn("minimumFractionDigits: 2", options["tooltip"][":valueFormatter"])
+        self.assertEqual(options["yAxis"]["axisLabel"]["formatter"], "${value}")
+
+        source = (ROOT / "nicegui_app" / "main.py").read_text(encoding="utf-8")
+        self.assertIn("Dividend Seasonality shows how your portfolio's estimated annual dividend income", source)
+        self.assertIn("dividend_seasonality_chart_options(monthly)", source)
 
     def test_raw_json_presenters_are_removed_from_user_sections(self) -> None:
         source = (ROOT / "nicegui_app" / "main.py").read_text(encoding="utf-8")

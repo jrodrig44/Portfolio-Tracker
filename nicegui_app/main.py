@@ -26,7 +26,7 @@ from nicegui_app.services.appearance import APPEARANCE_OPTIONS, APPEARANCE_STORA
 from nicegui_app.services.analysis import analysis_package
 from nicegui_app.services.configuration import DB_REFRESH_INTERVAL_SECONDS
 from nicegui_app.services.exports import YahooExportEnrichmentState,export_package
-from nicegui_app.services.formatting import CONFIRM_DIALOG_CARD, DIALOG_CARD, EMPTY_STATE, FULL_WIDTH_CONTROL, RESPONSIVE_ACTIONS, RESPONSIVE_CARD_GRID, SAFE_RICH_OUTPUT, SCROLL_TABLE, SNAPSHOT_VIEWER_CARD, SYSTEM_CARD, SYSTEM_CARD_GRID, SYSTEM_LABEL, SYSTEM_PATH_VALUE, SYSTEM_VALUE, format_count, format_currency, format_field_value, format_percentage, format_score, format_status, format_table_records, human_label
+from nicegui_app.services.formatting import CONFIRM_DIALOG_CARD, DIALOG_CARD, EMPTY_STATE, FULL_WIDTH_CONTROL, RESPONSIVE_ACTIONS, RESPONSIVE_CARD_GRID, SAFE_RICH_OUTPUT, SCROLL_TABLE, SNAPSHOT_VIEWER_CARD, SYSTEM_CARD, SYSTEM_CARD_GRID, SYSTEM_LABEL, SYSTEM_PATH_VALUE, SYSTEM_VALUE, dividend_seasonality_chart_options, format_count, format_currency, format_field_value, format_percentage, format_score, format_status, format_table_records, human_label
 from nicegui_app.services.health import health_package
 from nicegui_app.services.history import history_package
 from nicegui_app.services.insights import insights_package
@@ -655,7 +655,8 @@ async def index() -> None:
                                 seasonality = intelligence["seasonality"]
                                 if seasonality.get("chart_available"):
                                     monthly = seasonality.get("monthly_income", {})
-                                    ui.echart({"grid": {"left": 48, "right": 12, "top": 20, "bottom": 36, "containLabel": True}, "xAxis": {"type": "category", "data": list(monthly)}, "yAxis": {"type": "value"}, "series": [{"name": "Estimated income", "type": "bar", "data": list(monthly.values())}]}).classes("w-full min-w-0 h-64 sm:h-80")
+                                    ui.label("Dividend Seasonality shows how your portfolio's estimated annual dividend income is distributed throughout the year based on expected payment timing. Taller bars indicate months when more dividend income is expected. This estimate uses available dividend data and may differ from actual payments.").classes("w-full text-sm leading-relaxed text-gray-600 dark:text-gray-300")
+                                    ui.echart(dividend_seasonality_chart_options(monthly)).classes("w-full min-w-0 h-64 sm:h-80")
                                 else:
                                     ui.label(str(seasonality.get("message", "Dividend seasonality is unavailable."))).classes("text-gray-500 dark:text-gray-400")
                         except Exception as exc:
