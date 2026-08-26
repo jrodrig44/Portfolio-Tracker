@@ -8,9 +8,12 @@ from nicegui_app.services.formatting import (
     CONFIRM_DIALOG_CARD,
     DIALOG_CARD,
     EMPTY_STATE,
+    RICH_OUTPUT_CSS,
     RESPONSIVE_ACTIONS,
     SAFE_RICH_OUTPUT,
     SCROLL_TABLE,
+    SNAPSHOT_RICH_OUTPUT,
+    SNAPSHOT_VIEWER_BODY,
     SNAPSHOT_VIEWER_CARD,
 )
 from nicegui_app.services.ui_state import PageUIState, refresh_view_plan
@@ -48,10 +51,16 @@ class NiceGUIPhase2HPolishTests(unittest.TestCase):
         self.assertIn("96vw", SNAPSHOT_VIEWER_CARD)
         self.assertIn("72rem", SNAPSHOT_VIEWER_CARD)
         self.assertIn("90dvh", SNAPSHOT_VIEWER_CARD)
+        self.assertIn("h-[90dvh]", SNAPSHOT_VIEWER_CARD)
+        self.assertIn("max-w-[72rem]", SNAPSHOT_VIEWER_CARD)
         self.assertIn("overflow-hidden", SNAPSHOT_VIEWER_CARD)
         self.assertIn("flex flex-col", SNAPSHOT_VIEWER_CARD)
         self.assertNotIn("overflow-y-auto", SNAPSHOT_VIEWER_CARD)
         self.assertIn("dark:bg-gray-900", SNAPSHOT_VIEWER_CARD)
+        self.assertIn("flex-1", SNAPSHOT_VIEWER_BODY)
+        self.assertIn("min-h-0", SNAPSHOT_VIEWER_BODY)
+        self.assertIn("overflow-y-auto", SNAPSHOT_VIEWER_BODY)
+        self.assertIn("overflow-x-hidden", SNAPSHOT_VIEWER_BODY)
         self.assertIn("90dvh", CONFIRM_DIALOG_CARD)
         self.assertGreaterEqual(MAIN.count("classes(DIALOG_CARD)"), 1)
         self.assertGreaterEqual(MAIN.count("classes(CONFIRM_DIALOG_CARD)"), 1)
@@ -62,8 +71,12 @@ class NiceGUIPhase2HPolishTests(unittest.TestCase):
     def test_tables_markdown_paths_and_charts_are_overflow_safe(self) -> None:
         self.assertIn("overflow-x-auto", SCROLL_TABLE)
         self.assertIn("min-w-0", SAFE_RICH_OUTPUT)
-        self.assertIn("safe-rich-output pre", MAIN)
-        self.assertIn("overflow-wrap: anywhere", MAIN)
+        self.assertIn("snapshot-rich-output", SNAPSHOT_RICH_OUTPUT)
+        for selector in (".snapshot-rich-output table", ".snapshot-rich-output pre", ".snapshot-rich-output code", ".snapshot-rich-output img", ".snapshot-rich-output a"):
+            self.assertIn(selector, RICH_OUTPUT_CSS)
+        self.assertIn("overflow-x: auto", RICH_OUTPUT_CSS)
+        self.assertIn("overflow-wrap: anywhere", RICH_OUTPUT_CSS)
+        self.assertIn("max-width: 100%", RICH_OUTPUT_CSS)
         self.assertGreaterEqual(MAIN.count("classes(SCROLL_TABLE)"), 2)
         self.assertGreaterEqual(MAIN.count("classes(SAFE_RICH_OUTPUT)"), 2)
         self.assertIn('classes("w-full min-w-0 h-72 sm:h-96")', MAIN)

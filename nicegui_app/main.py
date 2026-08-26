@@ -26,7 +26,7 @@ from nicegui_app.services.appearance import APPEARANCE_OPTIONS, APPEARANCE_STORA
 from nicegui_app.services.analysis import analysis_package
 from nicegui_app.services.configuration import DB_REFRESH_INTERVAL_SECONDS
 from nicegui_app.services.exports import YahooExportEnrichmentState,export_package
-from nicegui_app.services.formatting import CONFIRM_DIALOG_CARD, DIALOG_CARD, EMPTY_STATE, FULL_WIDTH_CONTROL, RESPONSIVE_ACTIONS, RESPONSIVE_CARD_GRID, SAFE_RICH_OUTPUT, SCROLL_TABLE, SNAPSHOT_VIEWER_CARD, SYSTEM_CARD, SYSTEM_CARD_GRID, SYSTEM_LABEL, SYSTEM_PATH_VALUE, SYSTEM_VALUE, dividend_seasonality_chart_options, format_count, format_currency, format_field_value, format_percentage, format_score, format_status, format_table_records, human_label
+from nicegui_app.services.formatting import CONFIRM_DIALOG_CARD, DIALOG_CARD, EMPTY_STATE, FULL_WIDTH_CONTROL, RESPONSIVE_ACTIONS, RESPONSIVE_CARD_GRID, RICH_OUTPUT_CSS, SAFE_RICH_OUTPUT, SCROLL_TABLE, SNAPSHOT_RICH_OUTPUT, SNAPSHOT_VIEWER_BODY, SNAPSHOT_VIEWER_CARD, SYSTEM_CARD, SYSTEM_CARD_GRID, SYSTEM_LABEL, SYSTEM_PATH_VALUE, SYSTEM_VALUE, dividend_seasonality_chart_options, format_count, format_currency, format_field_value, format_percentage, format_score, format_status, format_table_records, human_label
 from nicegui_app.services.health import health_package
 from nicegui_app.services.history import history_package
 from nicegui_app.services.insights import insights_package
@@ -197,7 +197,7 @@ async def index() -> None:
     appearance_storage = app.storage.user
     appearance_mode = restore_appearance(appearance_storage)
     ui.dark_mode(value=appearance_mode).bind_value(appearance_storage, APPEARANCE_STORAGE_KEY)
-    ui.add_css(".safe-rich-output, .safe-rich-output * { max-width: 100%; overflow-wrap: anywhere; word-break: break-word; } .safe-rich-output pre { overflow-x: auto; white-space: pre-wrap; }")
+    ui.add_css(RICH_OUTPUT_CSS)
     ui.query("body").classes("overflow-x-hidden")
     holdings: list[dict[str, Any]] = []
     history: list[dict[str, Any]] = []
@@ -802,8 +802,8 @@ async def index() -> None:
                                     ui.label("Model").classes("text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400")
                                     ui.label(snapshot.model).classes("break-words")
                             ui.separator().classes("shrink-0")
-                            with ui.element("div").classes("w-full flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain"):
-                                ui.markdown(snapshot.result_markdown).classes(SAFE_RICH_OUTPUT)
+                            with ui.element("div").classes(SNAPSHOT_VIEWER_BODY):
+                                ui.markdown(snapshot.result_markdown).classes(SNAPSHOT_RICH_OUTPUT)
                             with ui.element("div").classes(f"{RESPONSIVE_ACTIONS} shrink-0"):
                                 ui.button("Clear Snapshot…", icon="delete_outline", on_click=lambda: confirm_clear_snapshot(viewer)).props("outline color=negative").classes("w-full sm:w-auto min-h-11")
                                 ui.button("Close", on_click=viewer.close).props("outline").classes("w-full sm:w-auto min-h-11")
