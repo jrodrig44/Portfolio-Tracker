@@ -112,8 +112,11 @@ class NiceGuiLiveHistoryRefreshTests(unittest.TestCase):
         source = (ROOT / "nicegui_app" / "main.py").read_text(encoding="utf-8")
         refresh_block = source[source.index("    async def refresh_data"):source.index("    async def refresh_after_holding_write")]
         self.assertIn('if result.history_changed:', refresh_block)
-        self.assertIn('if result.history_changed and ui_state.selected_navigation == "History":', refresh_block)
-        self.assertIn("render_history(history_range)", refresh_block)
+        self.assertIn('await invalidate_sections(', refresh_block)
+        self.assertIn('plan["stale"]', refresh_block)
+        dispatcher = source[source.index("    async def refresh_section"):source.index("    async def navigate")]
+        self.assertIn('name == "History" and not loaded["History"]', dispatcher)
+        self.assertIn("render_history(history_range)", dispatcher)
 
 
 if __name__ == "__main__":

@@ -241,11 +241,14 @@ class NiceGUIPhase2GWriteSafetyTests(unittest.TestCase):
             self.assertEqual(connection.execute("SELECT name, sql FROM sqlite_master WHERE type='table' ORDER BY name").fetchall(), history_schema)
         source = (Path(__file__).parents[1] / "nicegui_app" / "main.py").read_text(encoding="utf-8")
         holding_refresh = source.split("async def refresh_after_holding_write", 1)[1].split("async def refresh_history_after_statement_write", 1)[0]
-        for area in ("Portfolio Analysis", "AI Analysis", "Portfolio Insights", "Portfolio Health", "Supplemental Research"):
-            self.assertIn(area, holding_refresh)
+        self.assertIn("await refresh_data(True)", holding_refresh)
+        self.assertIn('("AI Analysis", "Supplemental Research")', holding_refresh)
+        refresh_plan = source.split("async def refresh_data", 1)[1].split("async def refresh_after_holding_write", 1)[0]
+        self.assertIn('plan["stale"]', refresh_plan)
+        self.assertIn("await invalidate_sections", refresh_plan)
         history_refresh = source.split("async def refresh_history_after_statement_write", 1)[1].split("refresh_button.on_click", 1)[0]
-        self.assertIn("render_history(history_range)", history_refresh)
-        self.assertIn('loaded["AI Analysis"] = False', history_refresh)
+        self.assertIn('("History", "AI Analysis")', history_refresh)
+        self.assertIn("await invalidate_sections", history_refresh)
         self.assertNotIn("current_market_data", history_refresh)
         self.assertNotIn("coordinator.refresh", history_refresh)
         self.assertEqual(source.count('ui.button("Refresh Data"'), 1)

@@ -1146,18 +1146,35 @@ async def index() -> None:
             system_detail_cards([(name, format_interval(seconds), False) for name, seconds in package["cache_intervals_seconds"].items()])
         loaded["System"] = True
 
-    async def navigate(event: Any) -> None:
-        name = str(event.value)
-        ui_state.selected_navigation = name
+    async def refresh_section(name: str) -> None:
+        """Render one section through its existing lazy-render entry point."""
         if name == "Holdings" and not loaded["Holdings"]: render_holdings()
         elif name == "Portfolio Analysis": await render_analysis()
         elif name == "AI Analysis": render_ai()
         elif name == "Portfolio Insights": await render_insights()
         elif name == "Portfolio Health": await render_health()
-        elif name == "History" and not loaded["History"]: render_history()
+        elif name == "History" and not loaded["History"]: render_history(history_range)
         elif name == "Statement History": await render_statement_history()
         elif name == "Supplemental Research": await render_supplemental_research()
         elif name == "System": render_system()
+
+    async def invalidate_sections(names: Any, message: str) -> None:
+        """Mark derived sections stale, immediately rebuilding only the visible one."""
+        stale_names = tuple(dict.fromkeys(names))
+        for name in stale_names:
+            loaded[name] = False
+        for name in stale_names:
+            if name == ui_state.selected_navigation:
+                await refresh_section(name)
+                continue
+            areas[name].clear()
+            with areas[name]:
+                ui.label(message).classes("text-gray-500 dark:text-gray-400")
+
+    async def navigate(event: Any) -> None:
+        name = str(event.value)
+        ui_state.selected_navigation = name
+        await refresh_section(name)
 
     tabs.on_value_change(navigate)
     async def refresh_data(force: bool = False, *, timer_tick: bool = False) -> None:
@@ -1182,14 +1199,10 @@ async def index() -> None:
             metrics_changed=result.metrics_changed,
             history_changed=result.history_changed,
         )
-        for name in plan["stale"]:
-            loaded[name] = False
-        for name in plan["inactive"]:
-            areas[name].clear()
-            with areas[name]:
-                ui.label("Data changed; this section will refresh when opened.").classes("text-gray-500 dark:text-gray-400")
-        if result.history_changed and ui_state.selected_navigation == "History":
-            render_history(history_range)
+        await invalidate_sections(
+            plan["stale"],
+            "Data changed; this section will refresh when opened.",
+        )
         if client_is_alive(page_client, lifecycle):
             status.set_text(f"Refreshed {len(holdings)} holdings and {len(history)} history points")
     async def refresh_after_holding_write() -> None:
@@ -1197,14 +1210,10 @@ async def index() -> None:
         await refresh_data(True)
         if not client_is_alive(page_client, lifecycle):
             return
-        for name in ("Portfolio Analysis", "AI Analysis", "Portfolio Insights", "Portfolio Health", "Supplemental Research"):
-            loaded[name] = False
-            if name != ui_state.selected_navigation:
-                areas[name].clear()
-                with areas[name]:
-                    ui.label("Holdings changed; prior prepared output is stale and this section will refresh when opened.").classes("text-gray-500 dark:text-gray-400")
-        if ui_state.selected_navigation == "Holdings":
-            render_holdings()
+        await invalidate_sections(
+            ("AI Analysis", "Supplemental Research"),
+            "Holdings changed; prior prepared output is stale and this section will refresh when opened.",
+        )
     async def refresh_history_after_statement_write() -> None:
         """Reload only history-derived state; do not reload holdings or Yahoo data."""
         nonlocal history
@@ -1213,12 +1222,10 @@ async def index() -> None:
         history = await run.io_bound(statement_service.performance_history)
         if not client_is_alive(page_client, lifecycle):
             return
-        if loaded["History"]:
-            render_history(history_range)
-        loaded["AI Analysis"] = False
-        areas["AI Analysis"].clear()
-        with areas["AI Analysis"]:
-            ui.label("Statement history changed; prior AI history context is stale and will refresh when opened.").classes("text-gray-500 dark:text-gray-400")
+        await invalidate_sections(
+            ("History", "AI Analysis"),
+            "Statement history changed; prior AI history context is stale and will refresh when opened.",
+        )
         status.set_text(f"History refreshed with {len(history)} points; holdings were not reloaded")
     refresh_button.on_click(lambda: refresh_data(True))
     refresh_timer = ui.timer(DB_REFRESH_INTERVAL_SECONDS, lambda: refresh_data(False, timer_tick=True))

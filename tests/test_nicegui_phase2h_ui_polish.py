@@ -138,6 +138,20 @@ class NiceGUIPhase2HPolishTests(unittest.TestCase):
         self.assertIn("History", forced["inactive"])
         self.assertEqual("AI Analysis", PageUIState(selected_navigation="AI Analysis").selected_navigation)
 
+    def test_invalidation_rerenders_visible_section_and_keeps_hidden_sections_lazy(self) -> None:
+        self.assertIn("async def invalidate_sections(names: Any, message: str)", MAIN)
+        self.assertIn("if name == ui_state.selected_navigation:", MAIN)
+        self.assertIn("await refresh_section(name)", MAIN)
+        self.assertIn("areas[name].clear()", MAIN)
+        self.assertIn("await invalidate_sections(\n            plan[\"stale\"]", MAIN)
+        self.assertNotIn('if result.history_changed and ui_state.selected_navigation == "History"', MAIN)
+
+    def test_write_refreshes_use_central_invalidation_without_duplicate_metric_renders(self) -> None:
+        self.assertIn('(\n            ("AI Analysis", "Supplemental Research"),', MAIN)
+        self.assertIn('(\n            ("History", "AI Analysis"),', MAIN)
+        self.assertNotIn('for name in ("Portfolio Analysis", "AI Analysis", "Portfolio Insights", "Portfolio Health", "Supplemental Research")', MAIN)
+        self.assertEqual(MAIN.count('"Data changed; this section will refresh when opened."'), 1)
+
     def test_phase_boundaries_and_canonical_runtime_remain_intact(self) -> None:
         self.assertIn('PORT = int(os.environ.get("PORTFOLIO_TRACKER_PORT", "8501"))', MAIN)
         self.assertEqual(MAIN.count('ui.button("Refresh Data"'), 1)
