@@ -32,6 +32,12 @@ def clear_market_data_cache() -> None:
     _cache.clear()
 
 
+def clear_price_cache() -> None:
+    """Invalidate current-price entries without discarding Yahoo enrichment data."""
+    for key in [key for key in _cache if key[1] == "prices"]:
+        _cache.pop(key, None)
+
+
 def ticker_price_history(ticker: str, period: str, interval: str = "1d") -> pd.DataFrame:
     """Load on-demand daily history through the application's Yahoo adapter."""
     return yf.Ticker(ticker).history(period=period, interval=interval, auto_adjust=False)

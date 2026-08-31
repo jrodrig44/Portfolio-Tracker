@@ -9,6 +9,7 @@ import math
 import pandas as pd
 
 from nicegui_app.services.calculations import metrics_frame
+from nicegui_app.services.market_refresh_lock import MARKET_REFRESH_LOCK
 from nicegui_app.services.portfolio_data import HISTORY_DB_PATH,PORTFOLIO_DB_PATH,load_history,load_holdings
 from shared_data_preparation import persist_live_snapshot_if_ready
 
@@ -45,6 +46,10 @@ class ReadOnlyRefreshCoordinator:
         self._holdings:list[dict[str,Any]]=[]
         self._metrics:pd.DataFrame|None=None
     def refresh(self,force:bool=False)->RefreshResult:
+        with MARKET_REFRESH_LOCK:
+            return self._refresh_locked(force)
+
+    def _refresh_locked(self,force:bool=False)->RefreshResult:
         portfolio_fp=database_fingerprint(self.portfolio_path);history_fp=database_fingerprint(self.history_path);portfolio_changed=force or portfolio_fp!=self.portfolio_fingerprint;history_changed=force or history_fp!=self.history_fingerprint
         holdings=self.holdings_loader(self.portfolio_path) if portfolio_changed else None
         if holdings is not None:self._holdings=holdings

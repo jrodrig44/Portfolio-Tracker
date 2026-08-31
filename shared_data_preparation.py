@@ -12,6 +12,7 @@ from typing import Any, Callable
 import pandas as pd
 
 from nicegui_app.services.calculations import metrics_frame
+from nicegui_app.services.market_refresh_lock import MARKET_REFRESH_LOCK
 from nicegui_app.services.portfolio_data import load_history, load_holdings
 from stash_history import upsert_live_portfolio_snapshot
 
@@ -138,18 +139,19 @@ def prepare_shared_data(
             raise SharedDataPreparationError("Holdings read", str(exc)) from exc
 
         tickers = [str(row.get("ticker", "")).strip().upper() for row in holdings if str(row.get("ticker", "")).strip()]
-        try:
-            if market_cache_clearer is not None:
-                market_cache_clearer()
-            prices, yields = market_loader(tickers) if tickers else ({}, {})
-            metrics = metrics_builder(holdings, prices, yields) if holdings else pd.DataFrame()
-        except Exception as exc:
-            raise SharedDataPreparationError("Market refresh", str(exc)) from exc
+        with MARKET_REFRESH_LOCK:
+            try:
+                if market_cache_clearer is not None:
+                    market_cache_clearer()
+                prices, yields = market_loader(tickers) if tickers else ({}, {})
+                metrics = metrics_builder(holdings, prices, yields) if holdings else pd.DataFrame()
+            except Exception as exc:
+                raise SharedDataPreparationError("Market refresh", str(exc)) from exc
 
-        try:
-            snapshot_status = persist_live_snapshot_if_ready(metrics, history_path, snapshot_writer=snapshot_writer)
-        except Exception as exc:
-            raise SharedDataPreparationError("Live snapshot", str(exc)) from exc
+            try:
+                snapshot_status = persist_live_snapshot_if_ready(metrics, history_path, snapshot_writer=snapshot_writer)
+            except Exception as exc:
+                raise SharedDataPreparationError("Live snapshot", str(exc)) from exc
 
         try:
             history_loader(history_path)

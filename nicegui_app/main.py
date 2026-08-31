@@ -20,6 +20,7 @@ ENVIRONMENT_STATUS = initialize_project_environment(PROJECT_ROOT)
 from nicegui import app, run, ui
 from nicegui_app.process_lifecycle import ShutdownInProgress, lifecycle, start_launcher_watchdog, start_shutdown_request_watcher
 from nicegui_app.research_worker_lifecycle import start_research_worker, stop_research_worker
+from nicegui_app.market_refresh_worker import start_market_refresh_worker, stop_market_refresh_worker
 from nicegui_app.services.ai_context import AIAnalysisState,ai_options,run_ai_analysis
 from nicegui_app.services.ai_snapshot import AIAnalysisSnapshotService, friendly_utc_timestamp, resolve_analysis_download, save_successful_analysis_snapshot
 from nicegui_app.services.appearance import APPEARANCE_OPTIONS, APPEARANCE_STORAGE_KEY, restore_appearance
@@ -71,6 +72,8 @@ HOLDING_NUMERIC_VALUE_PARSER = (
 
 app.on_startup(start_research_worker)
 app.on_shutdown(stop_research_worker)
+app.on_startup(start_market_refresh_worker)
+app.on_shutdown(stop_market_refresh_worker)
 app.add_static_files("/branding", STATIC_DIR)
 app.add_static_file(local_file=FAVICON_PATH, url_path="/favicon.ico")
 app.add_static_file(local_file=APPLE_TOUCH_ICON_PATH, url_path="/apple-touch-icon.png")
