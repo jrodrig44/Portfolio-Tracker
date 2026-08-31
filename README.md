@@ -6,7 +6,7 @@ Dividend Portfolio Tracker is a self-contained local NiceGUI application for man
 
 - Spreadsheet-style holdings management backed by local SQLite storage.
 - Yahoo Finance prices, dividend-yield estimates, and optional supplemental investment intelligence.
-- Server-maintained market values and live portfolio history, even with no browser connected.
+- Server-maintained market values and live portfolio history during market sessions, even with no browser connected.
 - Cost basis, unrealized gain/loss, yield on cost, portfolio yield, allocation, concentration, and weighted calculations.
 - Regular, special, and HD ESPP contribution tracking.
 - Growth projections, income estimates, milestones, dividend timing, insights, and methodology-based health views.
