@@ -5,8 +5,9 @@ import unittest
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
-from hd_espp_history import HDESPPHistoryService, HDTransaction, detect_document_family, match_custody_transfers, parse_hd_statement_text, transaction_fingerprint
+from hd_espp_history import HDESPPHistoryService, HDTransaction, detect_document_family, economic_share_ownership, match_custody_transfers, parse_hd_statement_text, reconcile_custody_transfers, transaction_fingerprint, transaction_record_type
 
 
 LEGACY = """The Home Depot, Inc ESPP - Employee Plan Statement
@@ -31,6 +32,19 @@ HOME DEPOT INC 5.3021 06/30/23 02/12/26 2,077.71 1,399.99 677.72
 
 
 class HDESPPHistoryTests(unittest.TestCase):
+    class _PDF:
+        def __init__(self, text: str):
+            self.pages = [type("Page", (), {"extract_text": lambda page: text})()]
+        def __enter__(self): return self
+        def __exit__(self, *args): return None
+
+    def _import_texts(self, service: HDESPPHistoryService, texts: dict[str, str]) -> dict[str, int]:
+        service.source_dir.mkdir(parents=True, exist_ok=True)
+        for name in texts:
+            (service.source_dir / name).write_bytes(texts[name].encode())
+        with patch("hd_espp_history.pdfplumber.open", side_effect=lambda path: self._PDF(texts[Path(path).name])):
+            return service.import_statements()
+
     def test_detection_and_legacy_precision(self) -> None:
         self.assertEqual(detect_document_family(LEGACY), "computershare_legacy")
         _, rows, issues = parse_hd_statement_text(LEGACY)
@@ -73,9 +87,96 @@ class HDESPPHistoryTests(unittest.TestCase):
                 connection.close()
 
     def test_transfer_matching_prevents_duplicate_economic_ownership(self) -> None:
-        outgoing = HDTransaction(date(2024, 7, 15), "TRANSFER_OUT", "Computershare", "ESPP", shares=Decimal("15"))
-        incoming = HDTransaction(date(2024, 7, 16), "TRANSFER_IN", "Merrill", "Brokerage", shares=Decimal("15"))
+        outgoing = HDTransaction(date(2024, 7, 15), "TRANSFER_OUT", "Computershare", "ESPP", shares=Decimal("15"), source_location="Computershare", destination_location="Merrill")
+        incoming = HDTransaction(date(2024, 7, 16), "TRANSFER_IN", "Merrill", "Brokerage", shares=Decimal("15"), source_location="External", destination_location="Merrill")
         self.assertEqual(len(match_custody_transfers([outgoing, incoming])), 1)
+        purchase = HDTransaction(date(2024, 6, 28), "ESPP_PURCHASE", "Computershare", "ESPP", shares=Decimal("15"))
+        self.assertEqual(economic_share_ownership([purchase]), economic_share_ownership([purchase, outgoing, incoming]))
+
+    def test_transfer_matching_requires_provenance_and_surfaces_ambiguity(self) -> None:
+        outgoing = HDTransaction(date(2024, 7, 15), "TRANSFER_OUT", "Computershare", "ESPP", shares=Decimal("15"), source_location="Computershare", destination_location="Merrill")
+        wrong = HDTransaction(date(2024, 7, 16), "TRANSFER_IN", "Other Broker", "Brokerage", shares=Decimal("15"), source_location="External", destination_location="Other Broker")
+        right = HDTransaction(date(2024, 7, 16), "TRANSFER_IN", "Merrill", "Brokerage", shares=Decimal("15"), source_location="Computershare", destination_location="Merrill")
+        self.assertEqual(match_custody_transfers([outgoing, wrong]), [])
+        self.assertEqual(match_custody_transfers([outgoing, wrong, right]), [(outgoing.transaction_fingerprint, right.transaction_fingerprint)])
+        second = HDTransaction(date(2024, 7, 17), "TRANSFER_IN", "Merrill", "Brokerage", shares=Decimal("15"), source_location="External", destination_location="Merrill", cost_basis=Decimal("5000"))
+        matches, issues = reconcile_custody_transfers([outgoing, right, second])
+        self.assertFalse(matches); self.assertEqual(len(issues), 1)
+
+    def test_cost_basis_can_disambiguate_transfer_candidates(self) -> None:
+        outgoing = HDTransaction(date(2024, 7, 15), "TRANSFER_OUT", "Computershare", "ESPP", shares=Decimal("15"), cost_basis=Decimal("4259.06"), source_location="Computershare", destination_location="Merrill")
+        exact = HDTransaction(date(2024, 7, 16), "TRANSFER_IN", "Merrill", "Brokerage", shares=Decimal("15"), cost_basis=Decimal("4259.06"), source_location="External", destination_location="Merrill")
+        other = HDTransaction(date(2024, 7, 17), "TRANSFER_IN", "Merrill", "Brokerage", shares=Decimal("15"), cost_basis=Decimal("5000"), source_location="External", destination_location="Merrill")
+        self.assertEqual(match_custody_transfers([outgoing, other, exact]), [(outgoing.transaction_fingerprint, exact.transaction_fingerprint)])
+
+    def test_section_completeness_flags_partial_parser_result(self) -> None:
+        partial = """The Home Depot, Inc ESPP - Employee Plan Statement
+Purchases
+Dividends
+15 Sep 2023 Dividend Reinvestment 11.08 0.44 10.64 326.887800 0.032549 5.334696
+"""
+        _, rows, issues = parse_hd_statement_text(partial)
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(any("Purchases" in issue for issue in issues))
+
+    def test_record_type_distinguishes_aggregate_sale_and_realized_lot(self) -> None:
+        _, rows, _ = parse_hd_statement_text(MERRILL)
+        aggregate = next(row for row in rows if row.source_account_type == "Brokerage")
+        lot = next(row for row in rows if row.source_account_type == "Realized lot")
+        self.assertEqual(transaction_record_type(aggregate), "Brokerage Transaction")
+        self.assertEqual(transaction_record_type(lot), "Realized Lot")
+
+    def test_authoritative_rebuild_replaces_stale_fields_and_is_repeatable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); service = HDESPPHistoryService(root / "pdfs", root / "history.sqlite")
+            self._import_texts(service, {"one.pdf": LEGACY})
+            corrected = LEGACY.replace("310.640000", "311.640000")
+            self._import_texts(service, {"one.pdf": corrected})
+            state = service.state()
+            purchase = next(row for row in state["transactions"] if row["transaction_type"] == "ESPP_PURCHASE")
+            self.assertEqual(purchase["fair_market_value"], "311.640000")
+            before = [(row["transaction_fingerprint"], row["fair_market_value"], row["fees"], row["notes"]) for row in state["transactions"]]
+            self._import_texts(service, {"one.pdf": corrected})
+            after = [(row["transaction_fingerprint"], row["fair_market_value"], row["fees"], row["notes"]) for row in service.state()["transactions"]]
+            self.assertEqual(before, after)
+
+    def test_removed_and_replaced_documents_leave_no_stale_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); service = HDESPPHistoryService(root / "pdfs", root / "history.sqlite")
+            self._import_texts(service, {"first.pdf": LEGACY, "second.pdf": EQUATE})
+            (service.source_dir / "first.pdf").unlink()
+            self._import_texts(service, {"second.pdf": EQUATE})
+            self.assertFalse(any(row["transaction_date"].startswith("2023") for row in service.state()["transactions"]))
+            replacement = MERRILL
+            (service.source_dir / "second.pdf").write_bytes(replacement.encode())
+            self._import_texts(service, {"second.pdf": replacement})
+            state = service.state()
+            self.assertFalse(any(row["transaction_type"] == "ESPP_PURCHASE" for row in state["transactions"]))
+            self.assertTrue(any(row["source_account_type"] == "Brokerage" for row in state["transactions"]))
+
+    def test_cumulative_documents_rebuild_to_one_canonical_transaction_set(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); service = HDESPPHistoryService(root / "pdfs", root / "history.sqlite")
+            result = self._import_texts(service, {"a.pdf": LEGACY, "b.pdf": LEGACY})
+            self.assertEqual(result["parsed"], 6)
+            self.assertEqual(result["inserted"], 3)
+
+    def test_service_rejects_concurrent_import(self) -> None:
+        service = HDESPPHistoryService()
+        self.assertTrue(service._import_lock.acquire(blocking=False))
+        try:
+            with self.assertRaisesRegex(RuntimeError, "already running"):
+                service.import_statements()
+        finally:
+            service._import_lock.release()
+
+    def test_nicegui_import_action_has_double_click_guard_and_record_type(self) -> None:
+        source = (Path(__file__).resolve().parents[1] / "nicegui_app" / "main.py").read_text(encoding="utf-8")
+        block = source.split("async def render_hd_espp_history", 1)[1].split("with ui.header()", 1)[0]
+        self.assertIn('if importing["value"]:', block)
+        self.assertIn("import_button.disable()", block)
+        self.assertIn("import_button.enable()", block)
+        self.assertIn('"record_type": transaction_record_type(row)', block)
 
     def test_unknown_document_is_flagged_not_guessed(self) -> None:
         family, rows, issues = parse_hd_statement_text("unrecognized row 12.34")

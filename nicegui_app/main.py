@@ -48,7 +48,7 @@ from portfolio_holdings_write import ASSET_TYPES, HoldingsWriteService, summariz
 from nicegui_app.services.operations import format_interval, operational_status
 from portfolio_research import PortfolioResearchService, research_contexts
 from portfolio_statement_history import StatementHistoryService, statement_scan_diagnostic_records, statement_verified_display_records
-from hd_espp_history import HDESPPHistoryService
+from hd_espp_history import HDESPPHistoryService, transaction_record_type
 from shared_data_preparation import prepare_shared_data
 
 HOST = "0.0.0.0"
@@ -278,25 +278,38 @@ async def index() -> None:
                 ("Unresolved", str(summary["issues"])),
             ])
             import_status = ui.label("").classes("text-sm")
+            importing = {"value": False}
             async def import_hd_statements() -> None:
+                if importing["value"]:
+                    return
+                importing["value"] = True
+                import_button.disable()
                 import_status.set_text("Importing local HD statements…")
+                rebuilt = False
                 try:
                     result = await critical_io("hd_espp_import", hd_history_service.import_statements)
-                    ui.notify(f"Imported {result['inserted']} new HD transactions from {result['documents']} documents.", type="positive")
+                    ui.notify(f"Rebuilt {result['inserted']} unique HD transactions from {result['documents']} documents.", type="positive")
                     loaded["HD / ESPP History"] = False
                     await render_hd_espp_history()
+                    rebuilt = True
                 except Exception as exc:
                     import_status.set_text(f"HD statement import failed: {exc}")
                     ui.notify("HD statement import failed; live portfolio data was not changed.", type="negative")
-            ui.button("Import HD Statements", icon="document_scanner", on_click=import_hd_statements).classes("w-full sm:w-auto min-h-11")
+                finally:
+                    importing["value"] = False
+                    if not rebuilt:
+                        import_button.enable()
+            import_button = ui.button("Import HD Statements", icon="document_scanner", on_click=import_hd_statements).classes("w-full sm:w-auto min-h-11")
             display = [{
-                "date": row["transaction_date"], "type": row["transaction_type"], "source": row["source"],
+                "date": row["transaction_date"], "record_type": transaction_record_type(row), "type": row["transaction_type"], "source": row["source"],
                 "shares": row["shares"], "amount": row["amount"], "purchase_price": row["purchase_price"],
                 "fmv": row["fair_market_value"], "fees": row["fees"], "cost_basis": row["cost_basis"],
                 "acquisition_date": row["acquisition_date"],
                 "source_destination": " → ".join(part for part in (row["source_location"], row["destination_location"]) if part),
             } for row in state["transactions"]]
             records_table(display, "Normalized HD Transactions")
+            if state["issues"]:
+                records_table(state["issues"], "Review Issues")
         loaded["HD / ESPP History"] = True
 
     with ui.header().classes("flex-wrap items-center justify-between gap-2 shadow-sm px-3 sm:px-5"):

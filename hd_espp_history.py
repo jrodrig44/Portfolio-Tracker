@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import re
 import sqlite3
+import threading
 from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -23,7 +24,7 @@ import pdfplumber
 PROJECT_ROOT = Path(__file__).resolve().parent
 HD_STATEMENTS_DIR = PROJECT_ROOT / "Statements" / "HD"
 HD_HISTORY_DB_PATH = PROJECT_ROOT / "data" / "stash_statement_history.sqlite"
-PARSER_VERSION = "hd-espp-v1"
+PARSER_VERSION = "hd-espp-v2"
 TYPES = {"ESPP_PURCHASE", "DIVIDEND", "DIVIDEND_REINVESTMENT", "TRANSFER_OUT", "TRANSFER_IN", "SALE", "ADJUSTMENT"}
 DATE_WORD = r"\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4}"
 MONEY = r"\(?\d+(?:[ ,]\d{3})*(?:\.\d+)?\)?"
@@ -178,7 +179,45 @@ def parse_hd_statement_text(text: str, source_document: str = "sanitized.txt") -
         return family, [], ["Document family could not be identified"]
     rows = parser(text, Path(source_document).name)
     issues = [] if rows else [f"{family} document contained no confidently parsed HD transactions"]
+    issues.extend(_section_completeness_issues(family, text, rows))
     return family, rows, issues
+
+
+def _section_completeness_issues(family: str, text: str, rows: list[HDTransaction]) -> list[str]:
+    """Flag supported activity visibly present in text but absent from output."""
+    lowered = text.lower()
+    produced = {row.transaction_type for row in rows}
+    checks: list[tuple[str, bool, set[str]]] = []
+    if family == "computershare_legacy":
+        checks = [
+            ("Purchases", bool(re.search(r"(?im)^Purchases\b|\bPurchase\s+[\d,]+\.\d{2}\b", text)), {"ESPP_PURCHASE"}),
+            ("Dividend Reinvestments", "dividend reinvestment" in lowered or bool(re.search(r"(?im)^Dividends\b", text)), {"DIVIDEND_REINVESTMENT"}),
+            ("Transfers", bool(re.search(r"(?i)\b(?:plan transfer confirm|\d{1,2}\s+\w+\s+\d{4}\s+transfer\s+-)", text)), {"TRANSFER_OUT"}),
+        ]
+    elif family == "computershare_equateplus":
+        checks = [
+            ("Purchases", bool(re.search(r"(?im)^Purchases\s*$|Employee Stock Purchase Plan", text)), {"ESPP_PURCHASE"}),
+            ("Dividend Reinvestments", "dividend reinvestments" in lowered, {"DIVIDEND_REINVESTMENT"}),
+        ]
+    elif family == "merrill_hd":
+        checks = [
+            ("Dividends", bool(re.search(r"(?i)HOME DEPOT INC \* Dividend", text)), {"DIVIDEND"}),
+            ("Security Transfers In", bool(re.search(r"(?i)HOME DEPOT INC Security Transfer In", text)), {"TRANSFER_IN"}),
+            ("Transfer / Adjustment", bool(re.search(r"(?i)HOME DEPOT INC Transfer / Adjustment", text)), {"ADJUSTMENT"}),
+            ("Sales", bool(re.search(r"(?i)HOME DEPOT INC Sale -", text)), {"SALE"}),
+            ("Realized Lots", bool(re.search(r"(?i)HOME DEPOT INC\s+\d+(?:\.\d+)?\s+(?:\d{2}/\d{2}/\d{2}|N/A)\s+\d{2}/\d{2}/\d{2}", text)), {"SALE"}),
+        ]
+    issues = []
+    for label, detected, expected in checks:
+        if label == "Sales":
+            accounted = any(row.transaction_type == "SALE" and row.source_account_type == "Brokerage" for row in rows)
+        elif label == "Realized Lots":
+            accounted = any(row.source_account_type == "Realized lot" for row in rows)
+        else:
+            accounted = any(row.transaction_type in expected for row in rows)
+        if detected and not accounted:
+            issues.append(f"Detected supported {label} section/activity but parsed no corresponding transaction")
+    return issues
 
 
 SCHEMA = """
@@ -195,56 +234,134 @@ def _connect(path: Path) -> sqlite3.Connection:
     connection.executescript(SCHEMA); return connection
 
 
-def match_custody_transfers(rows: Iterable[HDTransaction], window_days: int = 7, tolerance: Decimal = Decimal("0.000001")) -> list[tuple[str, str]]:
+def _transfer_provenance_ok(out: HDTransaction, incoming: HDTransaction) -> bool:
+    out_source = (out.source_location or out.source).lower()
+    out_destination = (out.destination_location or "").lower()
+    in_source = (incoming.source_location or "").lower()
+    in_destination = (incoming.destination_location or incoming.source).lower()
+    return "computershare" in out_source and "merrill" in out_destination and incoming.source.lower() == "merrill" and "merrill" in in_destination and (not in_source or in_source in {"external", "computershare"})
+
+
+def reconcile_custody_transfers(rows: Iterable[HDTransaction], window_days: int = 7, tolerance: Decimal = Decimal("0.000001")) -> tuple[list[tuple[str, str]], list[str]]:
     outgoing = [row for row in rows if row.transaction_type == "TRANSFER_OUT"]
     incoming = [row for row in rows if row.transaction_type == "TRANSFER_IN"]
-    matches = []
+    matches: list[tuple[str, str]] = []
+    issues: list[str] = []
     for out in outgoing:
-        candidate = next((item for item in incoming if abs((item.shares or Decimal()) - (out.shares or Decimal())) <= tolerance and timedelta(0) <= item.transaction_date - out.transaction_date <= timedelta(days=window_days)), None)
-        if candidate:
+        candidates = [item for item in incoming if _transfer_provenance_ok(out, item) and abs((item.shares or Decimal()) - (out.shares or Decimal())) <= tolerance and timedelta(0) <= item.transaction_date - out.transaction_date <= timedelta(days=window_days)]
+        if len(candidates) == 1:
+            candidate = candidates[0]
             matches.append((out.transaction_fingerprint, candidate.transaction_fingerprint)); incoming.remove(candidate)
-    return matches
+        elif len(candidates) > 1:
+            basis_matches = [item for item in candidates if out.cost_basis is not None and item.cost_basis is not None and abs(out.cost_basis - item.cost_basis) <= Decimal("0.01")]
+            if len(basis_matches) == 1:
+                candidate = basis_matches[0]
+                matches.append((out.transaction_fingerprint, candidate.transaction_fingerprint)); incoming.remove(candidate)
+            else:
+                issues.append(f"Ambiguous custody transfer on {out.transaction_date.isoformat()} for {out.shares} HD shares; left unmatched")
+    return matches, issues
+
+
+def match_custody_transfers(rows: Iterable[HDTransaction], window_days: int = 7, tolerance: Decimal = Decimal("0.000001")) -> list[tuple[str, str]]:
+    return reconcile_custody_transfers(rows, window_days, tolerance)[0]
+
+
+def transaction_record_type(row: HDTransaction | dict[str, Any]) -> str:
+    value = lambda name: getattr(row, name, None) if isinstance(row, HDTransaction) else row.get(name)
+    if value("source_account_type") == "Realized lot":
+        return "Realized Lot"
+    if value("transaction_type") in {"TRANSFER_IN", "TRANSFER_OUT"}:
+        return "Custody Transfer"
+    if value("transaction_type") == "ADJUSTMENT":
+        return "Restricted Share Activity"
+    if value("transaction_type") == "DIVIDEND_REINVESTMENT":
+        return "Dividend Reinvestment"
+    if value("source_account_type") == "ESPP":
+        return "ESPP Transaction"
+    return "Brokerage Transaction"
+
+
+def economic_share_ownership(rows: Iterable[HDTransaction | dict[str, Any]]) -> Decimal:
+    total = Decimal()
+    effects = {"ESPP_PURCHASE": Decimal(1), "DIVIDEND_REINVESTMENT": Decimal(1), "SALE": Decimal(-1), "ADJUSTMENT": Decimal(1)}
+    for row in rows:
+        value = lambda name: getattr(row, name, None) if isinstance(row, HDTransaction) else row.get(name)
+        if value("source_account_type") != "Realized lot":
+            total += (_decimal(value("shares")) or Decimal()) * effects.get(value("transaction_type"), Decimal())
+    return total
 
 
 class HDESPPHistoryService:
+    _import_lock = threading.Lock()
+
     def __init__(self, source_dir: Path = HD_STATEMENTS_DIR, db_path: Path = HD_HISTORY_DB_PATH):
         self.source_dir, self.db_path = Path(source_dir), Path(db_path)
 
     def import_statements(self) -> dict[str, int]:
+        if not self._import_lock.acquire(blocking=False):
+            raise RuntimeError("An HD statement import is already running")
+        try:
+            return self._rebuild_from_statements()
+        finally:
+            self._import_lock.release()
+
+    def _rebuild_from_statements(self) -> dict[str, int]:
         if not self.source_dir.is_dir():
             raise FileNotFoundError(f"HD statement folder does not exist: {self.source_dir}")
-        parsed: list[HDTransaction] = []; documents = issues_total = 0
+        occurrences: list[HDTransaction] = []
+        document_rows: list[tuple[Any, ...]] = []
+        issue_rows: list[tuple[str, str]] = []
+        now = datetime.now(timezone.utc).isoformat()
+        paths = sorted(self.source_dir.glob("*.pdf"), key=lambda path: path.name.lower())
+        for path in paths:
+            with pdfplumber.open(path) as pdf:
+                text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+            family, rows, issues = parse_hd_statement_text(text, path.name)
+            start, end = _period(text)
+            document_rows.append((path.name, hashlib.sha256(path.read_bytes()).hexdigest(), family, start.isoformat() if start else None, end.isoformat() if end else None, PARSER_VERSION, now, len(issues)))
+            issue_rows.extend((path.name, issue) for issue in issues)
+            occurrences.extend(rows)
+
+        canonical: dict[str, HDTransaction] = {}
+        for row in occurrences:
+            existing = canonical.get(row.transaction_fingerprint)
+            if existing is None or self._canonical_rank(row) > self._canonical_rank(existing):
+                canonical[row.transaction_fingerprint] = row
+        canonical_rows = sorted(canonical.values(), key=lambda row: (row.transaction_date, row.transaction_fingerprint))
+        transfer_matches, transfer_issues = reconcile_custody_transfers(canonical_rows)
+        issue_rows.extend(("Transfer reconciliation", issue) for issue in transfer_issues)
+        match_ids: dict[str, str] = {}
+        for left, right in transfer_matches:
+            match_id = hashlib.sha256((left + right).encode()).hexdigest()[:20]
+            match_ids[left] = match_ids[right] = match_id
+
         with closing(_connect(self.db_path)) as connection, connection:
-            for path in sorted(self.source_dir.glob("*.pdf")):
-                with pdfplumber.open(path) as pdf:
-                    text = "\n".join(page.extract_text() or "" for page in pdf.pages)
-                family, rows, issues = parse_hd_statement_text(text, path.name)
-                start, end = _period(text); now = datetime.now(timezone.utc).isoformat()
-                connection.execute("INSERT OR REPLACE INTO hd_espp_documents VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (path.name, hashlib.sha256(path.read_bytes()).hexdigest(), family, start.isoformat() if start else None, end.isoformat() if end else None, PARSER_VERSION, now, len(issues)))
-                connection.execute("DELETE FROM hd_espp_import_issues WHERE source_document=?", (path.name,))
-                connection.executemany("INSERT INTO hd_espp_import_issues (source_document, issue, created_at) VALUES (?, ?, ?)", [(path.name, issue, now) for issue in issues])
-                parsed.extend(rows); documents += 1; issues_total += len(issues)
-            inserted = 0
-            for row in parsed:
-                values = [row.ticker, row.transaction_date.isoformat(), row.transaction_type, row.source, row.source_account_type, row.shares, row.amount, row.purchase_price, row.fair_market_value, row.fees, row.taxes, row.cost_basis, row.acquisition_date.isoformat() if row.acquisition_date else None, row.source_location, row.destination_location, row.source_document, row.source_period_start.isoformat() if row.source_period_start else None, row.source_period_end.isoformat() if row.source_period_end else None, row.transaction_fingerprint, row.notes, int(row.ambiguous), None, datetime.now(timezone.utc).isoformat()]
-                cursor = connection.execute(f"INSERT OR IGNORE INTO hd_espp_transactions ({','.join(['ticker','transaction_date','transaction_type','source','source_account_type','shares','amount','purchase_price','fair_market_value','fees','taxes','cost_basis','acquisition_date','source_location','destination_location','source_document','source_period_start','source_period_end','transaction_fingerprint','notes','ambiguous','transfer_match_id','created_at'])}) VALUES ({','.join('?' for _ in values)})", [str(v) if isinstance(v, Decimal) else v for v in values])
-                inserted += cursor.rowcount
-            stored = [HDTransaction(transaction_date=_date(row["transaction_date"]), transaction_type=row["transaction_type"], source=row["source"], source_account_type=row["source_account_type"], shares=_decimal(row["shares"]), amount=_decimal(row["amount"]), purchase_price=_decimal(row["purchase_price"]), acquisition_date=_date(row["acquisition_date"]) if row["acquisition_date"] else None) for row in connection.execute("SELECT * FROM hd_espp_transactions")]
-            for left, right in match_custody_transfers(stored):
-                match_id = hashlib.sha256((left + right).encode()).hexdigest()[:20]
-                connection.execute("UPDATE hd_espp_transactions SET transfer_match_id=? WHERE transaction_fingerprint IN (?,?)", (match_id, left, right))
-        return {"documents": documents, "parsed": len(parsed), "inserted": inserted, "issues": issues_total}
+            connection.execute("DELETE FROM hd_espp_import_issues")
+            connection.execute("DELETE FROM hd_espp_transactions")
+            connection.execute("DELETE FROM hd_espp_documents")
+            connection.executemany("INSERT INTO hd_espp_documents VALUES (?, ?, ?, ?, ?, ?, ?, ?)", document_rows)
+            connection.executemany("INSERT INTO hd_espp_import_issues (source_document, issue, created_at) VALUES (?, ?, ?)", [(document, issue, now) for document, issue in issue_rows])
+            for row in canonical_rows:
+                values = [row.ticker, row.transaction_date.isoformat(), row.transaction_type, row.source, row.source_account_type, row.shares, row.amount, row.purchase_price, row.fair_market_value, row.fees, row.taxes, row.cost_basis, row.acquisition_date.isoformat() if row.acquisition_date else None, row.source_location, row.destination_location, row.source_document, row.source_period_start.isoformat() if row.source_period_start else None, row.source_period_end.isoformat() if row.source_period_end else None, row.transaction_fingerprint, row.notes, int(row.ambiguous), match_ids.get(row.transaction_fingerprint), now]
+                connection.execute(f"INSERT INTO hd_espp_transactions ({','.join(['ticker','transaction_date','transaction_type','source','source_account_type','shares','amount','purchase_price','fair_market_value','fees','taxes','cost_basis','acquisition_date','source_location','destination_location','source_document','source_period_start','source_period_end','transaction_fingerprint','notes','ambiguous','transfer_match_id','created_at'])}) VALUES ({','.join('?' for _ in values)})", [str(value) if isinstance(value, Decimal) else value for value in values])
+        return {"documents": len(paths), "parsed": len(occurrences), "inserted": len(canonical_rows), "issues": len(issue_rows)}
+
+    @staticmethod
+    def _canonical_rank(row: HDTransaction) -> tuple[int, date, str]:
+        completeness = sum(value is not None and value != "" for value in (row.fair_market_value, row.fees, row.taxes, row.cost_basis, row.source_location, row.destination_location, row.notes))
+        return completeness, row.source_period_end or date.min, row.source_document or ""
 
     def state(self) -> dict[str, Any]:
         with closing(_connect(self.db_path)) as connection:
             rows = [dict(row) for row in connection.execute("SELECT * FROM hd_espp_transactions ORDER BY transaction_date DESC, id DESC")]
             documents = connection.execute("SELECT COUNT(*) FROM hd_espp_documents").fetchone()[0]
             issues = connection.execute("SELECT COUNT(*) FROM hd_espp_import_issues").fetchone()[0]
+            issue_records = [dict(row) for row in connection.execute("SELECT source_document, issue FROM hd_espp_import_issues ORDER BY source_document, id")]
         def total(kind: str, field: str) -> Decimal:
             return sum((_decimal(row[field]) or Decimal()) for row in rows if row["transaction_type"] == kind and row["source_account_type"] != "Realized lot")
         matched = {row["transfer_match_id"] for row in rows if row.get("transfer_match_id")}
-        economic_shares = sum((_decimal(row["shares"]) or Decimal()) * Decimal({"ESPP_PURCHASE": 1, "DIVIDEND_REINVESTMENT": 1, "SALE": -1, "ADJUSTMENT": 1}.get(row["transaction_type"], 0)) for row in rows if row["source_account_type"] != "Realized lot")
-        return {"transactions": rows, "summary": {"total_espp_contributions": total("ESPP_PURCHASE", "amount"), "total_espp_shares": total("ESPP_PURCHASE", "shares"), "total_drip_shares": total("DIVIDEND_REINVESTMENT", "shares"), "total_dividends_reinvested": total("DIVIDEND_REINVESTMENT", "amount"), "total_shares_transferred": total("TRANSFER_OUT", "shares"), "total_shares_sold": total("SALE", "shares"), "documents": documents, "transactions": len(rows), "issues": issues, "matched_transfers": len(matched), "economic_shares": economic_shares}}
+        economic_shares = economic_share_ownership(rows)
+        return {"transactions": rows, "issues": issue_records, "summary": {"total_espp_contributions": total("ESPP_PURCHASE", "amount"), "total_espp_shares": total("ESPP_PURCHASE", "shares"), "total_drip_shares": total("DIVIDEND_REINVESTMENT", "shares"), "total_dividends_reinvested": total("DIVIDEND_REINVESTMENT", "amount"), "total_shares_transferred": total("TRANSFER_OUT", "shares"), "total_shares_sold": total("SALE", "shares"), "documents": documents, "transactions": len(rows), "issues": issues, "matched_transfers": len(matched), "economic_shares": economic_shares}}
 
 
-__all__ = ["HDESPPHistoryService", "HDTransaction", "detect_document_family", "match_custody_transfers", "parse_hd_statement_text", "transaction_fingerprint"]
+__all__ = ["HDESPPHistoryService", "HDTransaction", "detect_document_family", "economic_share_ownership", "match_custody_transfers", "parse_hd_statement_text", "reconcile_custody_transfers", "transaction_fingerprint", "transaction_record_type"]
