@@ -3,15 +3,16 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import json
 import logging
+import os
 from pathlib import Path
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from logging.handlers import TimedRotatingFileHandler
-
-from logging_setup import configure_structured_logging, log_event
+from logging_setup import DateStampedFileHandler, configure_structured_logging, log_event
 from supplemental_research import SupplementalResearchService, connect_database, initialize_database
 from supplemental_research_worker import run_once
 
@@ -22,13 +23,20 @@ class StructuredLoggingTests(unittest.TestCase):
             handler.close()
             logger.removeHandler(handler)
 
+    def _dated_path(self, logical_path: Path, day: datetime | None = None, process_id: int | None = None) -> Path:
+        selected = (day or datetime.now().astimezone()).date()
+        selected_process = process_id if process_id is not None else os.getpid()
+        return logical_path.with_name(
+            f"{logical_path.stem}.{selected.isoformat()}.{selected_process}{logical_path.suffix}"
+        )
+
     def test_json_lines_have_common_and_extra_fields(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             logger = configure_structured_logging("test.structured.json", Path(temp_dir) / "events.jsonl", "test_process")
             log_event(logger, "test_event", "Test event", ticker="AAPL", duration_ms=12, non_serializable=object())
             for handler in logger.handlers:
                 handler.flush()
-            line = (Path(temp_dir) / "events.jsonl").read_text(encoding="utf-8").strip()
+            line = self._dated_path(Path(temp_dir) / "events.jsonl").read_text(encoding="utf-8").strip()
             payload = json.loads(line)
             self.assertEqual(payload["process"], "test_process")
             self.assertEqual(payload["event"], "test_event")
@@ -48,19 +56,125 @@ class StructuredLoggingTests(unittest.TestCase):
             log_event(logger, "secret_event", "authorization: Bearer secret-value api_key=private-key", api_key="private-key", authorization="Bearer private-key")
             for handler in logger.handlers:
                 handler.flush()
-            content = path.read_text(encoding="utf-8")
+            content = self._dated_path(path).read_text(encoding="utf-8")
             self.assertNotIn("private-key", content)
             self.assertNotIn("secret-value", content)
             self._close_logger(logger)
 
-    def test_rotation_policy_is_daily_and_retains_fourteen_backups(self) -> None:
+    def test_date_transition_opens_new_file_without_renaming_active_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            logger = configure_structured_logging("test.structured.rotation", Path(temp_dir) / "events.jsonl", "test_process")
-            file_handlers = [handler for handler in logger.handlers if isinstance(handler, TimedRotatingFileHandler)]
+            logical_path = Path(temp_dir) / "events.jsonl"
+            days = iter((datetime(2026, 8, 31).date(), datetime(2026, 9, 1).date()))
+            current_day = [next(days)]
+            logger = configure_structured_logging(
+                "test.structured.rotation",
+                logical_path,
+                "test_process",
+                date_provider=lambda: current_day[0],
+                process_id=1234,
+            )
+            file_handlers = [handler for handler in logger.handlers if isinstance(handler, DateStampedFileHandler)]
             self.assertEqual(len(file_handlers), 1)
-            self.assertEqual(file_handlers[0].when, "MIDNIGHT")
-            self.assertEqual(file_handlers[0].backupCount, 14)
-            self.assertTrue(file_handlers[0].delay)
+            self.assertEqual(file_handlers[0].retention_days, 14)
+            with patch.object(Path, "rename", side_effect=PermissionError("active file is locked")):
+                log_event(logger, "first_day", "First day")
+                current_day[0] = next(days)
+                log_event(logger, "second_day", "Second day")
+            for handler in logger.handlers:
+                handler.flush()
+            self.assertIn("first_day", (Path(temp_dir) / "events.2026-08-31.1234.jsonl").read_text(encoding="utf-8"))
+            self.assertIn("second_day", (Path(temp_dir) / "events.2026-09-01.1234.jsonl").read_text(encoding="utf-8"))
+            self.assertFalse(logical_path.exists())
+            self._close_logger(logger)
+
+    def test_multiple_instances_append_to_same_daily_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logical_path = Path(temp_dir) / "shared.jsonl"
+            day = datetime(2026, 9, 1).date()
+            first = configure_structured_logging(
+                "test.structured.multi.first", logical_path, "first", date_provider=lambda: day
+            )
+            second = configure_structured_logging(
+                "test.structured.multi.second", logical_path, "second", date_provider=lambda: day
+            )
+            log_event(first, "first_event", "First process event")
+            log_event(second, "second_event", "Second process event")
+            for logger in (first, second):
+                for handler in logger.handlers:
+                    handler.flush()
+            records = [
+                json.loads(line)
+                for line in self._dated_path(logical_path).read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual({record["process"] for record in records}, {"first", "second"})
+            self._close_logger(first)
+            self._close_logger(second)
+
+    def test_overlapping_processes_write_same_daily_file_without_rollover_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logical_path = Path(temp_dir) / "shared.jsonl"
+            script = (
+                "import logging,sys,time;"
+                "from pathlib import Path;"
+                "from logging_setup import configure_structured_logging,log_event;"
+                "logger=configure_structured_logging(sys.argv[2],Path(sys.argv[1]),sys.argv[2]);"
+                "log_event(logger,'process_event','Overlapping process event');"
+                "[handler.flush() for handler in logger.handlers];"
+                "time.sleep(0.2);"
+                "[handler.close() for handler in logger.handlers]"
+            )
+            processes = [
+                subprocess.Popen(
+                    [sys.executable, "-c", script, str(logical_path), f"process_{index}"],
+                    cwd=Path(__file__).resolve().parents[1],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                for index in range(2)
+            ]
+            errors = []
+            for process in processes:
+                _, stderr = process.communicate(timeout=10)
+                if process.returncode:
+                    errors.append(stderr.decode("utf-8", errors="replace"))
+            self.assertEqual(errors, [])
+            records = []
+            for path in Path(temp_dir).glob("shared.*.*.jsonl"):
+                records.extend(json.loads(line) for line in path.read_text(encoding="utf-8").splitlines())
+            self.assertEqual({record["process"] for record in records}, {"process_0", "process_1"})
+
+    def test_retention_removes_expired_files_and_tolerates_locked_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            expired = root / "events.2026-08-18.1001.jsonl"
+            locked = root / "events.2026-08-17.1002.jsonl"
+            retained = root / "events.2026-08-19.1003.jsonl"
+            legacy_expired = root / "events.jsonl.2026-08-16"
+            legacy_retained = root / "events.jsonl.2026-08-20"
+            active_legacy = root / "events.jsonl"
+            for path in (expired, locked, retained, legacy_expired, legacy_retained, active_legacy):
+                path.write_text("old\n", encoding="utf-8")
+            real_unlink = Path.unlink
+
+            def unlink(path: Path, *args: object, **kwargs: object) -> None:
+                if path.name == locked.name:
+                    raise PermissionError("locked")
+                real_unlink(path, *args, **kwargs)
+
+            with patch.object(Path, "unlink", autospec=True, side_effect=unlink):
+                logger = configure_structured_logging(
+                    "test.structured.retention",
+                    root / "events.jsonl",
+                    "test_process",
+                    date_provider=lambda: datetime(2026, 9, 1).date(),
+                )
+            self.assertFalse(expired.exists())
+            self.assertTrue(locked.exists())
+            self.assertTrue(retained.exists())
+            self.assertFalse(legacy_expired.exists())
+            self.assertTrue(legacy_retained.exists())
+            self.assertTrue(active_legacy.exists())
+            log_event(logger, "cleanup_survived", "Logging remains available")
             self._close_logger(logger)
 
     def test_worker_no_due_check_writes_structured_event_without_api_call(self) -> None:
@@ -82,7 +196,7 @@ class StructuredLoggingTests(unittest.TestCase):
                 self.assertEqual(run_once(root), 0)
             for handler in test_logger.handlers:
                 handler.flush()
-            events = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+            events = [json.loads(line) for line in self._dated_path(log_path).read_text(encoding="utf-8").splitlines()]
             no_due = next(event for event in events if event["event"] == "no_research_due")
             self.assertEqual(no_due["due_holdings_count"], 0)
             self._close_logger(test_logger)
@@ -123,7 +237,7 @@ class StructuredLoggingTests(unittest.TestCase):
                 self.assertEqual(run_once(root), 0)
             for handler in test_logger.handlers:
                 handler.flush()
-            events = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+            events = [json.loads(line) for line in self._dated_path(log_path).read_text(encoding="utf-8").splitlines()]
             event_names = [event["event"] for event in events]
             self.assertIn("holding_research_started", event_names)
             self.assertIn("holding_research_completed", event_names)

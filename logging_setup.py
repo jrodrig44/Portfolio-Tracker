@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime
+from collections.abc import Callable
+from datetime import date, datetime, timedelta
 import json
 import logging
-from logging.handlers import TimedRotatingFileHandler
+import os
 from pathlib import Path
 import re
 from typing import Any
@@ -58,11 +59,82 @@ class _ConsoleFormatter(logging.Formatter):
         return f"{record.levelname} {record.name}: {_sanitize_text(record.getMessage())}"
 
 
+class DateStampedFileHandler(logging.FileHandler):
+    """Write directly to a daily per-process file without renaming active files."""
+
+    def __init__(
+        self,
+        logical_path: Path,
+        *,
+        retention_days: int = 14,
+        date_provider: Callable[[], date] | None = None,
+        process_id: int | None = None,
+    ) -> None:
+        self.logical_path = Path(logical_path).resolve()
+        self.retention_days = retention_days
+        self._date_provider = date_provider or (lambda: datetime.now().astimezone().date())
+        self.process_id = process_id if process_id is not None else os.getpid()
+        self._active_date = self._date_provider()
+        super().__init__(self._path_for_date(self._active_date), mode="a", encoding="utf-8", delay=True)
+        self._cleanup_expired_files(self._active_date)
+
+    def _path_for_date(self, day: date) -> Path:
+        return self.logical_path.with_name(
+            f"{self.logical_path.stem}.{day.isoformat()}.{self.process_id}{self.logical_path.suffix}"
+        )
+
+    def _cleanup_expired_files(self, current_day: date) -> None:
+        cutoff = current_day - timedelta(days=self.retention_days - 1)
+        prefix = f"{self.logical_path.stem}."
+        suffix = self.logical_path.suffix
+        legacy_prefix = f"{self.logical_path.name}."
+        candidates: dict[Path, str] = {}
+        for candidate in self.logical_path.parent.glob(f"{prefix}*{suffix}"):
+            stamped_text = candidate.name[len(prefix):-len(suffix)] if suffix else candidate.name[len(prefix):]
+            parts = stamped_text.split(".", 1)
+            if len(parts) == 1 or parts[1].isdigit():
+                candidates[candidate] = parts[0]
+        for candidate in self.logical_path.parent.glob(f"{legacy_prefix}*"):
+            candidates[candidate] = candidate.name[len(legacy_prefix):]
+        for candidate, date_text in candidates.items():
+            try:
+                candidate_day = date.fromisoformat(date_text)
+            except ValueError:
+                continue
+            if candidate_day >= cutoff or candidate == Path(self.baseFilename):
+                continue
+            try:
+                candidate.unlink()
+            except OSError:
+                # Another process may still own an expired file on Windows.
+                # It remains eligible for cleanup during the next initialization/day change.
+                continue
+
+    def _switch_date_if_needed(self) -> None:
+        current_day = self._date_provider()
+        if current_day == self._active_date:
+            return
+        if self.stream is not None:
+            self.stream.flush()
+            self.stream.close()
+            self.stream = None
+        self._active_date = current_day
+        self.baseFilename = str(self._path_for_date(current_day))
+        self._cleanup_expired_files(current_day)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self._switch_date_if_needed()
+        super().emit(record)
+
+
 def configure_structured_logging(
     logger_name: str,
     log_path: Path,
     process_name: str,
     level: int = logging.INFO,
+    *,
+    date_provider: Callable[[], date] | None = None,
+    process_id: int | None = None,
 ) -> logging.Logger:
     logger = logging.getLogger(logger_name)
     logger.setLevel(level)
@@ -72,13 +144,11 @@ def configure_structured_logging(
         resolved_path.parent.mkdir(parents=True, exist_ok=True)
         handler_exists = any(getattr(handler, "_structured_log_path", None) == str(resolved_path) for handler in logger.handlers)
         if not handler_exists:
-            file_handler = TimedRotatingFileHandler(
+            file_handler = DateStampedFileHandler(
                 resolved_path,
-                when="midnight",
-                interval=1,
-                backupCount=14,
-                encoding="utf-8",
-                delay=True,
+                retention_days=14,
+                date_provider=date_provider,
+                process_id=process_id,
             )
             file_handler.setFormatter(StructuredJsonFormatter())
             file_handler._structured_log_path = str(resolved_path)
