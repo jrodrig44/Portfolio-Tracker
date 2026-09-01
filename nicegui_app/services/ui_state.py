@@ -47,6 +47,7 @@ NAVIGATION_AREAS = (
     "Portfolio Health",
     "History",
     "Statement History",
+    "HD / ESPP History",
     "Supplemental Research",
     "System",
 )

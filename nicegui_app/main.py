@@ -48,6 +48,7 @@ from portfolio_holdings_write import ASSET_TYPES, HoldingsWriteService, summariz
 from nicegui_app.services.operations import format_interval, operational_status
 from portfolio_research import PortfolioResearchService, research_contexts
 from portfolio_statement_history import StatementHistoryService, statement_scan_diagnostic_records, statement_verified_display_records
+from hd_espp_history import HDESPPHistoryService
 from shared_data_preparation import prepare_shared_data
 
 HOST = "0.0.0.0"
@@ -251,9 +252,52 @@ async def index() -> None:
     holdings_writer = HoldingsWriteService(coordinator.portfolio_path)
     snapshot_service = AIAnalysisSnapshotService(coordinator.portfolio_path)
     statement_service = StatementHistoryService(db_path=coordinator.history_path)
+    hd_history_service = HDESPPHistoryService(db_path=coordinator.history_path)
     research_service = PortfolioResearchService(coordinator.portfolio_path)
     yahoo_export_state = YahooExportEnrichmentState()
     loaded = {name: False for name in NAVIGATION_AREAS}
+
+    async def render_hd_espp_history() -> None:
+        if loaded["HD / ESPP History"]:
+            return
+        area = areas["HD / ESPP History"]
+        area.clear()
+        state = await run.io_bound(hd_history_service.state)
+        summary = state["summary"]
+        with area:
+            ui.label("HD / ESPP History").classes("text-2xl font-semibold")
+            ui.label("Local transaction reconstruction only. Live HD quantity, cost basis, portfolio history, and forward contribution assumptions remain authoritative and unchanged.").classes("text-sm text-gray-600 dark:text-gray-300")
+            metric_cards([
+                ("ESPP Contributions", currency(summary["total_espp_contributions"])),
+                ("ESPP Shares", str(summary["total_espp_shares"])),
+                ("DRIP Shares", str(summary["total_drip_shares"])),
+                ("Dividends Reinvested", currency(summary["total_dividends_reinvested"])),
+                ("Shares Transferred", str(summary["total_shares_transferred"])),
+                ("Shares Sold", str(summary["total_shares_sold"])),
+                ("Documents", str(summary["documents"])),
+                ("Unresolved", str(summary["issues"])),
+            ])
+            import_status = ui.label("").classes("text-sm")
+            async def import_hd_statements() -> None:
+                import_status.set_text("Importing local HD statements…")
+                try:
+                    result = await critical_io("hd_espp_import", hd_history_service.import_statements)
+                    ui.notify(f"Imported {result['inserted']} new HD transactions from {result['documents']} documents.", type="positive")
+                    loaded["HD / ESPP History"] = False
+                    await render_hd_espp_history()
+                except Exception as exc:
+                    import_status.set_text(f"HD statement import failed: {exc}")
+                    ui.notify("HD statement import failed; live portfolio data was not changed.", type="negative")
+            ui.button("Import HD Statements", icon="document_scanner", on_click=import_hd_statements).classes("w-full sm:w-auto min-h-11")
+            display = [{
+                "date": row["transaction_date"], "type": row["transaction_type"], "source": row["source"],
+                "shares": row["shares"], "amount": row["amount"], "purchase_price": row["purchase_price"],
+                "fmv": row["fair_market_value"], "fees": row["fees"], "cost_basis": row["cost_basis"],
+                "acquisition_date": row["acquisition_date"],
+                "source_destination": " → ".join(part for part in (row["source_location"], row["destination_location"]) if part),
+            } for row in state["transactions"]]
+            records_table(display, "Normalized HD Transactions")
+        loaded["HD / ESPP History"] = True
 
     with ui.header().classes("flex-wrap items-center justify-between gap-2 shadow-sm px-3 sm:px-5"):
         ui.label("Portfolio Tracker").classes("text-lg sm:text-xl font-semibold")
@@ -1217,6 +1261,7 @@ async def index() -> None:
         elif name == "Portfolio Health": await render_health()
         elif name == "History" and not loaded["History"]: render_history(history_range)
         elif name == "Statement History": await render_statement_history()
+        elif name == "HD / ESPP History": await render_hd_espp_history()
         elif name == "Supplemental Research": await render_supplemental_research()
         elif name == "System": render_system()
 

@@ -28,8 +28,9 @@ MAIN = (ROOT / "nicegui_app" / "main.py").read_text(encoding="utf-8")
 
 class NiceGUIPhase2HPolishTests(unittest.TestCase):
     def test_single_destination_mapping_drives_desktop_and_mobile_navigation(self) -> None:
-        self.assertEqual(len(NAVIGATION_AREAS), 9)
-        self.assertEqual(len(set(NAVIGATION_AREAS)), 9)
+        self.assertEqual(len(NAVIGATION_AREAS), 10)
+        self.assertEqual(len(set(NAVIGATION_AREAS)), 10)
+        self.assertIn("HD / ESPP History", NAVIGATION_AREAS)
         self.assertIn('tabs = ui.tabs().classes("w-max min-w-full")', MAIN)
         self.assertIn('tab_objects = {name: ui.tab(name) for name in NAVIGATION_AREAS}', MAIN)
         self.assertIn("mobile-arrows outside-arrows", MAIN)
