@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
+from inspect import isawaitable
+from typing import Any, Callable
 
 
 METRICS_DERIVED_VIEWS = (
@@ -13,15 +16,62 @@ METRICS_DERIVED_VIEWS = (
 )
 
 
-def refresh_view_plan(selected_navigation: str, *, metrics_changed: bool, history_changed: bool) -> dict[str, tuple[str, ...]]:
+def canonical_navigation(value: object) -> str:
+    """Return the navigation name represented by a NiceGUI tab value."""
+    candidate: object = value
+    if not isinstance(candidate, str):
+        props = getattr(candidate, "props", None) or getattr(candidate, "_props", None)
+        if props is not None:
+            try:
+                candidate = props["name"]
+            except (KeyError, TypeError):
+                pass
+    if not isinstance(candidate, str) or candidate not in NAVIGATION_AREAS:
+        raise ValueError(f"Unknown navigation value: {value!r}")
+    return candidate
+
+
+NAVIGATION_AREAS = (
+    "Holdings",
+    "Portfolio Analysis",
+    "AI Analysis",
+    "Portfolio Insights",
+    "Portfolio Health",
+    "History",
+    "Statement History",
+    "Supplemental Research",
+    "System",
+)
+
+
+async def invalidate_section_views(
+    names: Iterable[str],
+    selected_navigation: object,
+    loaded: dict[str, bool],
+    refresh_section: Callable[[str], Any],
+    replace_with_placeholder: Callable[[str], Any],
+) -> None:
+    """Invalidate sections, rebuilding the visible section and lazily clearing others."""
+    active = canonical_navigation(selected_navigation)
+    stale_names = tuple(dict.fromkeys(names))
+    for name in stale_names:
+        loaded[name] = False
+    for name in stale_names:
+        action = refresh_section(name) if name == active else replace_with_placeholder(name)
+        if isawaitable(action):
+            await action
+
+
+def refresh_view_plan(selected_navigation: object, *, metrics_changed: bool, history_changed: bool) -> dict[str, tuple[str, ...]]:
     """Identify stale views while preserving the currently visible DOM."""
+    active_navigation = canonical_navigation(selected_navigation)
     stale = list(METRICS_DERIVED_VIEWS if metrics_changed else ())
     if history_changed:
         stale.append("History")
     return {
         "stale": tuple(stale),
-        "active": tuple(name for name in stale if name == selected_navigation),
-        "inactive": tuple(name for name in stale if name != selected_navigation),
+        "active": tuple(name for name in stale if name == active_navigation),
+        "inactive": tuple(name for name in stale if name != active_navigation),
     }
 
 
@@ -48,4 +98,11 @@ class PageUIState:
             raise KeyError(name)
 
 
-__all__ = ["METRICS_DERIVED_VIEWS", "PageUIState", "refresh_view_plan"]
+__all__ = [
+    "METRICS_DERIVED_VIEWS",
+    "NAVIGATION_AREAS",
+    "PageUIState",
+    "canonical_navigation",
+    "invalidate_section_views",
+    "refresh_view_plan",
+]

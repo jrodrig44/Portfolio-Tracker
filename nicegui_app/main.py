@@ -34,7 +34,13 @@ from nicegui_app.services.insights import insights_package
 from nicegui_app.services.portfolio_data import DEFAULT_HISTORY_RANGE,HISTORY_RANGE_OPTIONS,portfolio_summary
 from nicegui_app.services.page_runtime import PageRefreshGuard, client_is_alive
 from nicegui_app.services.refresh import ReadOnlyRefreshCoordinator
-from nicegui_app.services.ui_state import PageUIState, refresh_view_plan
+from nicegui_app.services.ui_state import (
+    NAVIGATION_AREAS,
+    PageUIState,
+    canonical_navigation,
+    invalidate_section_views,
+    refresh_view_plan,
+)
 from nicegui_app.services.yahoo import clear_market_data_cache,current_market_data,yahoo_intelligence_package
 from nicegui_app.services.ticker_chart import DEFAULT_TICKER_CHART_RANGE, TICKER_CHART_RANGES, load_ticker_chart
 from portfolio_holdings_write import ASSET_TYPES, HoldingsWriteService, summarize_contributions
@@ -49,7 +55,6 @@ STORAGE_SECRET = os.environ.get("NICEGUI_STORAGE_SECRET", "portfolio-tracker-loc
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 FAVICON_PATH = STATIC_DIR / "favicon.ico"
 APPLE_TOUCH_ICON_PATH = STATIC_DIR / "apple-touch-icon.png"
-NAVIGATION_AREAS = ("Holdings", "Portfolio Analysis", "AI Analysis", "Portfolio Insights", "Portfolio Health", "History", "Statement History", "Supplemental Research", "System")
 HOLDING_EDITABLE_FIELDS = (
     "ticker", "shares", "espp_acquired_shares", "amount_invested",
     "annual_div_per_share", "regular_biweekly_contribution",
@@ -242,7 +247,12 @@ async def index() -> None:
             tabs = ui.tabs().classes("w-max min-w-full").props("mobile-arrows outside-arrows")
         with tabs:
             tab_objects = {name: ui.tab(name) for name in NAVIGATION_AREAS}
-        tabs.bind_value(ui_state, "selected_navigation")
+        tabs.bind_value(
+            ui_state,
+            "selected_navigation",
+            forward=canonical_navigation,
+            backward=canonical_navigation,
+        )
         with ui.tab_panels(tabs, value=tab_objects[ui_state.selected_navigation]).classes("w-full"):
             areas: dict[str, Any] = {}
             for name in NAVIGATION_AREAS:
@@ -1163,19 +1173,21 @@ async def index() -> None:
 
     async def invalidate_sections(names: Any, message: str) -> None:
         """Mark derived sections stale, immediately rebuilding only the visible one."""
-        stale_names = tuple(dict.fromkeys(names))
-        for name in stale_names:
-            loaded[name] = False
-        for name in stale_names:
-            if name == ui_state.selected_navigation:
-                await refresh_section(name)
-                continue
+        def replace_with_placeholder(name: str) -> None:
             areas[name].clear()
             with areas[name]:
                 ui.label(message).classes("text-gray-500 dark:text-gray-400")
 
+        await invalidate_section_views(
+            names,
+            ui_state.selected_navigation,
+            loaded,
+            refresh_section,
+            replace_with_placeholder,
+        )
+
     async def navigate(event: Any) -> None:
-        name = str(event.value)
+        name = canonical_navigation(event.value)
         ui_state.selected_navigation = name
         await refresh_section(name)
 

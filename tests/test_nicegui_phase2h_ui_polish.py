@@ -16,7 +16,10 @@ from nicegui_app.services.formatting import (
     SNAPSHOT_VIEWER_BODY,
     SNAPSHOT_VIEWER_CARD,
 )
-from nicegui_app.services.ui_state import PageUIState, refresh_view_plan
+from nicegui_app.services.ui_state import (
+    PageUIState,
+    refresh_view_plan,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -120,7 +123,8 @@ class NiceGUIPhase2HPolishTests(unittest.TestCase):
         self.assertNotIn("busy", PageUIState.__dataclass_fields__)
         self.assertIn("ui_state.selected_navigation = name", MAIN)
         self.assertIn("ui_state.history_range = range_name", MAIN)
-        self.assertIn('tabs.bind_value(ui_state, "selected_navigation")', MAIN)
+        self.assertIn("forward=canonical_navigation", MAIN)
+        self.assertIn("backward=canonical_navigation", MAIN)
 
     def test_refresh_plan_preserves_active_view_and_lazily_invalidates_inactive_views(self) -> None:
         analysis = refresh_view_plan("Portfolio Analysis", metrics_changed=True, history_changed=False)
@@ -140,8 +144,9 @@ class NiceGUIPhase2HPolishTests(unittest.TestCase):
 
     def test_invalidation_rerenders_visible_section_and_keeps_hidden_sections_lazy(self) -> None:
         self.assertIn("async def invalidate_sections(names: Any, message: str)", MAIN)
-        self.assertIn("if name == ui_state.selected_navigation:", MAIN)
-        self.assertIn("await refresh_section(name)", MAIN)
+        self.assertIn("await invalidate_section_views(", MAIN)
+        self.assertIn("ui_state.selected_navigation,", MAIN)
+        self.assertIn("refresh_section,", MAIN)
         self.assertIn("areas[name].clear()", MAIN)
         self.assertIn("await invalidate_sections(\n            plan[\"stale\"]", MAIN)
         self.assertNotIn('if result.history_changed and ui_state.selected_navigation == "History"', MAIN)
