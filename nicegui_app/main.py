@@ -55,6 +55,18 @@ STORAGE_SECRET = os.environ.get("NICEGUI_STORAGE_SECRET", "portfolio-tracker-loc
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 FAVICON_PATH = STATIC_DIR / "favicon.ico"
 APPLE_TOUCH_ICON_PATH = STATIC_DIR / "apple-touch-icon.png"
+APPLE_TOUCH_ICON_ROUTES = (
+    "/apple-touch-icon.png",
+    "/apple-touch-icon-precomposed.png",
+    "/apple-touch-icon-120x120.png",
+    "/apple-touch-icon-120x120-precomposed.png",
+    "/apple-touch-icon-152x152.png",
+    "/apple-touch-icon-152x152-precomposed.png",
+    "/apple-touch-icon-167x167.png",
+    "/apple-touch-icon-167x167-precomposed.png",
+    "/apple-touch-icon-180x180.png",
+    "/apple-touch-icon-180x180-precomposed.png",
+)
 HOLDING_EDITABLE_FIELDS = (
     "ticker", "shares", "espp_acquired_shares", "amount_invested",
     "annual_div_per_share", "regular_biweekly_contribution",
@@ -81,8 +93,8 @@ app.on_startup(start_market_refresh_worker)
 app.on_shutdown(stop_market_refresh_worker)
 app.add_static_files("/branding", STATIC_DIR)
 app.add_static_file(local_file=FAVICON_PATH, url_path="/favicon.ico")
-app.add_static_file(local_file=APPLE_TOUCH_ICON_PATH, url_path="/apple-touch-icon.png")
-app.add_static_file(local_file=APPLE_TOUCH_ICON_PATH, url_path="/apple-touch-icon-precomposed.png")
+for icon_route in APPLE_TOUCH_ICON_ROUTES:
+    app.add_static_file(local_file=APPLE_TOUCH_ICON_PATH, url_path=icon_route)
 
 
 def currency(value: Any) -> str:
