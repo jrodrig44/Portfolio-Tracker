@@ -24,6 +24,8 @@ from portfolio_intelligence import compute_portfolio_intelligence
 from portfolio_analysis import canonical_asset_type as shared_canonical_asset_type
 from portfolio_analysis import future_value as shared_future_value
 from portfolio_analysis import normalize_sector as shared_normalize_sector
+from portfolio_analysis import snowball_tracker as shared_snowball_tracker
+from portfolio_analysis import years_to_income_target as shared_years_to_income_target
 from portfolio_history import DEFAULT_HISTORY_RANGE, HISTORY_RANGE_OPTIONS, filter_history_range
 from portfolio_export import build_export_package as build_shared_export_package
 from stash_history import clear_scan_preview, delete_imported_history, history_summary, import_validated_history, load_performance_history, load_statement_history, remove_manual_statement_review, run_statement_scan, save_manual_statement_review, scan_can_import, scan_state, upsert_live_portfolio_snapshot
@@ -1897,11 +1899,7 @@ def _future_value_with_contributions(
 
 
 def _years_to_income_target(current_income: float, target_income: float, annual_income_growth: float) -> float:
-    if target_income <= current_income:
-        return 0.0
-    if annual_income_growth <= 0:
-        return float("inf")
-    return (target_income - current_income) / annual_income_growth
+    return shared_years_to_income_target(current_income, target_income, annual_income_growth)
 
 
 def _format_table_for_export(df: pd.DataFrame) -> str:
@@ -6059,51 +6057,40 @@ def _render_analysis_tab(metrics: pd.DataFrame, mobile_mode: bool = False) -> No
     st.dataframe(pd.DataFrame(growth_rows), width="stretch", hide_index=True)
 
     st.markdown("#### Snowball Tracker")
-    income_vs_contrib_pct = (total_income / annual_contribution * 100) if annual_contribution > 0 else 0.0
+    snowball = shared_snowball_tracker(total_income, weighted_yield_pct, biweekly_contribution)
     snowball_rows = [
-        {"Metric": "Annual Contributions", "Value": _format_currency(annual_contribution)},
-        {"Metric": "Current Annual Income", "Value": _format_currency(total_income)},
-        {"Metric": "Income as % of Contributions", "Value": _format_percent(income_vs_contrib_pct)},
+        {"Metric": "Annual Contributions", "Value": _format_currency(snowball["annual_contribution"])},
+        {"Metric": "Current Annual Income", "Value": _format_currency(snowball["current_annual_income"])},
+        {"Metric": "Income as % of Contributions", "Value": _format_percent(snowball["income_vs_contribution_pct"])},
     ]
     st.dataframe(pd.DataFrame(snowball_rows), width="stretch", hide_index=True)
 
     st.markdown("#### Milestones")
-    milestones = [
-        ("Early Snowball (25%)", annual_contribution * 0.25),
-        ("Momentum Building (50%)", annual_contribution * 0.50),
-        ("Real Snowball (100%)", annual_contribution * 1.00),
-        ("Compounding Dominates (200%)", annual_contribution * 2.00),
-    ]
+    milestones = [(row["name"], row["target_annual_income"]) for row in snowball["milestones"]]
     milestone_rows = [{"Milestone": name, "Target Annual Income": _format_currency(target)} for name, target in milestones]
     st.dataframe(pd.DataFrame(milestone_rows), width="stretch", hide_index=True)
 
     st.markdown("#### Your Progress")
-    for milestone_name, milestone_target in milestones:
-        progress_pct = (total_income / milestone_target * 100) if milestone_target > 0 else 0.0
-        progress_pct = min(max(progress_pct, 0.0), 100.0)
+    for milestone in snowball["milestones"]:
+        milestone_name = milestone["name"]
+        progress_pct = milestone["display_progress_pct"]
         st.write(f"{milestone_name}: {_format_percent(progress_pct)}")
         st.progress(progress_pct / 100)
 
     st.markdown("#### Est. Years To Reach")
-    annual_income_growth = annual_contribution * (weighted_yield_pct / 100)
     years_rows = []
-    for milestone_name, milestone_target in milestones:
-        years_needed = _years_to_income_target(total_income, milestone_target, annual_income_growth)
+    for milestone in snowball["milestones"]:
+        milestone_name = milestone["name"]
+        years_needed = milestone["years_to_reach"]
         years_text = "N/A" if years_needed == float("inf") else f"{years_needed:,.1f}"
         years_rows.append({"Milestone": milestone_name, "Years": years_text})
     st.dataframe(pd.DataFrame(years_rows), width="stretch", hide_index=True)
 
     st.markdown("#### Next Milestone")
-    next_name = "Compounding Dominates (200%)"
-    next_target = milestones[-1][1]
-    for milestone_name, milestone_target in milestones:
-        if total_income < milestone_target:
-            next_name = milestone_name
-            next_target = milestone_target
-            break
-    amount_still_needed = max(next_target - total_income, 0.0)
-    years_to_next = _years_to_income_target(total_income, next_target, annual_income_growth)
-    months_to_next = "N/A" if years_to_next == float("inf") else f"{int(round(years_to_next * 12))}"
+    next_milestone = snowball["next_milestone"]
+    next_name = next_milestone["name"]
+    amount_still_needed = next_milestone["amount_still_needed"]
+    months_to_next = "N/A" if next_milestone["estimated_months_away"] is None else f'{next_milestone["estimated_months_away"]}'
     next_rows = [
         {"Metric": "Your Next Target", "Value": next_name},
         {"Metric": "Amount Still Needed", "Value": _format_currency(amount_still_needed)},

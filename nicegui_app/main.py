@@ -5,6 +5,7 @@ import sys
 import uuid
 import calendar
 import json
+import math
 from datetime import date
 from pathlib import Path
 from typing import Any, Callable
@@ -782,6 +783,30 @@ async def index() -> None:
                     snapshot = package["snapshot"]
                     metric_cards([("Projected 10-year value", currency(snapshot["projected_10y_value"])), ("Projected 20-year value", currency(snapshot["projected_20y_value"])), ("Active contributors", format_count(summary.get("active_contributors", 0)))])
                     ui.label(snapshot["projection_contribution_note"]).classes("text-gray-500 dark:text-gray-400")
+                    snowball = package["snowball"]
+                    ui.label("Snowball Tracker").classes("text-xl font-semibold mt-3")
+                    metric_cards([
+                        ("Annual Contributions", currency(snowball["annual_contribution"])),
+                        ("Current Annual Income", currency(snowball["current_annual_income"])),
+                        ("Income as % of Contributions", percent(snowball["income_vs_contribution_pct"])),
+                    ])
+                    ui.label("Milestones and Your Progress").classes("text-lg font-semibold mt-2")
+                    for milestone in snowball["milestones"]:
+                        with ui.card().classes("w-full min-w-0 gap-2"):
+                            with ui.row().classes("w-full justify-between items-start gap-2"):
+                                ui.label(milestone["name"]).classes("font-medium break-words")
+                                ui.label(currency(milestone["target_annual_income"])).classes("font-medium")
+                            ui.linear_progress(value=milestone["display_progress_pct"] / 100).classes("w-full")
+                            years = milestone["years_to_reach"]
+                            years_text = "N/A" if math.isinf(years) else f"{years:,.1f}"
+                            ui.label(f'Progress: {percent(milestone["display_progress_pct"])} · Estimated years to reach: {years_text}').classes("text-sm text-gray-500 dark:text-gray-400")
+                    next_milestone = snowball["next_milestone"]
+                    ui.label("Next Milestone").classes("text-lg font-semibold mt-2")
+                    detail_cards([
+                        ("Your Next Target", next_milestone["name"]),
+                        ("Amount Still Needed", currency(next_milestone["amount_still_needed"])),
+                        ("Estimated Months Away", "N/A" if next_milestone["estimated_months_away"] is None else format_count(next_milestone["estimated_months_away"])),
+                    ])
                 with ui.expansion("Yahoo intelligence and supplemental historical context").classes("w-full"):
                     ui.label("Network-heavy Yahoo intelligence is demand-driven. No research refresh controls are exposed.")
                     yahoo_area = ui.column().classes("w-full")

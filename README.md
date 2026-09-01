@@ -63,7 +63,7 @@ The market worker does not render expensive tabs or automatically trigger AI Ana
 ## Application Tabs
 
 1. **Holdings** — add, edit, remove, and save holdings; configure dividends, contributions, ESPP, asset type, and sector; download **Holdings CSV**, **Portfolio report**, or **Structured data**.
-2. **Portfolio Analysis** — review summaries, allocation, income, yield, projections, milestones, and available dividend timing/seasonality analysis.
+2. **Portfolio Analysis** — review summaries, allocation, income, yield, growth projections, the contribution-based Snowball Tracker and milestones, and available dividend timing/seasonality analysis.
 3. **AI Analysis** — explicitly run optional 1min.AI analysis, select its model and analysis type, view saved/generated output, and use its separate **Download Markdown** control.
 4. **Portfolio Insights** — compare holdings, yields, contribution allocations, concentration, and prioritized observations with cached supplemental market context.
 5. **Portfolio Health** — review tracker-methodology health scores, alerts, goals, and filtered views. Scores are heuristics, not objective investment ratings.

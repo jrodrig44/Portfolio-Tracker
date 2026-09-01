@@ -52,6 +52,71 @@ def future_value(current: float, annual_return: float, biweekly: float, years: i
     return current * (1 + rate) ** periods + biweekly * (((1 + rate) ** periods - 1) / rate) if rate else current + biweekly * periods
 
 
+SNOWBALL_MILESTONES = (
+    ("Early Snowball (25%)", 0.25),
+    ("Momentum Building (50%)", 0.50),
+    ("Real Snowball (100%)", 1.00),
+    ("Compounding Dominates (200%)", 2.00),
+)
+
+
+def years_to_income_target(current_income: float, target_income: float, annual_income_growth: float) -> float:
+    """Return the original Streamlit linear estimate, or infinity if unreachable."""
+    if target_income <= current_income:
+        return 0.0
+    if annual_income_growth <= 0:
+        return float("inf")
+    return (target_income - current_income) / annual_income_growth
+
+
+def snowball_tracker(
+    current_annual_income: float,
+    weighted_yield_pct: float,
+    regular_biweekly_contribution: float = 280.0,
+) -> dict[str, Any]:
+    """Build the portfolio-income snowball model used by Portfolio Analysis.
+
+    Targets are multiples of the regular Portfolio Analysis contribution
+    assumption. ESPP payroll and special contributions—including HD ESPP—are
+    excluded, matching Streamlit. Estimated years intentionally assume linear
+    income growth from one year's contribution at today's weighted yield; this
+    is not a DRIP or compound-growth simulation.
+    """
+    income = finite(current_annual_income)
+    annual_contribution = finite(regular_biweekly_contribution) * 26
+    annual_income_growth = annual_contribution * (finite(weighted_yield_pct) / 100)
+    milestones = []
+    for name, multiple in SNOWBALL_MILESTONES:
+        target = annual_contribution * multiple
+        raw_progress = income / target * 100 if target > 0 else 0.0
+        milestones.append({
+            "name": name,
+            "target_annual_income": target,
+            "progress_pct": raw_progress,
+            "display_progress_pct": min(max(raw_progress, 0.0), 100.0),
+            "years_to_reach": years_to_income_target(income, target, annual_income_growth),
+        })
+    next_milestone = milestones[-1]
+    for milestone in milestones:
+        if income < milestone["target_annual_income"]:
+            next_milestone = milestone
+            break
+    years_to_next = next_milestone["years_to_reach"]
+    return {
+        "annual_contribution": annual_contribution,
+        "current_annual_income": income,
+        "income_vs_contribution_pct": income / annual_contribution * 100 if annual_contribution > 0 else 0.0,
+        "annual_income_growth": annual_income_growth,
+        "milestones": milestones,
+        "next_milestone": {
+            "name": next_milestone["name"],
+            "target_annual_income": next_milestone["target_annual_income"],
+            "amount_still_needed": max(next_milestone["target_annual_income"] - income, 0.0),
+            "estimated_months_away": None if math.isinf(years_to_next) else int(round(years_to_next * 12)),
+        },
+    }
+
+
 def contribution_context(metrics: pd.DataFrame, default_espp: float = 100.0) -> dict[str, Any]:
     rows=[]
     for raw in metrics.to_dict(orient="records"):
@@ -100,7 +165,7 @@ def resolve_fund_lookthrough(metrics: pd.DataFrame, weights: dict[str,dict[str,f
 
 def build_analysis(metrics: pd.DataFrame, fund_weights: dict[str,dict[str,float]]|None=None, expected_return:float=.08, projection_biweekly:float=280.0, month_weights:dict[str,list[float]]|None=None) -> dict[str,Any]:
     df=metrics.copy()
-    if df.empty:return {"totals":{},"summary":{},"snapshot":{},"concentration":{},"asset_allocation":[],"direct_sector":[],"income_quality":[],"income_quality_summary":compute_income_quality(df,{},{}),"contributions":contribution_context(df),"fund_lookthrough":resolve_fund_lookthrough(df,fund_weights)}
+    if df.empty:return {"totals":{},"summary":{},"snapshot":{},"snowball":snowball_tracker(0.0,0.0,projection_biweekly),"concentration":{},"asset_allocation":[],"direct_sector":[],"income_quality":[],"income_quality_summary":compute_income_quality(df,{},{}),"contributions":contribution_context(df),"fund_lookthrough":resolve_fund_lookthrough(df,fund_weights)}
     asset_types=df["asset_type"] if "asset_type" in df else pd.Series("Stock",index=df.index)
     sectors=df["sector"] if "sector" in df else pd.Series("",index=df.index)
     df["asset_type"]=asset_types.map(canonical_asset_type);df["sector"]=sectors.map(normalize_sector)
@@ -121,4 +186,4 @@ def build_analysis(metrics: pd.DataFrame, fund_weights: dict[str,dict[str,float]
     overall_coverage=(direct_resolved+lookthrough["resolved_value"])/value*100 if value else 0
     completeness={"direct_sector_classification_coverage_pct":direct_resolved/direct_total*100 if direct_total else 100,"fund_lookthrough_coverage_pct":lookthrough["fund_lookthrough_completeness_pct"],"overall_resolved_exposure_coverage_pct":max(0.0,min(overall_coverage,100.0))}
     totals={"total_portfolio_value":value,"total_cost_basis":cost,"total_unrealized_gain":value-cost,"total_estimated_annual_income":income,"weighted_portfolio_yield":income/value*100 if value else 0,"largest_holding":top.ticker,"largest_holding_weight":finite(top.market_value)/value*100 if value else 0,"economic_exposure_allocation":econ.to_dict("records"),"income_allocation_by_asset_type":assets.to_dict("records")}
-    return {"totals":totals,"summary":{"active_contributors":sum(r["total_contribution"]>0 for r in contributions["holdings"])},"snapshot":{"projected_10y_value":future_value(value,expected_return,projection_biweekly,10),"projected_20y_value":future_value(value,expected_return,projection_biweekly,20),"projection_contribution_note":"Projection calculations use the regular $280 biweekly contribution assumption and do not include ESPP contributions unless otherwise stated."},"concentration":concentration,"asset_allocation":assets.to_dict("records"),"direct_sector":direct.to_dict("records"),"income_quality":quality_rows,"income_quality_summary":quality,"contributions":contributions,"fund_lookthrough":lookthrough,"data_completeness":completeness}
+    return {"totals":totals,"summary":{"active_contributors":sum(r["total_contribution"]>0 for r in contributions["holdings"])},"snapshot":{"projected_10y_value":future_value(value,expected_return,projection_biweekly,10),"projected_20y_value":future_value(value,expected_return,projection_biweekly,20),"projection_contribution_note":"Projection calculations use the regular $280 biweekly contribution assumption and do not include ESPP contributions unless otherwise stated."},"snowball":snowball_tracker(income,totals["weighted_portfolio_yield"],projection_biweekly),"concentration":concentration,"asset_allocation":assets.to_dict("records"),"direct_sector":direct.to_dict("records"),"income_quality":quality_rows,"income_quality_summary":quality,"contributions":contributions,"fund_lookthrough":lookthrough,"data_completeness":completeness}
