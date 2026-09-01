@@ -42,13 +42,40 @@ class NiceGuiStartupTests(unittest.TestCase):
     def test_base_python_discovery_does_not_require_py_launcher(self) -> None:
         self.assertIn("function Find-BasePython", self.script)
         cfg_position = self.script.index("$homeLine = $configuration")
+        registry_position = self.script.index("HKCU:\\Software\\Python\\PythonCore")
         python_position = self.script.index("foreach ($commandName in @('python.exe', 'python3.exe'))")
         py_position = self.script.index("Get-Command py.exe")
-        self.assertLess(cfg_position, python_position)
+        self.assertLess(cfg_position, registry_position)
+        self.assertLess(registry_position, python_position)
         self.assertLess(python_position, py_position)
         self.assertIn("StartsWith($resolvedVenvPrefix", self.script)
-        self.assertIn("Test-PythonCommand -PythonPath $candidate.Path", self.script)
+        self.assertIn("Test-BasePythonCommand -PythonPath $candidate.Path", self.script)
+        self.assertIn("-m venv --help", self.script)
         self.assertNotIn("& py -3 -m venv", self.script)
+
+    def test_invalid_candidates_are_skipped_and_missing_python_error_is_actionable(self) -> None:
+        self.assertIn("Rejected $($candidate.Source)", self.script)
+        self.assertIn("no usable Python 3 interpreter with venv support", self.script)
+        self.assertIn("Candidates: $candidateSummary", self.script)
+
+    def test_repair_is_scoped_and_partial_environment_is_removed_on_failure(self) -> None:
+        self.assertIn("$resolvedVenv.Equals($expectedVenv", self.script)
+        self.assertIn("Refusing to remove an unexpected virtual-environment path", self.script)
+        self.assertGreaterEqual(self.script.count("Remove-Item -LiteralPath $venvPath -Recurse -Force"), 1)
+        self.assertIn("partial .venv could not be removed", self.script)
+
+    def test_healthy_environment_is_reused_and_recreated_environment_forces_install(self) -> None:
+        self.assertIn("if (-not (Test-PythonCommand -PythonPath $venvPython))", self.script)
+        self.assertIn("$dependenciesNeedInstall = $environmentCreated -or", self.script)
+        self.assertIn('Write-Host "Dependencies unchanged; skipping installation."', self.script)
+
+    def test_pip_and_required_runtime_imports_are_validated(self) -> None:
+        self.assertIn("$venvPython -m pip --version", self.script)
+        self.assertIn("$venvPython -m ensurepip --upgrade", self.script)
+        self.assertIn("import nicegui, pandas, yfinance, exchange_calendars", self.script)
+        validation_position = self.script.index("Dependency validation failed after installation")
+        fingerprint_position = self.script.index("Set-Content -LiteralPath $requirementsFingerprintPath")
+        self.assertLess(validation_position, fingerprint_position)
 
     def test_dependency_fingerprint_is_compared_and_written_after_pip_success(self) -> None:
         self.assertIn('Join-Path $runtimeDataPath ".requirements.sha256"', self.script)

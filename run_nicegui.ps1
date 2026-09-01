@@ -32,6 +32,36 @@ function Test-PythonCommand {
     }
 }
 
+function Test-BasePythonCommand {
+    param(
+        [Parameter(Mandatory = $true)][string]$PythonPath,
+        [string[]]$PrefixArguments = @()
+    )
+
+    if (-not (Test-PythonCommand -PythonPath $PythonPath -PrefixArguments $PrefixArguments)) {
+        return $false
+    }
+    try {
+        & $PythonPath @PrefixArguments -m venv --help *> $null
+        return $LASTEXITCODE -eq 0
+    }
+    catch {
+        return $false
+    }
+}
+
+function Test-ProjectDependencies {
+    param([Parameter(Mandatory = $true)][string]$PythonPath)
+
+    try {
+        & $PythonPath -c "import nicegui, pandas, yfinance, exchange_calendars" 2>$null
+        return $LASTEXITCODE -eq 0
+    }
+    catch {
+        return $false
+    }
+}
+
 function Find-BasePython {
     param(
         [Parameter(Mandatory = $true)][string]$VirtualEnvironmentPath,
@@ -40,6 +70,7 @@ function Find-BasePython {
 
     $candidates = [System.Collections.Generic.List[object]]::new()
     $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $script:BasePythonDiagnostics = [System.Collections.Generic.List[string]]::new()
 
     function Add-PythonCandidate {
         param([string]$Path, [string[]]$Arguments = @(), [string]$Source)
@@ -69,6 +100,40 @@ function Find-BasePython {
         }
     }
 
+    foreach ($registryRoot in @(
+        'HKCU:\Software\Python\PythonCore',
+        'HKLM:\Software\Python\PythonCore',
+        'HKLM:\Software\WOW6432Node\Python\PythonCore'
+    )) {
+        foreach ($versionKey in @(Get-ChildItem -LiteralPath $registryRoot -ErrorAction SilentlyContinue)) {
+            $installKey = Join-Path $versionKey.PSPath 'InstallPath'
+            try {
+                $install = Get-ItemProperty -LiteralPath $installKey -ErrorAction Stop
+                Add-PythonCandidate -Path $install.ExecutablePath -Source "Python registry $($versionKey.PSChildName)"
+                $installRoot = $install.'(default)'
+                foreach ($name in @('python.exe', 'python3.exe', "python$($versionKey.PSChildName).exe")) {
+                    if (-not [string]::IsNullOrWhiteSpace($installRoot)) {
+                        Add-PythonCandidate -Path (Join-Path $installRoot $name) -Source "Python registry $($versionKey.PSChildName)"
+                    }
+                }
+            }
+            catch {
+                $script:BasePythonDiagnostics.Add("Unreadable registry candidate $installKey")
+            }
+        }
+    }
+
+    foreach ($root in @(
+        (Join-Path $env:LOCALAPPDATA 'Programs\Python'),
+        (Join-Path $env:ProgramFiles 'Python')
+    )) {
+        foreach ($directory in @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending)) {
+            foreach ($name in @('python.exe', 'python3.exe')) {
+                Add-PythonCandidate -Path (Join-Path $directory.FullName $name) -Source "standard install $($directory.FullName)"
+            }
+        }
+    }
+
     $resolvedVenvPrefix = [System.IO.Path]::GetFullPath($VirtualEnvironmentPath).TrimEnd('\') + '\'
     foreach ($commandName in @('python.exe', 'python3.exe')) {
         foreach ($command in @(Get-Command $commandName -All -CommandType Application -ErrorAction SilentlyContinue)) {
@@ -85,9 +150,10 @@ function Find-BasePython {
     }
 
     foreach ($candidate in $candidates) {
-        if (Test-PythonCommand -PythonPath $candidate.Path -PrefixArguments $candidate.Arguments) {
+        if (Test-BasePythonCommand -PythonPath $candidate.Path -PrefixArguments $candidate.Arguments) {
             return $candidate
         }
+        $script:BasePythonDiagnostics.Add("Rejected $($candidate.Source): $($candidate.Path) $($candidate.Arguments -join ' ')")
     }
     return $null
 }
@@ -96,7 +162,8 @@ if (-not (Test-PythonCommand -PythonPath $venvPython)) {
     $pyvenvConfiguration = Join-Path $venvPath "pyvenv.cfg"
     $basePython = Find-BasePython -VirtualEnvironmentPath $venvPath -ConfigurationPath $pyvenvConfiguration
     if ($null -eq $basePython) {
-        throw "The shared .venv is missing or broken, and no usable base Python interpreter was found. Install or repair Python 3 and ensure python.exe, python3.exe, or the optional py launcher is available. NiceGUI was not started."
+        $candidateSummary = if ($script:BasePythonDiagnostics.Count) { $script:BasePythonDiagnostics -join '; ' } else { 'No candidates were discovered.' }
+        throw "The shared .venv is missing or broken, and no usable Python 3 interpreter with venv support was found. Candidates: $candidateSummary Install or repair Python 3, then retry. NiceGUI was not started."
     }
 
     if (Test-Path -LiteralPath $venvPath) {
@@ -114,14 +181,32 @@ if (-not (Test-PythonCommand -PythonPath $venvPython)) {
     Write-Host "Using Python from $($basePython.Source): $($basePython.Path)"
     try {
         & $basePython.Path @($basePython.Arguments) -m venv $venvPath
+        $venvExitCode = $LASTEXITCODE
     }
     catch {
-        throw "Virtual environment creation failed. NiceGUI was not started. $($_.Exception.Message)"
+        $venvExitCode = 1
+        $venvFailure = $_.Exception.Message
     }
-    if ($LASTEXITCODE -ne 0 -or -not (Test-PythonCommand -PythonPath $venvPython)) {
-        throw "Virtual environment creation or Python validation failed. NiceGUI was not started."
+    if ($venvExitCode -ne 0 -or -not (Test-PythonCommand -PythonPath $venvPython)) {
+        try {
+            if (Test-Path -LiteralPath $venvPath) {
+                Remove-Item -LiteralPath $venvPath -Recurse -Force
+            }
+        }
+        catch {
+            throw "Virtual environment creation failed using $($basePython.Path), and the partial .venv could not be removed because it is in use or inaccessible. Close Portfolio Tracker processes and retry. $($_.Exception.Message)"
+        }
+        throw "Virtual environment creation or validation failed using $($basePython.Path). NiceGUI was not started. $venvFailure"
     }
     $environmentCreated = $true
+}
+
+& $venvPython -m pip --version *> $null
+if ($LASTEXITCODE -ne 0) {
+    & $venvPython -m ensurepip --upgrade
+    if ($LASTEXITCODE -ne 0) {
+        throw "pip is unavailable in the shared .venv and ensurepip could not repair it. NiceGUI was not started."
+    }
 }
 
 if (-not (Test-Path -LiteralPath $requirementsPath -PathType Leaf)) {
@@ -148,13 +233,16 @@ if (Test-Path -LiteralPath $requirementsFingerprintPath -PathType Leaf) {
     }
 }
 
-$dependenciesNeedInstall = $environmentCreated -or ($installedHash -ne $requirementsHash)
+$dependenciesNeedInstall = $environmentCreated -or ($installedHash -ne $requirementsHash) -or -not (Test-ProjectDependencies -PythonPath $venvPython)
 if ($dependenciesNeedInstall) {
     Write-Host "Installing/updating shared dependencies..."
     & $venvPython -m pip install -r $requirementsPath
     $pipExitCode = $LASTEXITCODE
     if ($pipExitCode -ne 0) {
         throw "Dependency installation failed with exit code $pipExitCode. The dependency fingerprint was not updated, and NiceGUI was not started."
+    }
+    if (-not (Test-ProjectDependencies -PythonPath $venvPython)) {
+        throw "Dependency validation failed after installation. The dependency fingerprint was not updated, and NiceGUI was not started."
     }
 
     New-Item -ItemType Directory -Path $runtimeDataPath -Force | Out-Null

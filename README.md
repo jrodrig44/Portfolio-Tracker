@@ -157,16 +157,18 @@ Before switching interfaces, use **System → Prepare Shared Data**, wait for **
 
 ## Local Logs
 
-Structured application logs use JSONL, rotate at local midnight, retain up to 14 backups, and redact sensitive fields. The currently configured files are:
+Structured application logs use JSONL, switch to new date-and-process-stamped files at local midnight, retain 14 calendar days, and redact sensitive fields. The configured filename patterns are:
 
-- `logs/streamlit.jsonl` for the temporary Streamlit rollback lifecycle and its Yahoo/cache events.
-- `logs/supplemental_research_worker.jsonl` for independent research-worker checks, leases, outcomes, and sleep/shutdown events.
+- `logs/streamlit.YYYY-MM-DD.PID.jsonl` for the temporary Streamlit rollback lifecycle and its Yahoo/cache events.
+- `logs/supplemental_research_worker.YYYY-MM-DD.PID.jsonl` for independent research-worker checks, leases, outcomes, and sleep/shutdown events.
 
 The in-process Market Refresh worker uses the shared `portfolio_tracker` logger and appears with NiceGUI/server logging; it does not create a separate `market_refresh_worker.jsonl` file. Logs remain local and Git-ignored.
 
 ```powershell
-Get-Content ".\logs\supplemental_research_worker.jsonl" -Wait
-Get-Content ".\logs\streamlit.jsonl" -Wait
+$workerLog = Get-ChildItem ".\logs\supplemental_research_worker.*.jsonl" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+Get-Content $workerLog.FullName -Wait
+$streamlitLog = Get-ChildItem ".\logs\streamlit.*.jsonl" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+Get-Content $streamlitLog.FullName -Wait
 ```
 
 ## Notes
