@@ -1,3 +1,5 @@
+import json
+import mimetypes
 import struct
 import unittest
 from pathlib import Path
@@ -22,8 +24,19 @@ class NiceGuiBrandingTests(unittest.TestCase):
         favicon = STATIC_DIR / "favicon.ico"
         self.assertTrue(favicon.is_file())
         self.assertEqual(favicon.read_bytes()[:4], b"\x00\x00\x01\x00")
+        self.assertEqual(png_dimensions(STATIC_DIR / "favicon-16x16.png"), (16, 16))
         self.assertEqual(png_dimensions(STATIC_DIR / "favicon-32x32.png"), (32, 32))
         self.assertIn("favicon=FAVICON_PATH", MAIN_SOURCE)
+
+    def test_pwa_icons_have_required_dimensions(self) -> None:
+        expected = {
+            "android-chrome-192x192.png": (192, 192),
+            "android-chrome-512x512.png": (512, 512),
+            "maskable-icon-192x192.png": (192, 192),
+            "maskable-icon-512x512.png": (512, 512),
+        }
+        for filename, dimensions in expected.items():
+            self.assertEqual(png_dimensions(STATIC_DIR / filename), dimensions)
 
     def test_apple_touch_icon_is_conventional_size(self) -> None:
         self.assertEqual(png_dimensions(STATIC_DIR / "apple-touch-icon.png"), (180, 180))
@@ -59,9 +72,36 @@ class NiceGuiBrandingTests(unittest.TestCase):
         self.assertIn("/favicon.ico", registered_routes)
 
     def test_head_metadata_and_clean_production_title(self) -> None:
+        self.assertIn('rel="icon" href="/favicon.ico" sizes="any"', MAIN_SOURCE)
+        self.assertIn('sizes="16x16" href="/branding/favicon-16x16.png"', MAIN_SOURCE)
+        self.assertIn('sizes="32x32" href="/branding/favicon-32x32.png"', MAIN_SOURCE)
         self.assertIn('rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"', MAIN_SOURCE)
+        self.assertIn('rel="manifest" href="/branding/site.webmanifest"', MAIN_SOURCE)
+        self.assertIn('name="theme-color" content="#071f4d"', MAIN_SOURCE)
         self.assertIn('title="Portfolio Tracker"', MAIN_SOURCE)
         self.assertNotIn('title="Portfolio Tracker · NiceGUI"', MAIN_SOURCE)
+
+    def test_web_manifest_is_valid_and_uses_relative_portfolio_tracker_assets(self) -> None:
+        manifest_path = STATIC_DIR / "site.webmanifest"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["name"], "Portfolio Tracker")
+        self.assertEqual(manifest["short_name"], "Portfolio")
+        self.assertEqual(manifest["start_url"], "/")
+        self.assertEqual(manifest["scope"], "/")
+        self.assertEqual(manifest["display"], "standalone")
+        icons = {(icon["sizes"], icon["purpose"]): icon["src"] for icon in manifest["icons"]}
+        self.assertEqual(icons[("192x192", "any")], "/branding/android-chrome-192x192.png")
+        self.assertEqual(icons[("512x512", "any")], "/branding/android-chrome-512x512.png")
+        self.assertEqual(icons[("192x192", "maskable")], "/branding/maskable-icon-192x192.png")
+        self.assertEqual(icons[("512x512", "maskable")], "/branding/maskable-icon-512x512.png")
+        for icon in manifest["icons"]:
+            self.assertTrue(icon["src"].startswith("/branding/"))
+            self.assertNotIn("://", icon["src"])
+            self.assertTrue((STATIC_DIR / Path(icon["src"]).name).is_file())
+        self.assertEqual(mimetypes.guess_type(manifest_path.name)[0], "application/manifest+json")
+        branding_configuration = MAIN_SOURCE + manifest_path.read_text(encoding="utf-8")
+        self.assertNotIn("192.168.1.20", branding_configuration)
+        self.assertNotIn("localhost", branding_configuration)
 
 
 if __name__ == "__main__":

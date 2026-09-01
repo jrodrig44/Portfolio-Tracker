@@ -224,8 +224,12 @@ async def remove_selected_aggrid_rows(grid: Any) -> int:
 async def index() -> None:
     page_client = ui.context.client
     ui.add_head_html(
-        '<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">'
+        '<link rel="icon" href="/favicon.ico" sizes="any">'
+        '<link rel="icon" type="image/png" sizes="16x16" href="/branding/favicon-16x16.png">'
         '<link rel="icon" type="image/png" sizes="32x32" href="/branding/favicon-32x32.png">'
+        '<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">'
+        '<link rel="manifest" href="/branding/site.webmanifest">'
+        '<meta name="theme-color" content="#071f4d">'
     )
     ui.colors(primary="#1d4ed8", secondary="#0f766e", accent="#d97706")
     appearance_storage = app.storage.user
