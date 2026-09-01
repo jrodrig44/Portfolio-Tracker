@@ -83,7 +83,10 @@ function Find-BasePython {
         }
     }
 
-    # Preserve the original base-interpreter hint before a broken environment is removed.
+    # Preserve the original hint before repair, but do not trust it exclusively:
+    # Microsoft Store package upgrades can leave pyvenv.cfg pointing at a path
+    # that no longer exists. Registry, standard-install, PATH, and py candidates
+    # are all capability-tested for Python 3 plus working venv support.
     if (Test-Path -LiteralPath $ConfigurationPath -PathType Leaf) {
         try {
             $configuration = Get-Content -LiteralPath $ConfigurationPath -ErrorAction Stop
@@ -233,6 +236,9 @@ if (Test-Path -LiteralPath $requirementsFingerprintPath -PathType Leaf) {
     }
 }
 
+# The fingerprint avoids routine reinstalls, but it is not proof that the shared
+# environment is healthy. A recreated environment or failed core-import probe
+# forces installation, and the hash is written only after validation succeeds.
 $dependenciesNeedInstall = $environmentCreated -or ($installedHash -ne $requirementsHash) -or -not (Test-ProjectDependencies -PythonPath $venvPython)
 if ($dependenciesNeedInstall) {
     Write-Host "Installing/updating shared dependencies..."
@@ -256,6 +262,8 @@ if (-not (Test-PythonCommand -PythonPath $venvPython)) {
     throw "Shared virtual-environment Python failed its final validation. NiceGUI was not started."
 }
 
+# Port 8501 is production-owned, but a listener is never automatically adopted
+# or killed. Even an uninspectable owner may be unrelated user work.
 $existingListener = Get-NetTCPConnection -LocalPort $productionPort -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($null -ne $existingListener) {
     $listenerDescription = "process ID $($existingListener.OwningProcess)"
@@ -314,6 +322,9 @@ try {
                     $intentionalShutdown = $true
                     Write-Host "Stopping Portfolio Tracker safely..."
                     New-Item -ItemType File -Path $shutdownRequestPath -Force | Out-Null
+                    # Ask the application to reject new protected writes and
+                    # drain admitted ones. Only the exact child process tree is
+                    # terminated if the bounded graceful interval expires.
                     $deadline = [DateTime]::UtcNow.AddSeconds($gracefulShutdownTimeoutSeconds)
                     $waitingReported = $false
                     while (-not $child.HasExited -and [DateTime]::UtcNow -lt $deadline) {

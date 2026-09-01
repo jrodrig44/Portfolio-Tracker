@@ -89,6 +89,12 @@ _PERCENT_PARTS = ("pct", "percent", "weight", "yield", "coverage", "concentratio
 
 
 def format_field_value(field: Any, value: Any) -> str:
+    """Apply one presentation policy for dynamic labels, tables, and cards.
+
+    Central field-aware formatting prevents raw floating-point artifacts and
+    inconsistent decimal/percentage treatment when the same metric appears in
+    different responsive NiceGUI components.
+    """
     key = str(field or "").strip().lower()
     if value is None or value == "":
         return EMPTY_VALUE
@@ -147,6 +153,9 @@ def dividend_seasonality_chart_options(monthly_income: dict[str, Any]) -> dict[s
     }
 
 
+# Shared width, wrapping, and overflow contracts are intentional mobile
+# safeguards. Individual pages should compose these helpers instead of restoring
+# fixed-width cards or allowing rich/table content to expand the viewport.
 RESPONSIVE_CARD_GRID = "w-full grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3"
 SYSTEM_CARD_GRID = "w-full max-w-full grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3"
 SYSTEM_CARD = "w-full min-w-0 max-w-full h-auto py-3"

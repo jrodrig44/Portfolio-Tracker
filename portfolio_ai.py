@@ -235,6 +235,12 @@ def _production_shape(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def compact_ai_context(payload: dict[str, Any], analysis_type: str, custom_question: str, portfolio_history_summary: dict[str, Any] | None = None, dividend_seasonality_summary: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Select bounded, analysis-relevant context from the prepared portfolio.
+
+    Compaction limits sensitive/current data sent to the provider and keeps
+    requests predictable. It performs no external call; rendering controls or
+    changing a model therefore cannot consume AI credits.
+    """
     full = _production_shape(payload)
     selected = analysis_type if analysis_type in AI_ANALYSIS_TYPES else AI_ANALYSIS_TYPES[0]
     question = str(custom_question or "").lower()
@@ -310,6 +316,7 @@ def build_ai_request(payload: dict[str, Any], analysis_type: str, custom_questio
 
 @dataclass
 class AIAnalysisState:
+    """Per-page request/result state, separate from comprehensive export state."""
     busy: bool = False
     last_attempt_at: str = ""
     last_stage: str = ""
@@ -334,6 +341,7 @@ def _safe_error(exc: Exception) -> tuple[str, str]:
 
 
 def run_ai_analysis(payload: dict[str, Any], analysis_type: str, model: str, custom_question: str, *, state: AIAnalysisState | None = None, client_factory: Callable[..., OneMinAIClient] = OneMinAIClient) -> AIAnalysisState:
+    """Run one explicitly requested analysis with duplicate-click protection."""
     state = state or AIAnalysisState()
     if state.busy and state.last_stage in {"preparing", "requesting"}: return state
     state.busy = True; state.last_attempt_at = datetime.now().isoformat(timespec="seconds"); state.last_stage = "preparing"; state.error_message = ""; state.error_detail = ""

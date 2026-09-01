@@ -88,6 +88,12 @@ def _word_lines(words: list[dict[str, Any]], tolerance: float = 3.0) -> list[tup
 
 
 def parse_statement_header_words(words: list[dict[str, Any]], page_height: float) -> dict[str, Any]:
+    """Accept dates only from the first-page header near an account marker.
+
+    Brokerage PDFs contain many disclosure and footer dates. Restricting the
+    search to the upper quarter prevents those dates from becoming fabricated
+    statement periods when a header is missing or unreadable.
+    """
     header_limit = float(page_height) * 0.25
     lines = [line for line in _word_lines(words) if line[0] <= header_limit]
     account_tops = [float(word.get("top", 0.0)) for word in words if float(word.get("top", 0.0)) <= header_limit and str(word.get("text", "")).upper() == "ACCOUNT"]
@@ -180,6 +186,13 @@ def _balance_row(words: list[dict[str, Any]], row_label: tuple[str, ...]) -> tup
 
 
 def extract_statement_layout_values_from_pages(pages: Any) -> dict[str, float | None]:
+    """Extract a colocated Account Summary only when its accounting identity holds.
+
+    The three closing rows must appear together and priced portfolio plus cash
+    must equal total equity within cents. Failure returns no financial values so
+    the record falls back to explicit manual review instead of a plausible but
+    incorrect import.
+    """
     invested_value = cash_value = portfolio_value = None
     summary_found = balance_rows_found = accounting_passed = False
     for page in pages:
@@ -198,6 +211,7 @@ def extract_statement_layout_values_from_pages(pages: Any) -> dict[str, float | 
 
 
 def _parse_statement_document(pdf_path: Path) -> dict[str, Any]:
+    """Inspect the original PDF read-only and validate only its first page."""
     try:
         content = pdf_path.read_bytes()
         with pdfplumber.open(pdf_path) as pdf:
@@ -643,6 +657,12 @@ def classify_scan(records: list[dict[str, Any]], db_path: Path = STATEMENT_HISTO
 
 
 def import_validated_history(records: list[dict[str, Any]], db_path: Path = STATEMENT_HISTORY_DB_PATH) -> dict[str, int]:
+    """Atomically import rows admitted by continuity and verification checks.
+
+    Source PDFs are never moved, rewritten, or deleted. Per-record savepoints
+    turn uniqueness collisions into duplicate diagnostics without weakening the
+    all-record transaction or strict accounting checks.
+    """
     prepare_history_database(db_path)
     result = {"imported": 0, "duplicates": 0, "needs_review": 0, "unparseable": 0}
     with closing(sqlite3.connect(db_path)) as conn:
@@ -693,6 +713,12 @@ def load_statement_history_details(db_path: Path = STATEMENT_HISTORY_DB_PATH) ->
 
 
 def upsert_live_portfolio_snapshot(portfolio_value: float, snapshot_date: str | None = None, db_path: Path = STATEMENT_HISTORY_DB_PATH) -> None:
+    """Store one current portfolio value per calendar date.
+
+    Intraday refreshes replace today's live row instead of creating a tick
+    series. Statement rows remain in their own table, so a legitimate statement
+    and live observation on the same date are both retained by ``UNION ALL``.
+    """
     if not isinstance(portfolio_value, (int, float)) or not math.isfinite(float(portfolio_value)) or portfolio_value <= 0:
         raise ValueError("Live portfolio snapshot requires a positive finite value.")
     prepare_history_database(db_path)

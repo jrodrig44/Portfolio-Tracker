@@ -128,6 +128,13 @@ def prepare_shared_data(
     metrics_builder: Callable[..., pd.DataFrame] = metrics_frame,
     snapshot_writer: Callable[..., None] = upsert_live_portfolio_snapshot,
 ) -> SharedDataPreparationResult:
+    """Prepare and checkpoint the authoritative databases for safe handoff.
+
+    NiceGUI and the retained Streamlit rollback read the same local portfolio
+    and history databases; there is no copy/synchronization step. Verification
+    plus passive WAL checkpoints expose durable current calculations and today's
+    snapshot without migrating schemas or changing application ownership.
+    """
     if not _PREPARATION_LOCK.acquire(blocking=False):
         raise SharedDataPreparationInProgress()
     portfolio_path = Path(portfolio_db_path)

@@ -55,6 +55,9 @@ STORAGE_SECRET = os.environ.get("NICEGUI_STORAGE_SECRET", "portfolio-tracker-loc
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 FAVICON_PATH = STATIC_DIR / "favicon.ico"
 APPLE_TOUCH_ICON_PATH = STATIC_DIR / "apple-touch-icon.png"
+# Browser favicons, Apple filename probes, and the PWA manifest all stay on the
+# Portfolio Tracker origin. Multiple Apple aliases deliberately serve one file;
+# relative routes need neither device sniffing nor a separate static service.
 APPLE_TOUCH_ICON_ROUTES = (
     "/apple-touch-icon.png",
     "/apple-touch-icon-precomposed.png",
@@ -1176,7 +1179,12 @@ async def index() -> None:
         loaded["System"] = True
 
     async def refresh_section(name: str) -> None:
-        """Render one section through its existing lazy-render entry point."""
+        """Render one section through its single lazy-render entry point.
+
+        Centralizing dispatch prevents post-write refreshes from appending a
+        second Holdings block. History is rebuilt with the range retained in
+        page state rather than resetting the user's selection.
+        """
         if name == "Holdings" and not loaded["Holdings"]: render_holdings()
         elif name == "Portfolio Analysis": await render_analysis()
         elif name == "AI Analysis": render_ai()
@@ -1237,7 +1245,13 @@ async def index() -> None:
         if client_is_alive(page_client, lifecycle):
             status.set_text(f"Refreshed {len(holdings)} holdings and {len(history)} history points")
     async def refresh_after_holding_write() -> None:
-        """Reload writes and invalidate every holdings-derived lazy view."""
+        """Complete validate -> persist -> forced refresh -> view invalidation.
+
+        The forced refresh reloads the committed rows and recalculates metrics.
+        ``invalidate_sections`` immediately rebuilds visible Holdings while
+        leaving hidden derived views lazy; this ordering prevents the former
+        blank-placeholder-until-tab-switch regression.
+        """
         await refresh_data(True)
         if not client_is_alive(page_client, lifecycle):
             return

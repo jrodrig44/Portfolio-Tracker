@@ -39,7 +39,12 @@ def normalize_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def filter_history_range(
     history: list[dict[str, Any]], selected_range: str = DEFAULT_HISTORY_RANGE
 ) -> list[dict[str, Any]]:
-    """Match Streamlit's newest-record-anchored calendar DateOffset ranges."""
+    """Apply calendar ranges anchored to the newest available history point.
+
+    ALL retains the complete imported-statement baseline plus live points.
+    1M/3M/1Y are deliberately anchored to the data, not wall-clock today, so a
+    temporarily stale portfolio still presents a stable and meaningful range.
+    """
     if selected_range not in HISTORY_RANGE_OPTIONS:
         raise ValueError(f"Unsupported history range: {selected_range}")
     normalized = normalize_history(history)

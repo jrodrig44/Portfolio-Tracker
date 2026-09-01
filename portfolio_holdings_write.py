@@ -67,6 +67,9 @@ def normalize_holding_input(values: Mapping[str, Any], *, existing: Mapping[str,
     asset_type = str(merged.get("asset_type") or "Stock").strip()
     output["asset_type"] = asset_type if asset_type in ASSET_TYPES else "Other"
     if ticker == "HD":
+        # HD is the production ESPP holding. Preserve its payroll-plan contract
+        # across both editors so a generic grid save cannot silently convert it
+        # into an ordinary holding or double-count regular contributions.
         output.update({
             "regular_biweekly_contribution": 0.0,
             "special_contribution": 0.0,
@@ -188,7 +191,13 @@ def summarize_contributions(holdings: list[Mapping[str, Any]]) -> dict[str, floa
 
 
 class HoldingsWriteService:
-    """Atomic, schema-preserving writes for explicit holdings actions only."""
+    """Validate and atomically persist explicit holdings actions exactly once.
+
+    Submission tokens plus the process guard protect against duplicate browser
+    clicks. The UI owns the subsequent forced reload/recalculation and invalidates
+    every metrics-derived view because shares, basis, income, and contributions
+    can affect all of them.
+    """
 
     _guard = threading.Lock()
     _completed_tokens: set[tuple[str, str]] = set()

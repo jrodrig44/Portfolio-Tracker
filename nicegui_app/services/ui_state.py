@@ -17,7 +17,15 @@ METRICS_DERIVED_VIEWS = (
 
 
 def canonical_navigation(value: object) -> str:
-    """Return the navigation name represented by a NiceGUI tab value."""
+    """Return the canonical area name represented by a NiceGUI tab value.
+
+    NiceGUI value-change events can contain either the configured string name or
+    a ``ui.tab`` object, depending on framework version and binding path.
+    ``str(tab)`` is a debug representation, not a stable navigation identifier.
+    Keeping this conversion at the boundary prevents an active Holdings page
+    from being mistaken for an inactive view and replaced by the lazy-refresh
+    placeholder immediately after Save.
+    """
     candidate: object = value
     if not isinstance(candidate, str):
         props = getattr(candidate, "props", None) or getattr(candidate, "_props", None)
@@ -51,7 +59,12 @@ async def invalidate_section_views(
     refresh_section: Callable[[str], Any],
     replace_with_placeholder: Callable[[str], Any],
 ) -> None:
-    """Invalidate sections, rebuilding the visible section and lazily clearing others."""
+    """Rebuild the visible stale section and lazily invalidate hidden sections.
+
+    The active view must be refreshed in place; only hidden derived views receive
+    the "refresh when opened" placeholder. Deduplicating ``names`` also prevents
+    one data change from creating duplicate render blocks.
+    """
     active = canonical_navigation(selected_navigation)
     stale_names = tuple(dict.fromkeys(names))
     for name in stale_names:
@@ -63,7 +76,12 @@ async def invalidate_section_views(
 
 
 def refresh_view_plan(selected_navigation: object, *, metrics_changed: bool, history_changed: bool) -> dict[str, tuple[str, ...]]:
-    """Identify stale views while preserving the currently visible DOM."""
+    """Identify stale views while preserving the active tab and its local state.
+
+    This is a server-data refresh plan, not a browser reload or navigation. In
+    particular, History's selected range remains in ``PageUIState`` while its
+    data is rebuilt.
+    """
     active_navigation = canonical_navigation(selected_navigation)
     stale = list(METRICS_DERIVED_VIEWS if metrics_changed else ())
     if history_changed:

@@ -54,6 +54,7 @@ class RefreshHarness:
 
 class NiceGUIPostSaveRefreshTests(unittest.IsolatedAsyncioTestCase):
     async def test_active_holdings_save_reloads_metrics_and_renders_once_without_placeholder(self) -> None:
+        """Visible Holdings must rerender after Save without a tab switch."""
         page = RefreshHarness(FakeTab("Holdings"))
 
         await page.metrics_refresh()  # successful write followed by the forced refresh
@@ -66,6 +67,7 @@ class NiceGUIPostSaveRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(page.loaded["Portfolio Analysis"])
 
     async def test_active_analysis_renders_while_holdings_remains_lazily_stale(self) -> None:
+        """Only the visible derived section is eager during invalidation."""
         page = RefreshHarness("Portfolio Analysis")
 
         await page.metrics_refresh()

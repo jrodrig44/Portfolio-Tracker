@@ -63,7 +63,14 @@ def market_session_state(
 
 
 class MarketRefreshWorker:
-    """In-process, browser-independent Yahoo price and live-snapshot refresher."""
+    """Server-owned, browser-independent market and live-history refresher.
+
+    The worker follows the NYSE calendar, refreshes at the configured roughly
+    five-minute cadence while open, and performs one final post-close refresh.
+    It shares the process refresh coordinator with connected clients but does
+    not render UI or trigger expensive AI, intelligence, or research enrichment.
+    Its lifetime belongs to the NiceGUI server rather than any browser session.
+    """
 
     def __init__(
         self,
@@ -104,6 +111,8 @@ class MarketRefreshWorker:
             and state.final_refresh_due
             and self.final_refresh_session != state.session_date
         )
+        # The final refresh is tracked per exchange session so repeated polling
+        # after close cannot repeatedly clear caches and rewrite today's row.
         regular_due = bool(
             state.is_open
             and (

@@ -17,6 +17,10 @@ from nicegui_app.services.configuration import (
 )
 from portfolio_analysis import FUND_ASSET_TYPES, canonical_asset_type, resolve_fund_lookthrough
 
+# Prices are intentionally short-lived; metadata, historical context, fund
+# look-through, and Investment Intelligence are costlier enrichment with longer
+# independent lifetimes. Keeping cache families distinct ensures a routine or
+# forced price refresh does not silently fan out into every Yahoo endpoint.
 _cache: dict[tuple[str,str],tuple[float,Any]]={}
 LOGGER = logging.getLogger("portfolio_tracker")
 
@@ -33,7 +37,7 @@ def clear_market_data_cache() -> None:
 
 
 def clear_price_cache() -> None:
-    """Invalidate current-price entries without discarding Yahoo enrichment data."""
+    """Invalidate prices without turning a market refresh into enrichment calls."""
     for key in [key for key in _cache if key[1] == "prices"]:
         _cache.pop(key, None)
 
@@ -94,6 +98,11 @@ def current_market_data(tickers:list[str]|tuple[str,...])->tuple[dict[str,float]
 
 
 def yahoo_intelligence_package(metrics:pd.DataFrame)->dict[str,Any]:
+    """Load optional, cached Yahoo intelligence for an explicit UI/export path.
+
+    This is distinct from current market prices and from Supplemental AI
+    Research. Callers must not invoke it merely because a page rendered.
+    """
     intelligence=[]; dividend_metadata=[]; historical=[]; fund_weights={}; monthly={month:0.0 for month in ("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec")}
     for row in metrics.to_dict(orient="records"):
         ticker=str(row.get("ticker","")).upper(); proxy=yf.Ticker(ticker)

@@ -59,6 +59,13 @@ def _load_holdings_contexts(db_path: Path) -> dict[str, dict[str, object]]:
 
 
 def run_once(project_root: Path) -> int:
+    """Lease and process only enrolled holdings whose persisted research is due.
+
+    The six-hour scheduler can wake without spending AI credits: a provider call
+    occurs only after eligibility/due checks and the cross-process lease succeed.
+    Job completion is persisted so restarts and overlapping launchers remain
+    recoverable instead of duplicating research.
+    """
     check_started_at = time.perf_counter()
     log_event(LOGGER, "worker_check_started", "Supplemental research worker check started")
     db_path = project_root / "data" / "portfolio.db"

@@ -60,7 +60,14 @@ class _ConsoleFormatter(logging.Formatter):
 
 
 class DateStampedFileHandler(logging.FileHandler):
-    """Write directly to a daily per-process file without renaming active files."""
+    """Write directly to a daily per-process file without renaming active files.
+
+    Do not replace this with ``TimedRotatingFileHandler``. NiceGUI and its
+    research child can overlap temporarily, and Windows locks open files;
+    rename-based midnight rollover previously failed with ``WinError 32``.
+    Files named by date and PID eliminate active-file rename contention, while
+    best-effort retention leaves a locked old file for a later cleanup pass.
+    """
 
     def __init__(
         self,

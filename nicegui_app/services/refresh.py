@@ -40,6 +40,14 @@ class RefreshResult:
 
 
 class ReadOnlyRefreshCoordinator:
+    """Coordinate one coherent Yahoo, calculation, and live-history refresh.
+
+    NiceGUI clients, the server market worker, and explicit preparation can all
+    request refreshes. The process-wide reentrant lock prevents overlapping
+    callers from multiplying Yahoo requests or publishing mismatched holdings,
+    metrics, and snapshots. A forced refresh deliberately reloads persisted
+    holdings after a write even when a filesystem fingerprint has not changed.
+    """
     def __init__(self,portfolio_path:Path=PORTFOLIO_DB_PATH,history_path:Path=HISTORY_DB_PATH,holdings_loader:Callable=load_holdings,history_loader:Callable=load_history,market_loader:Callable|None=None,snapshot_persister:Callable=persist_live_snapshot_if_ready):
         self.portfolio_path=portfolio_path;self.history_path=history_path;self.holdings_loader=holdings_loader;self.history_loader=history_loader;self.market_loader=market_loader;self.portfolio_fingerprint:Fingerprint|None=None;self.history_fingerprint:Fingerprint|None=None
         self.snapshot_persister=snapshot_persister
@@ -60,6 +68,8 @@ class ReadOnlyRefreshCoordinator:
         priced_tickers={str(row.get("ticker","")).strip().upper() for row in self._holdings if _positive_number(row.get("shares",0))}
         valid_live_prices={str(ticker).strip().upper() for ticker,value in (prices or {}).items() if _positive_number(value)}
         market_data_complete=not self.market_loader or not priced_tickers or priced_tickers.issubset(valid_live_prices)
+        # A partial Yahoo response must not replace a previously coherent metric
+        # set with zero-priced holdings or persist a corrupt live snapshot.
         if not market_data_complete and self._metrics is not None:
             recalculated=self._metrics
         else:
@@ -67,6 +77,8 @@ class ReadOnlyRefreshCoordinator:
         metrics_changed=self._metrics is None or not recalculated.equals(self._metrics)
         self._metrics=recalculated
         live_snapshot_changed=False
+        # Live history advances from current calculations without waiting for a
+        # new brokerage statement, but only when every priced holding is usable.
         snapshot_attempted=bool(self.market_loader and priced_tickers and market_data_complete)
         if snapshot_attempted:
             live_snapshot_changed=self.snapshot_persister(recalculated,self.history_path)=="Updated"

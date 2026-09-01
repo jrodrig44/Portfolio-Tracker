@@ -19,7 +19,12 @@ class ShutdownInProgress(RuntimeError):
 
 
 class LifecycleCoordinator:
-    """Thread-safe admission gate and drain tracker for application mutations."""
+    """Reject new protected writes during shutdown and drain admitted writes.
+
+    The launcher requests a graceful server stop first. Tracking mutations here
+    prevents process-tree termination from interrupting a database transaction;
+    targeted forced termination is only the launcher's bounded-time last resort.
+    """
 
     def __init__(self) -> None:
         self._condition = threading.Condition()

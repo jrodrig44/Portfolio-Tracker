@@ -14,7 +14,12 @@ _worker: subprocess.Popen[bytes] | None = None
 
 
 def start_research_worker() -> None:
-    """Start exactly one worker child for the NiceGUI production process."""
+    """Start exactly one Supplemental Research child owned by this server.
+
+    A child process isolates long-running AI work from NiceGUI's UI/event loop.
+    This is not the in-process Yahoo Market Refresh worker; persisted leases and
+    enrollment/due state provide coordination beyond this local process handle.
+    """
     global _worker
     with _LOCK:
         if _worker is not None and _worker.poll() is None:

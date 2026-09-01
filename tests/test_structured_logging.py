@@ -62,6 +62,7 @@ class StructuredLoggingTests(unittest.TestCase):
             self._close_logger(logger)
 
     def test_date_transition_opens_new_file_without_renaming_active_file(self) -> None:
+        """Midnight rollover must never rename a Windows-locked active log."""
         with tempfile.TemporaryDirectory() as temp_dir:
             logical_path = Path(temp_dir) / "events.jsonl"
             days = iter((datetime(2026, 8, 31).date(), datetime(2026, 9, 1).date()))

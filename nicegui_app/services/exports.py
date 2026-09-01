@@ -11,7 +11,12 @@ def yahoo_export_enrichment(
     yahoo_package: dict[str, Any] | None,
     supplemental_research: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, dict[str, float]], dict[str, Any]]:
-    """Map loaded NiceGUI enrichment into the shared export contract."""
+    """Map already-loaded optional enrichment into the shared export contract.
+
+    Export preparation is strict about surprise network work: absent cached
+    Yahoo data is reported rather than fetched. Supplemental Research remains
+    distinguishable from Yahoo financial and market data.
+    """
     research = list(supplemental_research or [])
     if yahoo_package is None:
         return {}, {
@@ -71,8 +76,10 @@ class YahooExportEnrichmentState:
 
 
 def build_export_payload(holdings: list[dict[str,Any]], metrics: pd.DataFrame, **kwargs: Any) -> dict[str,Any]:
+    """Build the unified current/live payload used by report exports."""
     return shared_build_export_payload(holdings, metrics, **kwargs)
 
 
 def export_package(holdings: list[dict[str,Any]],metrics: pd.DataFrame, **kwargs: Any)->dict[str,str]:
+    """Render comprehensive formats; AI Analysis Markdown remains separate."""
     return build_export_package(holdings, metrics, **kwargs)
