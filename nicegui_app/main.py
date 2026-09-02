@@ -48,6 +48,7 @@ from portfolio_holdings_write import ASSET_TYPES, HoldingsWriteService, summariz
 from nicegui_app.services.operations import format_interval, operational_status
 from portfolio_research import PortfolioResearchService, research_contexts
 from portfolio_statement_history import StatementHistoryService, statement_scan_diagnostic_records, statement_verified_display_records
+from hd_espp_analytics import analyze_hd_economics
 from hd_espp_history import HDESPPHistoryService, transaction_record_type
 from hd_ownership import SHARE_TOLERANCE, reconstruct_hd_ownership
 from shared_data_preparation import prepare_shared_data
@@ -268,9 +269,27 @@ async def index() -> None:
         live_hd_shares = next((row.get("shares") for row in holdings if str(row.get("ticker", "")).upper() == "HD"), None)
         ownership = reconstruct_hd_ownership(state["transactions"], live_hd_shares, state["transfer_lots"])
         ownership_summary = ownership.summary
+        current_hd_price = next((row.get("current_price") for row in holdings if str(row.get("ticker", "")).upper() == "HD"), None)
+        analytics = analyze_hd_economics(state["transactions"], ownership, live_hd_shares, current_hd_price)
         with area:
             ui.label("HD / ESPP History").classes("text-2xl font-semibold")
             ui.label("Local transaction reconstruction only. Live HD quantity, cost basis, portfolio history, and forward contribution assumptions remain authoritative and unchanged.").classes("text-sm text-gray-600 dark:text-gray-300")
+            metric_cards([
+                ("Employee ESPP Contributions", currency(analytics.espp_summary["total_employee_contributions"])),
+                ("ESPP Shares Purchased", str(analytics.espp_summary["total_espp_shares"])),
+                ("Weighted Avg ESPP Purchase Price", currency(analytics.espp_summary["weighted_average_purchase_price"])),
+                ("Purchase Discount Benefit", currency(analytics.discount_summary["total_discount_value"])),
+                ("DRIP Cash Reinvested", currency(analytics.drip_summary["total_net_reinvested"])),
+                ("DRIP Shares Acquired", str(analytics.drip_summary["total_drip_shares"])),
+                ("Documented Cash Dividends", currency(analytics.dividend_summary["total_documented_cash_dividends"])),
+                ("Known-Basis Realized Gain", currency(analytics.realized_summary["documented_realized_gain"])),
+            ])
+            if ownership_summary["reconciliation_status"] == "DIFFERENCE_REQUIRES_REVIEW":
+                ui.label("Historical analytics are based on documented reconstructed transactions. The reconstructed remaining-share balance does not currently match the live HD holding, so lifetime/open-position return metrics are intentionally withheld.").classes("rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100")
+            ui.label(f"Reconciliation: {ownership_summary['reconciliation_status'].replace('_', ' ').title()}").classes("text-sm font-medium")
+            ui.separator()
+            ui.label("HD / ESPP Economics").classes("text-xl font-semibold")
+            ui.label("Source-bounded historical economics only. No synthetic return history, no Yahoo lookups, and no tax or lifetime-return claims are produced here.").classes("text-sm text-gray-600 dark:text-gray-300")
             metric_cards([
                 ("ESPP Contributions", currency(summary["total_espp_contributions"])),
                 ("ESPP Shares", str(summary["total_espp_shares"])),
