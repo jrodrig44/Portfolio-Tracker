@@ -265,21 +265,55 @@ def analyze_hd_economics(transactions: Iterable[dict[str, Any]], ownership: Owne
         origin_summary: dict[str, dict[str, Any]] = {}
         for sold_lot in ownership.sold_lots:
             origin = sold_lot.origin_type or "UNRESOLVED"
-            bucket = origin_summary.setdefault(origin, {"shares_sold": Decimal("0"), "proceeds": Decimal("0"), "documented_cost_basis": Decimal("0"), "documented_realized_gain": Decimal("0"), "known_basis_rows": 0, "status": "Unknown / unresolved" if origin in {"UNRESOLVED", "UNKNOWN"} else "Known origin"})
+            bucket = origin_summary.setdefault(origin, {
+                "shares_sold": Decimal("0"),
+                "proceeds": Decimal("0"),
+                "sale_proceeds": Decimal("0"),
+                "documented_cost_basis": Decimal("0"),
+                "documented_realized_gain": Decimal("0"),
+                "known_basis_rows": 0,
+                "known_basis_lot_count": 0,
+                "unknown_basis_lot_count": 0,
+                "total_lot_count": 0,
+                "known_basis_shares": Decimal("0"),
+                "unknown_basis_shares": Decimal("0"),
+                "status": "Unknown / unresolved" if origin in {"UNRESOLVED", "UNKNOWN"} else "Known origin",
+                "provenance_status": "UNRESOLVED" if origin in {"UNRESOLVED", "UNKNOWN"} else "KNOWN",
+            })
             shares = sold_lot.shares_sold
             sale_amount = sold_lot.sale_amount
             basis = sold_lot.cost_basis
+            bucket["total_lot_count"] += 1
             if shares is not None:
                 bucket["shares_sold"] += shares
             if sale_amount is not None:
                 bucket["proceeds"] += sale_amount
+                bucket["sale_proceeds"] += sale_amount
             if basis is not None:
                 bucket["documented_cost_basis"] += basis
                 bucket["known_basis_rows"] += 1
+                bucket["known_basis_lot_count"] += 1
+                if shares is not None:
+                    bucket["known_basis_shares"] += shares
+            else:
+                bucket["unknown_basis_lot_count"] += 1
+                if shares is not None:
+                    bucket["unknown_basis_shares"] += shares
             if sale_amount is not None and basis is not None:
                 bucket["documented_realized_gain"] += sale_amount - basis
         for key, value in sorted(origin_summary.items()):
-            value["documented_realized_gain_pct"] = (value["documented_realized_gain"] / value["documented_cost_basis"]) if value["documented_cost_basis"] else Decimal("0")
+            if value["known_basis_shares"] == Decimal("0"):
+                value["basis_status"] = "UNKNOWN"
+                value["documented_cost_basis"] = None
+                value["documented_realized_gain"] = None
+                value["documented_realized_gain_pct"] = None
+            elif value["unknown_basis_shares"] > Decimal("0"):
+                value["basis_status"] = "PARTIAL"
+                value["documented_realized_gain_pct"] = (value["documented_realized_gain"] / value["documented_cost_basis"]) if value["documented_cost_basis"] else None
+            else:
+                value["basis_status"] = "COMPLETE"
+                value["documented_realized_gain_pct"] = (value["documented_realized_gain"] / value["documented_cost_basis"]) if value["documented_cost_basis"] else None
+            value["basis_coverage_pct"] = (value["known_basis_shares"] / value["shares_sold"]) if value["shares_sold"] and value["known_basis_shares"] else Decimal("0")
             realized_by_origin["records"].append({"origin": key, **value})
         known_origin_sold_shares = _sum_decimals((entry["shares_sold"] for entry in realized_by_origin["records"] if entry["origin"] not in {"UNRESOLVED", "UNKNOWN"}))
         unresolved_origin_sold_shares = total_shares_sold - known_origin_sold_shares if total_shares_sold else Decimal("0")

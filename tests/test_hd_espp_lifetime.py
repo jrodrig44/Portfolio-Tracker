@@ -8,6 +8,7 @@ from hd_espp_analytics import analyze_hd_economics
 from hd_espp_lifetime import build_hd_lifetime_economics
 from hd_espp_reconciliation import build_hd_phase3a_reconciliation
 from hd_ownership import reconstruct_hd_ownership
+from nicegui_app.services.formatting import format_table_records
 
 
 def tx(fingerprint: str, kind: str, tx_date: str, shares: str | None = None, **values):
@@ -90,7 +91,26 @@ class HDLifetimeEconomicsTests(unittest.TestCase):
         self.assertEqual(result.coverage["proceeds_coverage_pct"], Decimal("0.7"))
         self.assertEqual(result.coverage["origin_coverage_pct"], Decimal("0.625"))
         self.assertEqual(by_origin["ESPP_PURCHASE"]["documented_realized_gain"], Decimal("200"))
-        self.assertEqual(by_origin["UNRESOLVED"]["documented_realized_gain"], Decimal("0"))
+        self.assertIsNone(by_origin["UNRESOLVED"]["documented_cost_basis"])
+        self.assertIsNone(by_origin["UNRESOLVED"]["documented_realized_gain"])
+        self.assertIsNone(by_origin["UNRESOLVED"]["documented_realized_gain_pct"])
+        self.assertEqual(by_origin["UNRESOLVED"]["basis_status"], "UNKNOWN")
+        self.assertEqual(by_origin["UNRESOLVED"]["provenance_status"], "UNRESOLVED")
+
+    def test_phase3b_and_nicegui_formatting_preserve_unknown_realized_origin_values(self) -> None:
+        result, _, _, _ = self._result()
+        unresolved = next(row for row in result.realized_by_origin if row["origin"] == "UNRESOLVED")
+
+        self.assertIsNone(unresolved["documented_cost_basis"])
+        self.assertIsNone(unresolved["documented_realized_gain"])
+        self.assertIsNone(unresolved["documented_realized_gain_pct"])
+
+        known = next(row for row in result.realized_by_origin if row["origin"] == "ESPP_PURCHASE")
+        _, rows = format_table_records([known, unresolved])
+        rendered = next(row for row in rows if row["origin"] == "UNRESOLVED")
+        self.assertEqual(rendered["documented_cost_basis"], "—")
+        self.assertEqual(rendered["documented_realized_gain"], "—")
+        self.assertEqual(rendered["documented_realized_gain_pct"], "—")
 
     def test_cash_flow_model_uses_consistent_signs_and_excludes_custody_and_restricted(self) -> None:
         result, _, _, _ = self._result()
