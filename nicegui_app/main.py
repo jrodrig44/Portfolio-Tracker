@@ -266,7 +266,7 @@ async def index() -> None:
         state = await run.io_bound(hd_history_service.state)
         summary = state["summary"]
         live_hd_shares = next((row.get("shares") for row in holdings if str(row.get("ticker", "")).upper() == "HD"), None)
-        ownership = reconstruct_hd_ownership(state["transactions"], live_hd_shares)
+        ownership = reconstruct_hd_ownership(state["transactions"], live_hd_shares, state["transfer_lots"])
         ownership_summary = ownership.summary
         with area:
             ui.label("HD / ESPP History").classes("text-2xl font-semibold")
@@ -313,14 +313,18 @@ async def index() -> None:
                 ("Restricted Acquired", str(ownership_summary["total_restricted_shares"])),
                 ("Other / Unknown", str(ownership_summary["total_other_unknown_shares"])),
                 ("Total Sold", str(ownership_summary["total_shares_sold"])),
+                ("Known Open Lots", str(ownership_summary["known_open_lot_shares"])),
+                ("Unresolved Sold Offset", str(ownership_summary["unresolved_sold_lot_shares"])),
                 ("Reconstructed Remaining", str(ownership_summary["reconstructed_remaining_shares"])),
                 ("Live HD Shares", str(ownership_summary["live_hd_shares"] if ownership_summary["live_hd_shares"] is not None else "Unavailable")),
                 ("Difference", str(ownership_summary["reconciliation_difference"] if ownership_summary["reconciliation_difference"] is not None else "Unavailable")),
             ])
             ui.label(f'Reconciliation: {ownership_summary["reconciliation_status"].replace("_", " ").title()}').classes("text-sm font-medium")
+            ui.label(f'Lot ledger: {ownership_summary["lot_ledger_status"].replace("_", " ").title()}').classes("text-sm font-medium")
             records_table(ownership.origin_breakdown, "Share Origin Breakdown")
+            records_table(state["transfer_lots"], "Normalized Custody Transfer Lot Details")
             open_lots = [lot.display() for lot in ownership.lots if lot.remaining_shares > SHARE_TOLERANCE]
-            records_table(open_lots, "Open Ownership Lots")
+            records_table(open_lots, "Documented Lot Balances Before Unresolved-Sale and Precision Offsets")
             records_table([lot.display() for lot in ownership.sold_lots], "Realized Lot Provenance")
             if ownership.issues:
                 records_table([{"issue": issue} for issue in ownership.issues], "Ownership Reconstruction Issues")

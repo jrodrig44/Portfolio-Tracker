@@ -152,7 +152,7 @@ def _known_sale_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     )
 
 
-def _apply_custody_transfers(rows: list[dict[str, Any]], lots: list[OwnershipLot], sale_rows: list[dict[str, Any]], issues: list[str]) -> tuple[int, Decimal, Decimal]:
+def _apply_custody_transfers(rows: list[dict[str, Any]], transfer_lots: list[dict[str, Any]], lots: list[OwnershipLot], issues: list[str]) -> tuple[int, Decimal, Decimal]:
     match_ids = {str(row["transfer_match_id"]) for row in rows if row.get("transfer_match_id")}
     transferred = Decimal()
     processed = 0
@@ -165,15 +165,16 @@ def _apply_custody_transfers(rows: list[dict[str, Any]], lots: list[OwnershipLot
             continue
         target = abs(_decimal(outgoing.get("shares")) or Decimal())
         transfer_date = _date(outgoing.get("transaction_date"))
+        details = [detail for detail in transfer_lots if detail.get("parent_transfer_fingerprint") == outgoing.get("transaction_fingerprint")]
         allocations: list[tuple[OwnershipLot, Decimal]] = []
-        for sale in sale_rows:
-            acquired = _date(sale.get("acquisition_date"))
-            if acquired is None or transfer_date is None or acquired > transfer_date:
-                continue
+        for detail in details:
+            acquired = _date(detail.get("acquisition_date"))
+            quantity = _decimal(detail.get("transferred_shares")) or Decimal()
             candidates = [lot for lot in lots if lot.acquisition_date == acquired and lot.original_custodian in {"Computershare", "EquatePlus"}]
-            if len(candidates) == 1:
-                quantity = min(_decimal(sale.get("shares")) or Decimal(), candidates[0].original_shares)
-                allocations.append((candidates[0], quantity))
+            if len(candidates) != 1 or candidates[0].original_shares + LOT_DISPLAY_TOLERANCE < quantity:
+                issues.append(f"Transfer lot {detail.get('transfer_lot_fingerprint', '')} has {len(candidates)} valid acquisition provenance matches")
+                continue
+            allocations.append((candidates[0], min(quantity, candidates[0].original_shares)))
         allocated = sum((quantity for _, quantity in allocations), Decimal())
         difference = target - allocated
         if abs(difference) > LOT_DISPLAY_TOLERANCE:
@@ -195,12 +196,13 @@ def _match_sale_lot(lots: list[OwnershipLot], acquired: date, quantity: Decimal)
     return [lot for lot in lots if lot.origin_type == "RESTRICTED_SHARE" and abs((lot.acquisition_date - acquired).days) <= 3 and lot.remaining_shares + LOT_DISPLAY_TOLERANCE >= quantity]
 
 
-def reconstruct_hd_ownership(rows: Iterable[dict[str, Any]], live_shares: Decimal | str | float | None = None) -> OwnershipReconstruction:
+def reconstruct_hd_ownership(rows: Iterable[dict[str, Any]], live_shares: Decimal | str | float | None = None, transfer_lots: Iterable[dict[str, Any]] = ()) -> OwnershipReconstruction:
     transactions = [dict(row) for row in rows]
+    normalized_transfer_lots = [dict(row) for row in transfer_lots]
     lots = _acquisition_lots(transactions)
     sale_rows = _known_sale_rows(transactions)
     issues: list[str] = []
-    transfers_processed, shares_transferred, transfer_precision_difference = _apply_custody_transfers(transactions, lots, sale_rows, issues)
+    transfers_processed, shares_transferred, transfer_precision_difference = _apply_custody_transfers(transactions, normalized_transfer_lots, lots, issues)
     sold: list[SoldLot] = []
     sale_precision_difference = Decimal()
     for row in sale_rows:
@@ -238,7 +240,16 @@ def reconstruct_hd_ownership(rows: Iterable[dict[str, Any]], live_shares: Decima
     total_acquired = sum(acquired_totals.values(), Decimal())
     reconstructed = total_acquired - total_sold
     unresolved_sold = sum((entry.shares_sold for entry in sold if entry.match_status == "UNRESOLVED"), Decimal())
-    known_open = sum((lot.remaining_shares for lot in lots), Decimal())
+    documented_lot_open = sum((lot.remaining_shares for lot in lots), Decimal())
+    known_open = documented_lot_open - sale_precision_difference
+    ledger_difference = known_open - unresolved_sold - reconstructed
+    if abs(ledger_difference) > SHARE_TOLERANCE:
+        ledger_status = "LOT_LEDGER_MISMATCH"
+        issues.append(f"Lot ledger differs from reconstructed ownership by {ledger_difference} shares")
+    elif unresolved_sold:
+        ledger_status = "LOT_LEDGER_HAS_UNALLOCATED_SALE"
+    else:
+        ledger_status = "LOT_LEDGER_RECONCILED"
     live = _decimal(live_shares)
     difference = reconstructed - live if live is not None else None
     if difference is None:
@@ -259,10 +270,13 @@ def reconstruct_hd_ownership(rows: Iterable[dict[str, Any]], live_shares: Decima
         "shares_transferred": shares_transferred, "realized_lots_processed": len(sold),
         "known_origin_sold_lots": sum(entry.match_status == "MATCHED" for entry in sold),
         "unresolved_origin_sold_lots": sum(entry.match_status == "UNRESOLVED" for entry in sold),
+        "unresolved_provenance_count": sum(entry.match_status == "UNRESOLVED" for entry in sold),
         "total_shares_sold": total_sold, "reconstructed_remaining_shares": reconstructed,
-        "known_open_lot_shares": known_open, "unresolved_origin_remaining_shares": acquired_totals["UNKNOWN"],
+        "documented_lot_open_shares_before_offsets": documented_lot_open,
+        "known_open_lot_shares": known_open, "unknown_origin_acquired_shares": acquired_totals["UNKNOWN"],
         "unresolved_sold_lot_shares": unresolved_sold, "live_hd_shares": live,
         "reconciliation_difference": difference, "reconciliation_status": live_status,
+        "lot_ledger_difference": ledger_difference, "lot_ledger_status": ledger_status,
         "share_tolerance": SHARE_TOLERANCE, "live_tolerance": LIVE_TOLERANCE,
         "lot_display_tolerance": LOT_DISPLAY_TOLERANCE,
         "transfer_precision_difference": transfer_precision_difference,

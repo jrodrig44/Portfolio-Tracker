@@ -45,7 +45,12 @@ class HDOwnershipTests(unittest.TestCase):
             transaction("sale", "SALE", "2026-02-12", "5", source="Merrill", source_location="Merrill", source_account_type="Realized lot", acquisition_date="2023-06-30", lot_sequence=1, cost_basis=Decimal("1000")),
             transaction("sale-total", "SALE", "2026-02-12", "5", source="Merrill", source_location="Merrill", source_account_type="Brokerage"),
         ]
-        result = reconstruct_hd_ownership(rows)
+        transfer_lots = [{
+            "parent_transfer_fingerprint": "out", "transfer_date": "2024-07-15",
+            "acquisition_date": "2023-06-30", "transferred_shares": Decimal("5"),
+            "transfer_lot_fingerprint": "detail",
+        }]
+        result = reconstruct_hd_ownership(rows, transfer_lots=transfer_lots)
 
         self.assertEqual(result.summary["total_economic_shares_acquired"], Decimal("5"))
         self.assertEqual(result.summary["shares_transferred"], Decimal("5"))
@@ -53,6 +58,21 @@ class HDOwnershipTests(unittest.TestCase):
         self.assertEqual(result.summary["reconstructed_remaining_shares"], Decimal("0"))
         self.assertEqual(result.lots[0].known_cost_basis, Decimal("1000"))
         self.assertNotEqual(result.lots[0].known_cost_basis, Decimal("1500"))
+
+    def test_transfer_lineage_does_not_depend_on_future_sale_rows(self):
+        rows = [
+            transaction("buy", "ESPP_PURCHASE", "2023-06-30", "5", amount=Decimal("1000")),
+            transaction("out", "TRANSFER_OUT", "2024-07-15", "5", transfer_match_id="move", destination_location="Merrill"),
+            transaction("in", "TRANSFER_IN", "2024-07-16", "5", transfer_match_id="move", source="Merrill", source_location="Computershare", destination_location="Merrill"),
+        ]
+        details = [{"parent_transfer_fingerprint": "out", "acquisition_date": "2023-06-30", "transferred_shares": "5", "transfer_lot_fingerprint": "detail"}]
+
+        result = reconstruct_hd_ownership(rows, transfer_lots=details)
+
+        self.assertEqual(result.summary["custody_transfers_processed"], 1)
+        self.assertEqual(result.summary["total_economic_shares_acquired"], Decimal("5"))
+        self.assertEqual(result.lots[0].current_custodian, "Merrill")
+        self.assertFalse(result.sold_lots)
 
     def test_realized_lots_support_partial_sales_unknown_rows_and_display_tolerance(self):
         rows = [
@@ -72,6 +92,28 @@ class HDOwnershipTests(unittest.TestCase):
         self.assertEqual(next(lot for lot in result.lots if lot.origin_type == "RESTRICTED_SHARE").remaining_shares, Decimal("10"))
         self.assertEqual(result.summary["total_shares_sold"], Decimal("9.0637"))
         self.assertEqual(result.summary["reconstructed_remaining_shares"], Decimal("5.999728"))
+        self.assertEqual(result.summary["known_open_lot_shares"], Decimal("9.999728"))
+        self.assertEqual(result.summary["unresolved_sold_lot_shares"], Decimal("4"))
+        self.assertEqual(result.summary["unknown_origin_acquired_shares"], Decimal("0"))
+        self.assertEqual(result.summary["lot_ledger_difference"], Decimal("0"))
+        self.assertEqual(result.summary["lot_ledger_status"], "LOT_LEDGER_HAS_UNALLOCATED_SALE")
+
+    def test_unknown_acquisitions_are_not_assigned_to_unresolved_sales(self):
+        rows = [
+            transaction("known", "ESPP_PURCHASE", "2024-01-01", "10"),
+            transaction("unknown", "TRANSFER_IN", "2025-01-01", "8", source="Merrill", source_location="External"),
+            transaction("na-1", "SALE", "2026-02-12", "4", source="Merrill", source_account_type="Realized lot", acquisition_date=None, lot_sequence=1),
+            transaction("na-2", "SALE", "2026-02-12", "4", source="Merrill", source_account_type="Realized lot", acquisition_date=None, lot_sequence=2),
+            transaction("total", "SALE", "2026-02-12", "8", source="Merrill", source_account_type="Brokerage"),
+        ]
+        result = reconstruct_hd_ownership(rows)
+
+        unknown = next(lot for lot in result.lots if lot.origin_type == "UNKNOWN")
+        self.assertEqual(unknown.remaining_shares, Decimal("8"))
+        self.assertEqual(unknown.shares_sold, Decimal("0"))
+        self.assertEqual(result.summary["unknown_origin_acquired_shares"], Decimal("8"))
+        self.assertNotIn("unresolved_origin_remaining_shares", result.summary)
+        self.assertEqual(result.summary["known_open_lot_shares"] - result.summary["unresolved_sold_lot_shares"], result.summary["reconstructed_remaining_shares"])
 
 
 if __name__ == "__main__":

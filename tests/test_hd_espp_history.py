@@ -8,7 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
-from hd_espp_history import HDESPPHistoryService, HDTransaction, _connect, detect_document_family, economic_share_ownership, match_custody_transfers, parse_hd_statement_text, reconcile_custody_transfers, transaction_fingerprint, transaction_record_type
+from hd_espp_history import HDESPPHistoryService, HDTransaction, _connect, detect_document_family, economic_share_ownership, match_custody_transfers, parse_hd_statement_text, parse_hd_transfer_lots, reconcile_custody_transfers, transaction_fingerprint, transaction_record_type
 
 
 LEGACY = """The Home Depot, Inc ESPP - Employee Plan Statement
@@ -49,6 +49,13 @@ COMPUTERSHARE_TRANSFER = """The Home Depot, Inc ESPP - Employee Plan Statement
 01 Jan 2024 - 30 Sep 2024
 15 Jul 2024 Plan Transfer Confirm -15.000000 0.021341
 15 Jul 2024 Transfer -15.000000 4,259.06
+30 Jun 2023 -5.302147 1,400.00 Covered
+15 Sep 2023 -0.032549 10.65 Covered
+15 Dec 2023 -0.030610 10.71 Covered
+29 Dec 2023 -4.752731 1,400.00 Covered
+22 Mar 2024 -0.055252 21.91 Covered
+14 Jun 2024 -0.063428 22.03 Covered
+28 Jun 2024 -4.763283 1,393.76 Covered
 """
 
 
@@ -82,6 +89,18 @@ class HDESPPHistoryTests(unittest.TestCase):
         self.assertEqual(purchase.shares, Decimal("4.670123"))
         self.assertEqual(purchase.purchase_price, Decimal("299.78"))
         self.assertEqual(drip.amount, Decimal("12.55"))
+
+    def test_computershare_transfer_lot_details_are_normalized(self) -> None:
+        _, rows, issues = parse_hd_statement_text(COMPUTERSHARE_TRANSFER, "transfer.pdf")
+        details = parse_hd_transfer_lots(COMPUTERSHARE_TRANSFER, rows, "transfer.pdf")
+
+        self.assertFalse(issues)
+        self.assertEqual(len(details), 7)
+        self.assertEqual(sum((row.transferred_shares for row in details), Decimal()), Decimal("15.000000"))
+        self.assertEqual(details[-1].transferred_shares, Decimal("4.763283"))
+        self.assertEqual(details[-1].reported_value, Decimal("1393.76"))
+        self.assertEqual(details[-1].source_type, "COVERED")
+        self.assertEqual({row.parent_transfer_fingerprint for row in details}, {next(row.transaction_fingerprint for row in rows if row.transfer_value is not None)})
 
     def test_merrill_sale_and_realized_lot(self) -> None:
         self.assertEqual(detect_document_family(MERRILL), "merrill_hd")
@@ -201,6 +220,19 @@ Dividends
             state = service.state()
             self.assertEqual(state["summary"]["total_shares_sold"], Decimal("28.0000"))
             self.assertEqual(sum(row["source_account_type"] == "Realized lot" for row in state["transactions"]), 10)
+
+    def test_transfer_lots_are_persisted_and_linked_to_aggregate_transfer(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); service = HDESPPHistoryService(root / "pdfs", root / "history.sqlite")
+            result = self._import_texts(service, {"transfer.pdf": COMPUTERSHARE_TRANSFER})
+            state = service.state()
+            aggregate = next(row for row in state["transactions"] if row["transfer_value"] is not None)
+
+            self.assertEqual(result["transfer_lots"], 7)
+            self.assertEqual(state["summary"]["transfer_lots"], 7)
+            self.assertEqual(sum(Decimal(row["transferred_shares"]) for row in state["transfer_lots"]), Decimal("15.000000"))
+            self.assertEqual({row["parent_transfer_fingerprint"] for row in state["transfer_lots"]}, {aggregate["transaction_fingerprint"]})
+            self.assertTrue(all(row["reported_value"] and row["provenance"] for row in state["transfer_lots"]))
 
     def test_authoritative_rebuild_replaces_stale_fields_and_is_repeatable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
