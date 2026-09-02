@@ -119,6 +119,48 @@ class HDESPPHistoryTests(unittest.TestCase):
         self.assertTrue(all(row.ambiguous and "unavailable" in row.notes for row in unavailable))
         self.assertEqual(len({row.transaction_fingerprint for row in unavailable}), 2)
 
+    def test_legacy_drip_parsing_handles_blank_fee_and_tiny_dividend(self) -> None:
+        text = """The Home Depot, Inc ESPP - Employee Plan Statement
+01 Jan 2024 - 30 Sep 2024
+15 Sep 2023 Dividend Reinvestment 11.08 0.44 10.64 326.887800 0.032549 5.334696
+13 Sep 2024 Dividend Reinvestment 0.05 0.05 378.217400 0.000132 0.021473
+"""
+        _, rows, issues = parse_hd_statement_text(text)
+        self.assertFalse(issues)
+        self.assertEqual(len(rows), 2)
+        normal = next(row for row in rows if row.transaction_date == date(2023, 9, 15))
+        tiny = next(row for row in rows if row.transaction_date == date(2024, 9, 13))
+        self.assertEqual(normal.amount, Decimal("10.64"))
+        self.assertEqual(normal.fees, Decimal("0.44"))
+        self.assertEqual(normal.purchase_price, Decimal("326.887800"))
+        self.assertEqual(tiny.amount, Decimal("0.05"))
+        self.assertEqual(tiny.fees, Decimal("0.00"))
+        self.assertEqual(tiny.purchase_price, Decimal("378.217400"))
+        self.assertEqual(tiny.shares, Decimal("0.000132"))
+
+    def test_equateplus_drip_parsing_uses_table_columns(self) -> None:
+        text = """Purchase activity statement Jeffrey Rodriguez
+1 Jan 2025 - 31 Mar 2025 User ID: 204474190
+Dividend Reinvestments
+1 Jan 2025 to 31 Mar 2025
+Gross Dividend Dividend Purchase Purchased Residual
+Record Date Purchase Date Entitled Quantity Payment Taxes Fees Reinvested Price Shares Amount
+12 Mar 2025 4.255534 9.78 USD 0.00 USD 0.14 USD 9.79 USD 358.05 USD 0.02693 0.00 USD
+ESPP-PURCHASE at 2.3 USD
+rate
+"""
+        _, rows, issues = parse_hd_statement_text(text)
+        self.assertFalse(issues)
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row.transaction_date, date(2025, 3, 12))
+        self.assertEqual(row.amount, Decimal("9.79"))
+        self.assertEqual(row.fees, Decimal("0.14"))
+        self.assertEqual(row.taxes, Decimal("0.00"))
+        self.assertEqual(row.purchase_price, Decimal("358.05"))
+        self.assertEqual(row.shares, Decimal("0.02693"))
+        self.assertEqual(row.notes, "gross_dividend=9.78")
+
     def test_transfer_values_are_not_cost_basis(self) -> None:
         _, merrill, issues = parse_hd_statement_text(MERRILL_TRANSFERS)
         self.assertFalse(issues)

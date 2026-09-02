@@ -137,12 +137,29 @@ def _legacy(text: str, document: str) -> list[HDTransaction]:
     rows: list[HDTransaction] = []
     start, end = _period(text)
     purchase = re.compile(rf"({DATE_WORD}) Purchase ({MONEY}) ({MONEY}) ({DATE_WORD}) ({MONEY}) ({DATE_WORD}) ({MONEY}) ({MONEY}) ({MONEY})", re.I)
-    drip = re.compile(rf"({DATE_WORD}) Dividend Reinvestment ({MONEY}) ({MONEY}) ({MONEY}) ({MONEY}) ({MONEY})", re.I)
     transfer = re.compile(rf"({DATE_WORD}) (Plan Transfer Confirm|Transfer) (-?{MONEY})(?: ({MONEY}))?", re.I)
     for match in purchase.finditer(text):
         rows.append(HDTransaction(_date(match[1]), "ESPP_PURCHASE", "Computershare", "ESPP", shares=_decimal(match[9]), amount=_decimal(match[2]), fair_market_value=_decimal(match[7]), purchase_price=_decimal(match[8]), acquisition_date=_date(match[1]), source_location="Computershare", source_document=document, source_period_start=start, source_period_end=end, notes=f"grant_date={_date(match[4])}; grant_fmv={_decimal(match[5])}"))
-    for match in drip.finditer(text):
-        rows.append(HDTransaction(_date(match[1]), "DIVIDEND_REINVESTMENT", "Computershare", "ESPP", shares=_decimal(match[6]), amount=_decimal(match[4]), purchase_price=_decimal(match[5]), fees=_decimal(match[3]), source_location="Computershare", source_document=document, source_period_start=start, source_period_end=end, notes=f"gross_dividend={_decimal(match[2])}"))
+    for line in text.splitlines():
+        if "Dividend Reinvestment" not in line:
+            continue
+        match = re.match(rf"^\s*({DATE_WORD})\s+Dividend Reinvestment\s+(.*)$", line, re.I)
+        if match is None:
+            continue
+        values = re.findall(r"[-+]?\d+(?:[ ,]\d{3})*(?:\.\d+)?", match.group(2))
+        if len(values) < 5:
+            continue
+        normalized = [_decimal(value) for value in values]
+        if len(normalized) >= 6:
+            gross, fee, net, purchase_price, shares, total_shares = normalized[:6]
+        elif len(normalized) == 5:
+            gross, net, purchase_price, shares, total_shares = normalized[:5]
+            fee = Decimal("0")
+        else:
+            continue
+        if gross is None or net is None or purchase_price is None or shares is None:
+            continue
+        rows.append(HDTransaction(_date(match.group(1)), "DIVIDEND_REINVESTMENT", "Computershare", "ESPP", shares=shares, amount=net, purchase_price=purchase_price, fees=fee or Decimal("0"), taxes=Decimal("0"), source_location="Computershare", source_document=document, source_period_start=start, source_period_end=end, notes=f"gross_dividend={gross}"))
     for match in transfer.finditer(text):
         shares = abs(_decimal(match[3]) or Decimal())
         transfer_value = _decimal(match[4]) if match[2].lower() == "transfer" else None
@@ -185,14 +202,26 @@ def _equateplus(text: str, document: str) -> list[HDTransaction]:
         if len(dates) >= 3 and len(values) >= 7:
             rows.append(HDTransaction(_date(dates[2]), "ESPP_PURCHASE", "EquatePlus/Computershare", "ESPP", shares=_decimal(values[-2]), amount=_decimal(values[0]), fair_market_value=_decimal(values[-4]), purchase_price=_decimal(values[-3]), acquisition_date=_date(dates[2]), source_location="EquatePlus", source_document=document, source_period_start=start, source_period_end=end))
     for line in drip_text.splitlines():
-        dates = re.findall(DATE_WORD, line, re.I)
-        if not dates:
+        if "Dividend Reinvestments" in line or "Record Date" in line or "Purchase Date" in line or "Gross Dividend" in line or "ESPP-PURCHASE at" in line:
             continue
-        tail = line[line.find(dates[0]) + len(dates[0]):]
-        tail = re.sub(r"(?<=\d) (?=\d{3}\.)", "", tail)
-        values = re.findall(r"\d+(?:,\d{3})*(?:\.\d+)?", tail)
-        if len(values) >= 8 and "USD" in line:
-            rows.append(HDTransaction(_date(dates[0]), "DIVIDEND_REINVESTMENT", "EquatePlus/Computershare", "ESPP", shares=_decimal(values[6]), amount=_decimal(values[4]), fees=_decimal(values[3]), taxes=_decimal(values[2]), purchase_price=_decimal(values[5]), source_location="EquatePlus", source_document=document, source_period_start=start, source_period_end=end, notes=f"gross_dividend={_decimal(values[1])}"))
+        date_match = re.search(rf"({DATE_WORD})\s+", line, re.I)
+        if date_match is None:
+            continue
+        remainder = line[date_match.end():]
+        tokens = re.findall(r"[-+]?\d+(?:,\d{3})*(?:\.\d+)?", remainder)
+        if len(tokens) < 7:
+            continue
+        # Real EquatePlus table layout after the date: entitled quantity, gross dividend, taxes, fees, net reinvested, purchase price, purchased shares, residual amount.
+        entitled, gross, taxes, fees, net, price, shares, *rest = tokens[:8]
+        gross_value = _decimal(gross)
+        taxes_value = _decimal(taxes)
+        fees_value = _decimal(fees)
+        net_value = _decimal(net)
+        price_value = _decimal(price)
+        shares_value = _decimal(shares)
+        if gross_value is None or net_value is None or price_value is None or shares_value is None:
+            continue
+        rows.append(HDTransaction(_date(date_match.group(1)), "DIVIDEND_REINVESTMENT", "EquatePlus/Computershare", "ESPP", shares=shares_value, amount=net_value, purchase_price=price_value, fees=fees_value or Decimal("0"), taxes=taxes_value or Decimal("0"), source_location="EquatePlus", source_document=document, source_period_start=start, source_period_end=end, notes=f"gross_dividend={gross_value}"))
     return rows
 
 
@@ -273,6 +302,18 @@ def _section_completeness_issues(family: str, text: str, rows: list[HDTransactio
             accounted = any(row.transaction_type in expected for row in rows)
         if detected and not accounted:
             issues.append(f"Detected supported {label} section/activity but parsed no corresponding transaction")
+    for row in rows:
+        if row.transaction_type != "DIVIDEND_REINVESTMENT":
+            continue
+        if row.transaction_date is None or row.amount is None or row.purchase_price is None or row.shares is None:
+            issues.append(f"DRIP row on {row.transaction_date or 'unknown date'} missing core fields; review required")
+            continue
+        if row.purchase_price <= Decimal("0") or row.shares <= Decimal("0"):
+            issues.append(f"DRIP row on {row.transaction_date} has non-positive purchase-price/share fields; review required")
+        if row.purchase_price > Decimal("1000") and row.shares < Decimal("0.01"):
+            issues.append(f"DRIP row on {row.transaction_date} has suspicious price/share inversion; review required")
+        if row.shares > Decimal("100") and row.purchase_price < Decimal("1"):
+            issues.append(f"DRIP row on {row.transaction_date} has suspicious share/price inversion; review required")
     return issues
 
 
