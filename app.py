@@ -26,6 +26,7 @@ from portfolio_analysis import future_value as shared_future_value
 from portfolio_analysis import normalize_sector as shared_normalize_sector
 from portfolio_analysis import snowball_tracker as shared_snowball_tracker
 from portfolio_analysis import years_to_income_target as shared_years_to_income_target
+from portfolio_insights import build_portfolio_insights as build_shared_portfolio_insights
 from portfolio_history import DEFAULT_HISTORY_RANGE, HISTORY_RANGE_OPTIONS, filter_history_range
 from portfolio_export import build_export_package as build_shared_export_package
 from hd_espp_integration import load_hd_historical_integration_context
@@ -5693,7 +5694,31 @@ def _render_statement_history_import(total_value: float) -> None:
         st.caption("Historical statement points are verified statement-ending values, not daily market values. Live points are local daily snapshots that update as prices change.")
 
 
-def _render_analysis_tab(metrics: pd.DataFrame, mobile_mode: bool = False) -> None:
+def _render_hd_historical_analysis_context(hd_historical_context: dict[str, Any] | None) -> None:
+    if not isinstance(hd_historical_context, dict) or not hd_historical_context.get("available"):
+        return
+    economics = hd_historical_context.get("documented_economics", {})
+    realized = hd_historical_context.get("realized", {})
+    coverage = hd_historical_context.get("coverage", {})
+    reconciliation = hd_historical_context.get("reconciliation", {})
+    summary = hd_historical_context.get("summary", {})
+    basis_value = coverage.get("basis_coverage_pct")
+    basis_coverage = float(basis_value) if basis_value is not None else None
+    basis_coverage_pct = basis_coverage * 100 if basis_coverage is not None and 0 <= basis_coverage <= 1 else basis_coverage
+    money = lambda value: _format_currency(value) if value is not None else "Unknown"
+    st.markdown("#### HD / ESPP Historical Context")
+    st.dataframe(pd.DataFrame([
+        {"Metric": "Documented ESPP Contributions", "Value": money(economics.get("espp_employee_contributions"))},
+        {"Metric": "Purchase Discount Benefit", "Value": money(economics.get("espp_purchase_discount_benefit"))},
+        {"Metric": "Documented Realized Gain", "Value": money(realized.get("documented_realized_gain"))},
+        {"Metric": "Basis Coverage", "Value": _format_percent(basis_coverage_pct) if basis_coverage_pct is not None else "Unknown"},
+        {"Metric": "Historical/Live Reconciliation", "Value": f"{reconciliation.get('phase3a_status', 'UNKNOWN')} ({reconciliation.get('historical_live_difference', 'Unknown')} shares)"},
+        {"Metric": "Lifetime Return Status", "Value": str(summary.get("lifetime_return_status", "WITHHELD"))},
+    ]), width="stretch", hide_index=True)
+    st.caption("Source-bounded documented HD history. Withheld lifetime metrics are not calculated or inferred.")
+
+
+def _render_analysis_tab(metrics: pd.DataFrame, mobile_mode: bool = False, hd_historical_context: dict[str, Any] | None = None) -> None:
     st.subheader("Portfolio Analysis")
 
     with st.expander("Assumptions", expanded=False):
@@ -5823,6 +5848,7 @@ def _render_analysis_tab(metrics: pd.DataFrame, mobile_mode: bool = False) -> No
     st.caption("Projections use regular portfolio contributions only and exclude ESPP payroll contributions unless explicitly stated otherwise.")
     st.caption("This estimate uses the current portfolio yield and one year of regular contributions only; it is not the portfolio's current annual income.")
     st.caption(_manual_input_data_note())
+    _render_hd_historical_analysis_context(hd_historical_context)
     total_market_value = float(analysis_df["market_value"].sum())
     if total_market_value > 0:
         analysis_df["weight_pct"] = analysis_df["market_value"] / total_market_value * 100
@@ -7143,8 +7169,20 @@ def _coerce_numeric_columns(frame: pd.DataFrame, columns: list[str], default_val
     return normalized
 
 
-def _render_insights_tab(metrics: pd.DataFrame, mobile_mode: bool = False) -> None:
+def _render_hd_historical_insights_context(insights_package: dict[str, Any]) -> None:
+    context = insights_package.get("hd_historical_context", {}) if isinstance(insights_package, dict) else {}
+    if not isinstance(context, dict) or not context.get("available"):
+        return
+    st.markdown("#### HD / ESPP Historical Summary")
+    for observation in insights_package.get("observations", []):
+        text = str(observation)
+        if text.startswith("HD historical") or text.startswith("HD documented") or text.startswith("Complete lifetime HD return"):
+            st.write(f"- {text}")
+
+
+def _render_insights_tab(metrics: pd.DataFrame, mobile_mode: bool = False, hd_historical_context: dict[str, Any] | None = None) -> None:
     st.subheader("Portfolio Insights & Trends")
+    shared_insights = build_shared_portfolio_insights(metrics, hd_historical_context=hd_historical_context)
 
     insights = metrics.copy()
     insights["asset_type"] = insights["asset_type"].apply(_canonical_asset_type) if "asset_type" in insights.columns else "Other"
@@ -7325,6 +7363,7 @@ def _render_insights_tab(metrics: pd.DataFrame, mobile_mode: bool = False) -> No
         f"- Growth outlook: 10-year projected value {_format_currency(value_10y)}, "
         f"20-year projected value {_format_currency(value_20y)}."
     )
+    _render_hd_historical_insights_context(shared_insights)
 
     st.markdown("#### Updated Portfolio Analysis - Current Snapshot")
     goal_state = _resolve_insights_income_goal_state(
@@ -7686,15 +7725,17 @@ def main() -> None:
         for field_name in sorted(missing_fields):
             st.error(f"Missing in export: {field_name}")
 
+    hd_historical_context = load_hd_historical_integration_context(metrics)
+
     with tab_analysis:
-        _render_analysis_tab(metrics, mobile_mode=mobile_mode)
+        _render_analysis_tab(metrics, mobile_mode=mobile_mode, hd_historical_context=hd_historical_context)
 
     if tab_ai_analysis is not None:
         with tab_ai_analysis:
             _render_ai_analysis_tab(holdings, metrics, mobile_mode=mobile_mode)
 
     with tab_insights:
-        _render_insights_tab(metrics, mobile_mode=mobile_mode)
+        _render_insights_tab(metrics, mobile_mode=mobile_mode, hd_historical_context=hd_historical_context)
 
     with tab_health:
         _render_health_tab(metrics, mobile_mode=mobile_mode)

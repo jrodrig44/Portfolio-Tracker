@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,10 @@ from hd_espp_history import HDESPPHistoryService, HD_HISTORY_DB_PATH
 from hd_espp_lifetime import build_hd_lifetime_economics
 from hd_espp_reconciliation import build_hd_phase3a_reconciliation
 from hd_ownership import reconstruct_hd_ownership
+
+
+LOGGER = logging.getLogger("portfolio_tracker")
+SAFE_UNAVAILABLE_REASON = "HD historical context is temporarily unavailable"
 
 
 def _decimal(value: Any) -> Decimal | None:
@@ -140,8 +145,9 @@ def load_hd_historical_integration_context(metrics: pd.DataFrame | None = None, 
     try:
         service = HDESPPHistoryService(db_path=path)
         return build_hd_historical_integration_context(service.state(), metrics)
-    except Exception as exc:
-        return unavailable_hd_historical_context(f"HD historical context unavailable: {exc}")
+    except Exception:
+        LOGGER.exception("HD historical integration context loading failed")
+        return unavailable_hd_historical_context(SAFE_UNAVAILABLE_REASON)
 
 
 def compact_hd_historical_context(context: dict[str, Any]) -> dict[str, Any]:
@@ -185,4 +191,5 @@ __all__ = [
     "compact_hd_historical_context",
     "load_hd_historical_integration_context",
     "unavailable_hd_historical_context",
+    "SAFE_UNAVAILABLE_REASON",
 ]

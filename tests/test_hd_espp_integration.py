@@ -5,10 +5,11 @@ import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 
-from hd_espp_integration import build_hd_historical_integration_context, load_hd_historical_integration_context, unavailable_hd_historical_context
+from hd_espp_integration import SAFE_UNAVAILABLE_REASON, build_hd_historical_integration_context, load_hd_historical_integration_context, unavailable_hd_historical_context
 from portfolio_ai import compact_ai_context
 from portfolio_analysis import build_analysis
 from portfolio_export import build_export_markdown, build_export_payload
@@ -143,6 +144,62 @@ class HDESPPIntegrationTests(unittest.TestCase):
         self.assertIn("UNRESOLVED", serialized)
         self.assertNotIn("transaction_fingerprint", serialized)
         self.assertNotIn("sanitized.pdf", serialized)
+
+    def test_load_failure_is_sanitized_across_payload_ai_and_exports_but_logged(self) -> None:
+        sensitive = r"C:\Users\example\Documents\Portfolio Tracker\data\history.sqlite"
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "history.sqlite"
+            database.touch()
+            with patch("hd_espp_integration.HDESPPHistoryService.state", side_effect=RuntimeError(sensitive)), self.assertLogs("portfolio_tracker", level="ERROR") as captured:
+                context = load_hd_historical_integration_context(metrics(), database)
+        frame = metrics()
+        payload = build_export_payload(frame.to_dict(orient="records"), frame, history=[], external_context={"supplemental_investment_intelligence": [], "historical_security_context": [], "dividend_seasonality": {}, "yahoo_metadata": []}, hd_historical_context=context, generated_at="2026-09-01T12:00:00")
+        compact = compact_ai_context(payload, "Comprehensive Portfolio Review", "")
+        markdown = build_export_markdown(payload)
+        encoded = json.dumps(payload, default=str)
+
+        self.assertFalse(context["available"])
+        self.assertEqual(context["summary"]["reason"], SAFE_UNAVAILABLE_REASON)
+        for rendered in (json.dumps(context, default=str), json.dumps(compact, default=str), markdown, encoded):
+            self.assertNotIn(sensitive, rendered)
+            self.assertNotIn("history.sqlite", rendered)
+        self.assertTrue(any(sensitive in row for row in captured.output))
+
+    def test_streamlit_analysis_and_insights_use_optional_shared_context_without_zero_fallback(self) -> None:
+        import app
+
+        context = build_hd_historical_integration_context(hd_state(), metrics())
+        captured_frames: list[pd.DataFrame] = []
+        with patch.object(app.st, "markdown"), patch.object(app.st, "caption"), patch.object(app.st, "dataframe", side_effect=lambda frame, **kwargs: captured_frames.append(frame)):
+            app._render_hd_historical_analysis_context(context)
+        rendered = {row["Metric"]: row["Value"] for row in captured_frames[0].to_dict(orient="records")}
+        self.assertEqual(rendered["Documented ESPP Contributions"], app._format_currency(context["documented_economics"]["espp_employee_contributions"]))
+        self.assertEqual(rendered["Purchase Discount Benefit"], app._format_currency(context["documented_economics"]["espp_purchase_discount_benefit"]))
+        self.assertEqual(rendered["Documented Realized Gain"], app._format_currency(context["realized"]["documented_realized_gain"]))
+        self.assertEqual(rendered["Lifetime Return Status"], context["summary"]["lifetime_return_status"])
+
+        package = build_portfolio_insights(metrics(), hd_historical_context=context)
+        written: list[str] = []
+        with patch.object(app.st, "markdown"), patch.object(app.st, "write", side_effect=lambda value: written.append(str(value))):
+            app._render_hd_historical_insights_context(package)
+        self.assertTrue(any(str(context["documented_economics"]["espp_employee_contributions"]) in row for row in written))
+        self.assertTrue(any(context["summary"]["lifetime_return_status"] in row for row in written))
+
+        with patch.object(app.st, "markdown") as markdown_mock, patch.object(app.st, "dataframe") as dataframe_mock, patch.object(app.st, "write") as write_mock:
+            app._render_hd_historical_analysis_context(unavailable_hd_historical_context())
+            app._render_hd_historical_insights_context({"hd_historical_context": unavailable_hd_historical_context(), "observations": []})
+        markdown_mock.assert_not_called()
+        dataframe_mock.assert_not_called()
+        write_mock.assert_not_called()
+
+    def test_streamlit_main_passes_one_loaded_context_to_analysis_and_insights(self) -> None:
+        source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
+        main_tail = source.split("unresolved_prices = metrics[", 1)[1]
+        self.assertIn("hd_historical_context = load_hd_historical_integration_context(metrics)", main_tail)
+        self.assertIn("_render_analysis_tab(metrics, mobile_mode=mobile_mode, hd_historical_context=hd_historical_context)", main_tail)
+        self.assertIn("_render_insights_tab(metrics, mobile_mode=mobile_mode, hd_historical_context=hd_historical_context)", main_tail)
+        insights_block = source.split("def _render_insights_tab", 1)[1].split("def _render_health_tab", 1)[0]
+        self.assertIn("build_shared_portfolio_insights(metrics, hd_historical_context=hd_historical_context)", insights_block)
 
 
 if __name__ == "__main__":
