@@ -48,6 +48,41 @@ class HDPhase3AReconciliationTests(unittest.TestCase):
         self.assertEqual(overlaps[0]["left_source"], "Merrill")
         self.assertEqual(overlaps[0]["right_source"], "EquatePlus / Computershare")
 
+    def test_coverage_gaps_use_merged_intervals_not_adjacent_documents(self) -> None:
+        documents = [
+            {"source_document": "long.pdf", "document_family": "computershare_legacy", "period_start": "2024-01-01", "period_end": "2024-06-30", "parsed_transaction_occurrence_count": 1},
+            {"source_document": "nested.pdf", "document_family": "merrill_hd", "period_start": "2024-03-01", "period_end": "2024-03-31", "parsed_transaction_occurrence_count": 1},
+            {"source_document": "contiguous.pdf", "document_family": "merrill_hd", "period_start": "2024-07-01", "period_end": "2024-09-30", "parsed_transaction_occurrence_count": 1},
+            {"source_document": "later.pdf", "document_family": "computershare_equateplus", "period_start": "2024-10-15", "period_end": "2024-12-31", "parsed_transaction_occurrence_count": 1},
+        ]
+
+        _, gaps, overlaps = build_statement_coverage(documents, [])
+        global_gaps = [gap for gap in gaps if gap["scope"] == "GLOBAL_HD"]
+
+        self.assertEqual(global_gaps, [{
+            "issue_type": "STATEMENT_COVERAGE_GAP",
+            "scope": "GLOBAL_HD",
+            "gap_start": __import__("datetime").date(2024, 10, 1),
+            "gap_end": __import__("datetime").date(2024, 10, 14),
+            "coverage_status": "NO_DOCUMENT_COVERAGE",
+            "notes": "No global_hd source document covers this interval; this does not prove there was no activity.",
+        }])
+        self.assertTrue(any(row["left_source"] == "Computershare" and row["right_source"] == "Merrill" for row in overlaps))
+
+    def test_source_occurrence_metadata_prevents_canonical_dedup_false_inactivity(self) -> None:
+        documents = [
+            {"source_document": "canonical-owner.pdf", "document_family": "computershare_legacy", "period_start": "2024-01-01", "period_end": "2024-03-31", "parsed_transaction_occurrence_count": 1, "earliest_parsed_transaction_date": "2024-01-15", "latest_parsed_transaction_date": "2024-01-15", "parsed_transaction_types": "ESPP_PURCHASE"},
+            {"source_document": "cumulative-repeat.pdf", "document_family": "computershare_legacy", "period_start": "2024-01-01", "period_end": "2024-06-30", "parsed_transaction_occurrence_count": 1, "earliest_parsed_transaction_date": "2024-01-15", "latest_parsed_transaction_date": "2024-01-15", "parsed_transaction_types": "ESPP_PURCHASE"},
+        ]
+        canonical_transactions = [tx("same", "ESPP_PURCHASE", "2024-01-15", "1", source_document="canonical-owner.pdf")]
+
+        timeline, _, _ = build_statement_coverage(documents, canonical_transactions)
+        repeat = next(row for row in timeline if row["source_document"] == "cumulative-repeat.pdf")
+
+        self.assertEqual(repeat["coverage_status"], "DOCUMENT_COVERAGE_WITH_ACTIVITY")
+        self.assertEqual(repeat["transactions"], 1)
+        self.assertEqual(repeat["canonical_transactions"], 0)
+
     def test_position_checkpoint_parsing_and_reconciliation_statuses(self) -> None:
         legacy = """The Home Depot, Inc ESPP - Employee Plan Statement
 01 Jan 2024 - 31 Mar 2024
@@ -68,14 +103,49 @@ HOME DEPOT INC HD 5.0000 1,000.00 300.0000 1,500.00 500.00 99
         rows = [tx("buy", "ESPP_PURCHASE", "2026-01-01", "5", source="Merrill", source_location="Merrill", source_account_type="Brokerage")]
         checkpoints = [
             {"checkpoint_date": "2026-02-27", "custodian": "Merrill", "shares": "5.0000", "source_document": "merrill.pdf", "confidence": "HIGH"},
-            {"checkpoint_date": "2026-02-27", "custodian": "Merrill", "shares": "5.0004", "source_document": "rounding.pdf", "confidence": "HIGH"},
-            {"checkpoint_date": "2026-02-27", "custodian": "Merrill", "shares": "4.9000", "source_document": "mismatch.pdf", "confidence": "HIGH"},
+            {"checkpoint_date": "2026-02-28", "custodian": "Merrill", "shares": "5.0004", "source_document": "rounding.pdf", "confidence": "HIGH"},
+            {"checkpoint_date": "2026-03-01", "custodian": "Merrill", "shares": "4.9000", "source_document": "mismatch.pdf", "confidence": "HIGH"},
         ]
         original = deepcopy(rows)
-        detail, _, _, _ = reconcile_position_checkpoints(rows, [], checkpoints)
+        detail, _, _, _, latest_documented_date, latest_documented_position = reconcile_position_checkpoints(rows, [], checkpoints)
 
         self.assertEqual([row["status"] for row in detail], ["MATCHED", "WITHIN_SOURCE_ROUNDING", "DIFFERENCE_REQUIRES_REVIEW"])
+        self.assertEqual(latest_documented_date.isoformat(), "2026-03-01")
+        self.assertEqual(latest_documented_position, Decimal("4.9000"))
         self.assertEqual(rows, original)
+
+    def test_duplicate_checkpoints_do_not_double_count_and_conflicts_are_explicit(self) -> None:
+        rows = [tx("buy", "ESPP_PURCHASE", "2026-01-01", "5", source="Merrill", source_location="Merrill", source_account_type="Brokerage")]
+        duplicate_checkpoints = [
+            {"checkpoint_date": "2026-02-27", "custodian": "Merrill", "shares": "5.0000", "source_document": "a.pdf", "source_documents": "a.pdf,b.pdf", "occurrence_count": 2, "confidence": "HIGH"},
+        ]
+        detail, totals, last_date, last_position, _, _ = reconcile_position_checkpoints(rows, [], duplicate_checkpoints)
+
+        self.assertEqual(len(detail), 1)
+        self.assertEqual(detail[0]["occurrence_count"], 2)
+        self.assertEqual(totals[0]["documented_position_shares"], Decimal("5.0000"))
+        self.assertEqual(last_date.isoformat(), "2026-02-27")
+        self.assertEqual(last_position, Decimal("5.0000"))
+
+        conflicting = duplicate_checkpoints + [{"checkpoint_date": "2026-02-27", "custodian": "Merrill", "shares": "4.7500", "source_document": "conflict.pdf", "confidence": "HIGH"}]
+        conflict_detail, conflict_totals, _, _, _, _ = reconcile_position_checkpoints(rows, [], conflicting)
+
+        self.assertTrue(all(row["status"] == "POSITION_CHECKPOINT_CONFLICT" for row in conflict_detail))
+        self.assertEqual(conflict_totals[0]["status"], "POSITION_CHECKPOINT_CONFLICT")
+
+    def test_partial_custodian_coverage_is_not_fully_reconciled(self) -> None:
+        rows = [
+            tx("plan", "ESPP_PURCHASE", "2026-01-01", "1"),
+            tx("brokerage", "ESPP_PURCHASE", "2026-01-01", "5", source="Merrill", source_location="Merrill", source_account_type="Brokerage"),
+        ]
+        checkpoints = [{"checkpoint_date": "2026-02-27", "custodian": "Merrill", "shares": "5", "source_document": "merrill.pdf", "confidence": "HIGH"}]
+        _, totals, last_date, last_position, latest_date, latest_position = reconcile_position_checkpoints(rows, [], checkpoints)
+
+        self.assertEqual(totals[0]["status"], "PARTIAL_CUSTODIAN_COVERAGE")
+        self.assertIsNone(last_date)
+        self.assertIsNone(last_position)
+        self.assertEqual(latest_date.isoformat(), "2026-02-27")
+        self.assertEqual(latest_position, Decimal("5"))
 
     def test_share_bridge_counts_acquisitions_sales_and_zero_effect_transfers(self) -> None:
         rows = [
@@ -132,6 +202,8 @@ HOME DEPOT INC HD 5.0000 1,000.00 300.0000 1,500.00 500.00 99
         self.assertEqual(result.summary["explained_difference"], Decimal("0"))
         self.assertEqual(result.summary["remaining_unexplained_difference"], Decimal("2"))
         self.assertEqual(result.summary["last_reconciled_historical_date"].isoformat(), "2024-01-31")
+        self.assertEqual(result.summary["latest_documented_checkpoint_date"].isoformat(), "2024-01-31")
+        self.assertEqual(result.summary["last_fully_reconciled_position_quantity"], Decimal("10"))
         self.assertFalse(result.summary["plug_transaction_created"])
         self.assertTrue(result.summary["lifetime_return_withheld"])
         self.assertTrue(any(issue["issue_type"] == "LIVE_POSITION_DIFFERENCE" for issue in result.issues))

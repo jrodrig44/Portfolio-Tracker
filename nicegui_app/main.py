@@ -377,7 +377,8 @@ async def index() -> None:
                 ("Historical Reconstructed Shares", str(phase3a.summary["historical_reconstructed_shares"])),
                 ("Live HD Shares", str(phase3a.summary["live_hd_shares"] if phase3a.summary["live_hd_shares"] is not None else "Unavailable")),
                 ("Difference", str(phase3a.summary["raw_historical_live_difference"] if phase3a.summary["raw_historical_live_difference"] is not None else "Unavailable")),
-                ("Last Reconciled Date", str(phase3a.summary["last_reconciled_historical_date"] or "Unavailable")),
+                ("Latest Documented Position", str(phase3a.summary["latest_documented_checkpoint_date"] or "Unavailable")),
+                ("Last Fully Reconciled Position", str(phase3a.summary["last_fully_reconciled_date"] or "Unavailable")),
                 ("Unresolved Sold Shares", str(phase3a.summary["unresolved_sold_shares"])),
                 ("Coverage Status", str(phase3a.summary["phase3a_status"]).replace("_", " ").title()),
             ])

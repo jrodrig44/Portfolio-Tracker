@@ -66,6 +66,38 @@ class HDPhase3AReconciliation:
     issues: list[dict[str, Any]] = field(default_factory=list)
 
 
+def _merge_intervals(intervals: Iterable[tuple[date, date]]) -> list[tuple[date, date]]:
+    ordered = sorted(intervals)
+    if not ordered:
+        return []
+    merged = [ordered[0]]
+    for start, end in ordered[1:]:
+        previous_start, previous_end = merged[-1]
+        if start <= previous_end + timedelta(days=1):
+            merged[-1] = (previous_start, max(previous_end, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _gaps_between_intervals(intervals: Iterable[tuple[date, date]], scope: str) -> list[dict[str, Any]]:
+    gaps: list[dict[str, Any]] = []
+    merged = _merge_intervals(intervals)
+    for previous, current in zip(merged, merged[1:]):
+        gap_start = previous[1] + timedelta(days=1)
+        gap_end = current[0] - timedelta(days=1)
+        if gap_start <= gap_end:
+            gaps.append({
+                "issue_type": "STATEMENT_COVERAGE_GAP",
+                "scope": scope,
+                "gap_start": gap_start,
+                "gap_end": gap_end,
+                "coverage_status": "NO_DOCUMENT_COVERAGE",
+                "notes": f"No {scope.lower()} source document covers this interval; this does not prove there was no activity.",
+            })
+    return gaps
+
+
 def build_statement_coverage(documents: Iterable[dict[str, Any]], transactions: Iterable[dict[str, Any]], checkpoints: Iterable[dict[str, Any]] = ()) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     tx_by_document: dict[str, list[dict[str, Any]]] = {}
     for row in transactions:
@@ -79,8 +111,10 @@ def build_statement_coverage(documents: Iterable[dict[str, Any]], transactions: 
         family = str(document.get("document_family") or "unknown")
         source, custodian, document_type = _source_label(family)
         source_document = str(document.get("source_document") or "")
-        rows = tx_by_document.get(source_document, [])
-        dates = sorted(_date(row.get("transaction_date")) for row in rows if _date(row.get("transaction_date")) is not None)
+        canonical_rows = tx_by_document.get(source_document, [])
+        parsed_count = int(document.get("parsed_transaction_occurrence_count") or len(canonical_rows))
+        earliest_parsed = _date(document.get("earliest_parsed_transaction_date"))
+        latest_parsed = _date(document.get("latest_parsed_transaction_date"))
         period_start = _date(document.get("period_start"))
         period_end = _date(document.get("period_end"))
         timeline.append({
@@ -91,33 +125,26 @@ def build_statement_coverage(documents: Iterable[dict[str, Any]], transactions: 
             "custodian": custodian,
             "document_type": document_type,
             "source_document": source_document,
-            "coverage_status": "DOCUMENT_COVERAGE_WITH_ACTIVITY" if rows else "DOCUMENT_COVERAGE_WITH_NO_ACTIVITY",
+            "coverage_status": "DOCUMENT_COVERAGE_WITH_ACTIVITY" if parsed_count else "DOCUMENT_COVERAGE_WITH_NO_ACTIVITY",
             "activity_period": f"{period_start or 'Unknown'} to {period_end or 'Unknown'}",
-            "earliest_transaction": dates[0] if dates else None,
-            "latest_transaction": dates[-1] if dates else None,
-            "transactions": len(rows),
+            "earliest_transaction": earliest_parsed,
+            "latest_transaction": latest_parsed,
+            "transactions": parsed_count,
+            "canonical_transactions": len(canonical_rows),
+            "parsed_transaction_types": document.get("parsed_transaction_types") or "",
             "position_checkpoint": ", ".join(f"{row.get('custodian')} {row.get('shares')}" for row in checkpoint_by_document.get(source_document, [])) or "None",
-            "notes": "Covered period has no normalized HD activity" if not rows else "Covered period has normalized HD activity",
+            "notes": "Covered period has no parsed supported HD activity" if not parsed_count else "Covered period has parsed supported HD activity",
         })
     timeline.sort(key=lambda row: (row["period_start"] or date.min, row["period_end"] or date.min, row["source_document"]))
 
-    gaps: list[dict[str, Any]] = []
     coverage_with_dates = [row for row in timeline if row["period_start"] is not None and row["period_end"] is not None]
-    for previous, current in zip(coverage_with_dates, coverage_with_dates[1:]):
-        previous_end = previous["period_end"]
-        current_start = current["period_start"]
-        if previous_end is None or current_start is None:
-            continue
-        gap_start = previous_end + timedelta(days=1)
-        gap_end = current_start - timedelta(days=1)
-        if gap_start <= gap_end:
-            gaps.append({
-                "issue_type": "STATEMENT_COVERAGE_GAP",
-                "gap_start": gap_start,
-                "gap_end": gap_end,
-                "coverage_status": "NO_DOCUMENT_COVERAGE",
-                "notes": "No HD source document covers this interval; this does not prove there was no activity.",
-            })
+    intervals = [(row["period_start"], row["period_end"]) for row in coverage_with_dates]
+    gaps = _gaps_between_intervals(intervals, "GLOBAL_HD")
+    by_scope: dict[str, list[tuple[date, date]]] = {}
+    for row in coverage_with_dates:
+        by_scope.setdefault(str(row["source"]), []).append((row["period_start"], row["period_end"]))
+    for scope, scoped_intervals in sorted(by_scope.items()):
+        gaps.extend(_gaps_between_intervals(scoped_intervals, scope))
 
     overlaps: list[dict[str, Any]] = []
     for index, left in enumerate(coverage_with_dates):
@@ -249,12 +276,20 @@ def _custodian_balances(ownership: OwnershipReconstruction) -> dict[str, Decimal
     return balances
 
 
-def reconcile_position_checkpoints(transactions: Iterable[dict[str, Any]], transfer_lots: Iterable[dict[str, Any]], checkpoints: Iterable[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], date | None, Decimal | None]:
+def reconcile_position_checkpoints(transactions: Iterable[dict[str, Any]], transfer_lots: Iterable[dict[str, Any]], checkpoints: Iterable[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], date | None, Decimal | None, date | None, Decimal | None]:
     tx_rows = [dict(row) for row in transactions]
     transfer_rows = [dict(row) for row in transfer_lots]
     checkpoint_rows = [dict(row) for row in checkpoints]
     detail: list[dict[str, Any]] = []
     total_by_date: dict[date, list[dict[str, Any]]] = {}
+    conflicts_by_key: dict[tuple[date, str], set[Decimal]] = {}
+    for checkpoint in checkpoint_rows:
+        checkpoint_date = _date(checkpoint.get("checkpoint_date"))
+        documented = _decimal(checkpoint.get("shares"))
+        custodian = str(checkpoint.get("custodian") or "")
+        if checkpoint_date is not None and documented is not None:
+            conflicts_by_key.setdefault((checkpoint_date, custodian), set()).add(documented)
+    conflict_keys = {key for key, values in conflicts_by_key.items() if len(values) > 1}
     for checkpoint in checkpoint_rows:
         checkpoint_date = _date(checkpoint.get("checkpoint_date"))
         documented = _decimal(checkpoint.get("shares"))
@@ -264,23 +299,29 @@ def reconcile_position_checkpoints(transactions: Iterable[dict[str, Any]], trans
         as_of = _reconstruct_as_of(tx_rows, transfer_rows, checkpoint_date)
         reconstructed = _custodian_balances(as_of).get(custodian, Decimal("0"))
         difference = reconstructed - documented
+        conflict = (checkpoint_date, custodian) in conflict_keys
         row = {
             "checkpoint_date": checkpoint_date,
             "custodian": custodian,
             "documented_position_shares": documented,
             "reconstructed_custodian_shares": reconstructed,
             "difference": difference,
-            "status": _checkpoint_status(difference),
+            "status": "POSITION_CHECKPOINT_CONFLICT" if conflict else _checkpoint_status(difference),
             "source_document": checkpoint.get("source_document"),
+            "source_documents": checkpoint.get("source_documents") or checkpoint.get("source_document"),
+            "occurrence_count": int(checkpoint.get("occurrence_count") or 1),
             "confidence": checkpoint.get("confidence"),
             "notes": checkpoint.get("notes"),
         }
         detail.append(row)
-        total_by_date.setdefault(checkpoint_date, []).append(row)
+        if not conflict:
+            total_by_date.setdefault(checkpoint_date, []).append(row)
 
     totals: list[dict[str, Any]] = []
     last_total_reconciled_date: date | None = None
     latest_reconciled_position: Decimal | None = None
+    latest_documented_checkpoint_date: date | None = None
+    latest_documented_position: Decimal | None = None
     for checkpoint_date, rows in sorted(total_by_date.items()):
         as_of = _reconstruct_as_of(tx_rows, transfer_rows, checkpoint_date)
         documented_total = sum((_decimal(row["documented_position_shares"]) or Decimal("0") for row in rows), Decimal("0"))
@@ -290,9 +331,12 @@ def reconcile_position_checkpoints(transactions: Iterable[dict[str, Any]], trans
         missing_custodians = [name for name, shares in custodian_balance.items() if shares > ROUNDING_TOLERANCE and name not in documented_custodians]
         difference = reconstructed_total - documented_total
         if missing_custodians:
-            status = "INSUFFICIENT_SOURCE_DATA"
+            status = "PARTIAL_CUSTODIAN_COVERAGE"
         else:
             status = _checkpoint_status(difference)
+        if latest_documented_checkpoint_date is None or checkpoint_date >= latest_documented_checkpoint_date:
+            latest_documented_checkpoint_date = checkpoint_date
+            latest_documented_position = documented_total
         if status in {"MATCHED", "WITHIN_SOURCE_ROUNDING"}:
             last_total_reconciled_date = checkpoint_date
             latest_reconciled_position = documented_total
@@ -305,7 +349,19 @@ def reconcile_position_checkpoints(transactions: Iterable[dict[str, Any]], trans
             "documented_custodians": ", ".join(sorted(documented_custodians)),
             "missing_custodian_checkpoints": ", ".join(missing_custodians),
         })
-    return sorted(detail, key=lambda row: (row["checkpoint_date"], row["custodian"])), totals, last_total_reconciled_date, latest_reconciled_position
+    for checkpoint_date, custodian in sorted(conflict_keys):
+        conflicting = [row for row in detail if row["checkpoint_date"] == checkpoint_date and row["custodian"] == custodian]
+        totals.append({
+            "checkpoint_date": checkpoint_date,
+            "documented_position_shares": ", ".join(str(row["documented_position_shares"]) for row in conflicting),
+            "reconstructed_total_shares": _reconstruct_as_of(tx_rows, transfer_rows, checkpoint_date).summary["reconstructed_remaining_shares"],
+            "difference": None,
+            "status": "POSITION_CHECKPOINT_CONFLICT",
+            "documented_custodians": custodian,
+            "missing_custodian_checkpoints": "",
+            "source_documents": "; ".join(str(row.get("source_documents") or row.get("source_document")) for row in conflicting),
+        })
+    return sorted(detail, key=lambda row: (row["checkpoint_date"], row["custodian"], str(row["documented_position_shares"]))), sorted(totals, key=lambda row: row["checkpoint_date"]), last_total_reconciled_date, latest_reconciled_position, latest_documented_checkpoint_date, latest_documented_position
 
 
 def _issue(issue_type: str, message: str, severity: str = "REVIEW") -> dict[str, Any]:
@@ -321,7 +377,7 @@ def build_hd_phase3a_reconciliation(transactions: Iterable[dict[str, Any]], tran
     reconstructed = ownership.summary["reconstructed_remaining_shares"]
     raw_difference = reconstructed - live if live is not None else None
     coverage, gaps, overlaps = build_statement_coverage(document_rows, tx_rows, checkpoint_rows)
-    checkpoint_detail, checkpoint_totals, last_reconciled_date, latest_documented_position = reconcile_position_checkpoints(tx_rows, transfer_rows, checkpoint_rows)
+    checkpoint_detail, checkpoint_totals, last_reconciled_date, last_reconciled_position, latest_documented_checkpoint_date, latest_documented_position = reconcile_position_checkpoints(tx_rows, transfer_rows, checkpoint_rows)
     unresolved_sold = [lot for lot in ownership.sold_lots if lot.match_status == "UNRESOLVED"]
     unknown_lots = [lot for lot in ownership.lots if lot.origin_type == "UNKNOWN"]
     unresolved_sold_shares = sum((lot.shares_sold for lot in unresolved_sold), Decimal("0"))
@@ -331,8 +387,9 @@ def build_hd_phase3a_reconciliation(transactions: Iterable[dict[str, Any]], tran
     if unresolved_sold_shares == unknown_acquisition_shares and unresolved_sold_shares > Decimal("0"):
         relationship_status = "QUANTITY_MATCH_ONLY_INSUFFICIENT"
 
-    issues = [_issue("STATEMENT_COVERAGE_GAP", f"No HD document coverage from {gap['gap_start']} to {gap['gap_end']}; activity unknown.") for gap in gaps]
+    issues = [_issue("STATEMENT_COVERAGE_GAP", f"No {gap['scope']} coverage from {gap['gap_start']} to {gap['gap_end']}; activity unknown.") for gap in gaps]
     issues.extend(_issue("POSITION_CHECKPOINT_MISMATCH", f"{row['custodian']} checkpoint on {row['checkpoint_date']} differs by {row['difference']} shares.") for row in checkpoint_detail if row["status"] == "DIFFERENCE_REQUIRES_REVIEW")
+    issues.extend(_issue("POSITION_CHECKPOINT_CONFLICT", f"{row['custodian']} checkpoint on {row['checkpoint_date']} has conflicting reported share values.") for row in checkpoint_detail if row["status"] == "POSITION_CHECKPOINT_CONFLICT")
     issues.extend(_issue("CUSTODY_RECONCILIATION_GAP", issue) for issue in ownership.issues if "Custody" in issue or "transfer" in issue.lower())
     if unresolved_sold_shares:
         issues.append(_issue("UNRESOLVED_SALE_PROVENANCE", f"{unresolved_sold_shares} sold shares have N/A acquisition date/basis and remain unassigned."))
@@ -340,7 +397,7 @@ def build_hd_phase3a_reconciliation(transactions: Iterable[dict[str, Any]], tran
         issues.append(_issue("UNRESOLVED_ACQUISITION_PROVENANCE", f"{unknown_acquisition_shares} acquired shares are documented Merrill receipts without source-origin provenance."))
     if raw_difference is not None and abs(raw_difference) > LIVE_TOLERANCE:
         issues.append(_issue("LIVE_POSITION_DIFFERENCE", f"Historical reconstruction differs from the live HD holding by {raw_difference} shares."))
-    if any(row["status"] == "INSUFFICIENT_SOURCE_DATA" for row in checkpoint_totals):
+    if any(row["status"] == "PARTIAL_CUSTODIAN_COVERAGE" for row in checkpoint_totals):
         issues.append(_issue("CURRENT_POSITION_NOT_HISTORICALLY_COVERED", "Latest source checkpoints do not cover every custodian with reconstructed shares."))
 
     explained_components: list[dict[str, Any]] = []
@@ -354,6 +411,9 @@ def build_hd_phase3a_reconciliation(transactions: Iterable[dict[str, Any]], tran
         "explained_difference": explained_difference,
         "remaining_unexplained_difference": remaining_unexplained,
         "last_reconciled_historical_date": last_reconciled_date,
+        "last_fully_reconciled_date": last_reconciled_date,
+        "last_fully_reconciled_position_quantity": last_reconciled_position,
+        "latest_documented_checkpoint_date": latest_documented_checkpoint_date,
         "latest_documented_position_quantity": latest_documented_position,
         "difference_introduced_after": last_reconciled_date,
         "earliest_unresolved_period": gaps[0]["gap_start"] if gaps else None,

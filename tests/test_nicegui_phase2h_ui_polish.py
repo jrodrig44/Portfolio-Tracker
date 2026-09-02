@@ -61,6 +61,10 @@ class NiceGUIPhase2HPolishTests(unittest.TestCase):
 
         self.assertIn("build_hd_phase3a_reconciliation", MAIN)
         self.assertIn("Historical → Live Reconciliation", history)
+        self.assertIn("Latest Documented Position", history)
+        self.assertIn("Last Fully Reconciled Position", history)
+        self.assertIn("latest_documented_checkpoint_date", history)
+        self.assertIn("last_fully_reconciled_date", history)
         self.assertIn("Historical-to-Live Share Bridge", history)
         self.assertIn("Statement Coverage / Custody Timeline", history)
         self.assertIn("Documented Custody Movements", history)

@@ -329,11 +329,35 @@ The Home Depot Inc ESPP 5.302147 0.055252 5.357399 300.00 1,607.22
             state = service.state()
 
         self.assertEqual(result["position_checkpoints"], 1)
+        self.assertEqual(result["position_checkpoint_occurrences"], 1)
         self.assertEqual(state["summary"]["position_checkpoints"], 1)
+        self.assertEqual(state["summary"]["position_checkpoint_occurrences"], 1)
         self.assertEqual(state["documents"][0]["source_document"], "checkpoint.pdf")
+        self.assertEqual(state["documents"][0]["parsed_transaction_occurrence_count"], 1)
+        self.assertEqual(state["documents"][0]["earliest_parsed_transaction_date"], "2023-06-30")
+        self.assertEqual(state["documents"][0]["latest_parsed_transaction_date"], "2023-06-30")
+        self.assertEqual(state["documents"][0]["parsed_transaction_types"], "ESPP_PURCHASE")
         self.assertEqual(state["position_checkpoints"][0]["custodian"], "Computershare")
         self.assertEqual(state["position_checkpoints"][0]["shares"], "5.357399")
         self.assertEqual(len(state["transactions"]), 1)
+
+    def test_duplicate_hd_position_checkpoints_keep_occurrence_provenance(self) -> None:
+        first = """The Home Depot, Inc ESPP - Employee Plan Statement
+01 Jan 2024 - 31 Mar 2024
+The Home Depot Inc ESPP 5.302147 0.055252 5.357399 300.00 1,607.22
+"""
+        second = first.replace("Employee Plan Statement", "Employee Plan Statement")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); service = HDESPPHistoryService(root / "pdfs", root / "history.sqlite")
+            result = self._import_texts(service, {"a.pdf": first, "b.pdf": second})
+            state = service.state()
+
+        self.assertEqual(result["position_checkpoints"], 1)
+        self.assertEqual(result["position_checkpoint_occurrences"], 2)
+        self.assertEqual(state["summary"]["position_checkpoints"], 1)
+        self.assertEqual(state["summary"]["position_checkpoint_occurrences"], 2)
+        self.assertEqual(state["position_checkpoints"][0]["occurrence_count"], 2)
+        self.assertEqual(state["position_checkpoints"][0]["source_documents"], "a.pdf,b.pdf")
 
     def test_removed_and_replaced_documents_leave_no_stale_history(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
