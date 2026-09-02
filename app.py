@@ -28,6 +28,7 @@ from portfolio_analysis import snowball_tracker as shared_snowball_tracker
 from portfolio_analysis import years_to_income_target as shared_years_to_income_target
 from portfolio_history import DEFAULT_HISTORY_RANGE, HISTORY_RANGE_OPTIONS, filter_history_range
 from portfolio_export import build_export_package as build_shared_export_package
+from hd_espp_integration import load_hd_historical_integration_context
 from stash_history import clear_scan_preview, delete_imported_history, history_summary, import_validated_history, load_performance_history, load_statement_history, remove_manual_statement_review, run_statement_scan, save_manual_statement_review, scan_can_import, scan_state, upsert_live_portfolio_snapshot
 from onemin_ai_client import (
     ONEMIN_AI_DEFAULT_BASE_URL,
@@ -6449,6 +6450,7 @@ def _build_ai_analysis_payload_with_diagnostics(
         espp_purchase_frequency=str(st.session_state.get("analysis_espp_purchase_frequency", ESPP_PURCHASE_FREQUENCY)),
         espp_discount=float(st.session_state.get("analysis_espp_discount", ESPP_DISCOUNT)),
     )
+    full_payload["hd_historical_context"] = load_hd_historical_integration_context(metrics)
 
     try:
         portfolio_history_summary = _build_compact_portfolio_history_summary(load_performance_history(STATEMENT_HISTORY_DB_PATH))

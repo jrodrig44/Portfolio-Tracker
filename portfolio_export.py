@@ -11,6 +11,7 @@ from portfolio_analysis import build_analysis
 from portfolio_health import build_portfolio_health
 from portfolio_history import build_history_package
 from portfolio_insights import build_portfolio_insights
+from hd_espp_integration import load_hd_historical_integration_context
 
 
 def _sanitize(value: Any) -> Any:
@@ -27,7 +28,7 @@ def _sanitize(value: Any) -> Any:
     return str(value)
 
 
-def build_export_payload(holdings: list[dict[str, Any]], metrics: pd.DataFrame, *, history: list[dict[str, Any]] | None = None, fund_weights: dict[str, dict[str, float]] | None = None, external_context: dict[str, Any] | None = None, generated_at: str | None = None, use_export_json_data: bool = False, strict_export_accuracy: bool = False, current_live_export: bool = True, projection_biweekly: float = 280.0, projection_return_pct: float = 8.0, espp_biweekly: float = 100.0, espp_purchase_frequency: str = "6_months", espp_discount: float = 0.15) -> dict[str, Any]:
+def build_export_payload(holdings: list[dict[str, Any]], metrics: pd.DataFrame, *, history: list[dict[str, Any]] | None = None, fund_weights: dict[str, dict[str, float]] | None = None, external_context: dict[str, Any] | None = None, hd_historical_context: dict[str, Any] | None = None, generated_at: str | None = None, use_export_json_data: bool = False, strict_export_accuracy: bool = False, current_live_export: bool = True, projection_biweekly: float = 280.0, projection_return_pct: float = 8.0, espp_biweekly: float = 100.0, espp_purchase_frequency: str = "6_months", espp_discount: float = 0.15) -> dict[str, Any]:
     """Build a comprehensive read-only export from the shared portfolio packages."""
     prepared_metrics = metrics.copy()
     if not prepared_metrics.empty and "ticker" in prepared_metrics:
@@ -39,9 +40,10 @@ def build_export_payload(holdings: list[dict[str, Any]], metrics: pd.DataFrame, 
             prepared_metrics.loc[hd, "espp_discount_pct"] = float(espp_discount) * 100.0 if abs(float(espp_discount)) <= 1.0 else float(espp_discount)
             prepared_metrics.loc[hd, "employer_stock"] = True
             prepared_metrics.loc[hd, "espp_enabled"] = True
-    analysis = build_analysis(prepared_metrics, fund_weights=fund_weights, expected_return=projection_return_pct, projection_biweekly=projection_biweekly)
+    hd_context = hd_historical_context if isinstance(hd_historical_context, dict) else load_hd_historical_integration_context(prepared_metrics)
+    analysis = build_analysis(prepared_metrics, fund_weights=fund_weights, expected_return=projection_return_pct, projection_biweekly=projection_biweekly, hd_historical_context=hd_context)
     health = build_portfolio_health(prepared_metrics, fund_weights=fund_weights)
-    insights = build_portfolio_insights(prepared_metrics, fund_weights=fund_weights)
+    insights = build_portfolio_insights(prepared_metrics, fund_weights=fund_weights, hd_historical_context=hd_context)
     historical = build_history_package(history or [], "ALL")
     totals = analysis.get("totals", {})
     contribution = insights["contribution"]
@@ -64,6 +66,8 @@ def build_export_payload(holdings: list[dict[str, Any]], metrics: pd.DataFrame, 
         "contributions": {"regular_biweekly": summary["regular_biweekly"], "espp_biweekly": summary["espp_biweekly"], "combined_recurring_biweekly": summary["combined_biweekly"], "regular_annual": summary["regular_annual"], "espp_annual": summary["espp_annual"], "combined_recurring_annual": summary["combined_annual"], "special_contribution": summary.get("special_contribution", 0.0), "distribution_by_holding": contribution_rows, "employer_stock_context": analysis.get("contributions", {}).get("employer_stock_rows", []), "espp_context": {"biweekly_contribution": float(espp_biweekly), "purchase_frequency": str(espp_purchase_frequency), "discount_pct": selected_discount_pct}},
         "concentration": analysis.get("concentration", {}), "projections": analysis.get("snapshot", {}), "health_score": health, "alerts": {"health_alerts": health.get("alerts", [])}, "insights": {"observations": insights["observations"]}, "historical": historical,
         "external_context": external,
+        "hd_historical_context": hd_context,
+        "hd_historical_metadata": {"hd_historical_data_available": bool(hd_context.get("available")), "hd_historical_document_count": (hd_context.get("summary") or {}).get("hd_historical_document_count", 0), "hd_historical_phase3a_status": (hd_context.get("summary") or {}).get("phase3a_status"), "hd_historical_lifetime_return_status": (hd_context.get("summary") or {}).get("lifetime_return_status")},
         "dividend_data_metadata": external.get("yahoo_metadata", []),
         "supplemental_investment_intelligence": external.get("supplemental_investment_intelligence", []),
         "historical_security_context": external.get("historical_security_context", []),
@@ -90,10 +94,33 @@ def _money(value: Any) -> str:
     return f"${float(value or 0.0):,.2f}"
 
 
+def _display(value: Any) -> str:
+    return "Unknown" if value is None or value == "" else str(value)
+
+
+def _pct(value: Any) -> str:
+    if value is None or value == "":
+        return "Unknown"
+    number = float(value)
+    if 0 <= abs(number) <= 1:
+        number *= 100
+    return f"{number:.2f}%"
+
+
 def build_export_markdown(payload: dict[str, Any]) -> str:
     payload = _sanitize(payload); totals = payload["totals"]; health = payload["health_score"]; contributions = payload["contributions"]; history = payload["historical"]
     sections = ["# Dividend Portfolio Tracker Export", "", "## AI Context Summary", f"- Total Portfolio Value: {_money(totals['portfolio_value'])}", f"- Cost Basis: {_money(totals['cost_basis'])}", f"- Unrealized Gain/Loss: {_money(totals['unrealized_gain'])}", f"- Estimated Annual Income: {_money(totals['annual_income'])}", f"- Weighted Portfolio Yield: {float(totals['weighted_yield_pct'] or 0.0):.2f}%", f"- Number of Holdings: {totals['holdings_count']}", f"- Largest Holding: {totals['largest_holding']} ({float(totals['largest_holding_weight_pct'] or 0.0):.2f}%)", "", "## Portfolio Health", f"- Tracker Health Score: {float(health.get('health_score', 0.0) or 0.0):.1f}/100", f"- Health Score Basis: {health.get('methodology', health.get('health_score_methodology', 'Shared production health engine'))}", f"- Strongest Areas: {json.dumps(health.get('strongest_areas', []), allow_nan=False)}", f"- Weakest Areas: {json.dumps(health.get('weakest_areas', []), allow_nan=False)}", f"- Disclaimer: {health.get('disclaimer', '')}", "", "## Employer Stock / ESPP Context", f"- Regular recurring biweekly: {_money(contributions['regular_biweekly'])}", f"- ESPP recurring biweekly: {_money(contributions['espp_biweekly'])}", f"- Combined recurring annual: {_money(contributions['combined_recurring_annual'])}", f"- Special contribution (not annualized): {_money(contributions['special_contribution'])}", "", "## History / Performance Context", "- Historical change below is nominal portfolio value change, not investment return.", f"- Starting portfolio value: {_money(history['summary']['starting_portfolio_value'])}", f"- Ending portfolio value: {_money(history['summary']['ending_portfolio_value'])}", f"- Nominal value change: {_money(history['summary']['absolute_change'])} ({float(history['summary']['percentage_change'] or 0.0):.2f}%)"]
     json_sections = (("Holdings Detail", payload["holdings"]), ("Asset Allocation", payload["allocation"]["asset_type"]), ("Economic Exposure Allocation", payload["allocation"]["economic_exposure"]), ("Exposure Interpretation", payload["analysis_guidance"]), ("Direct Sector Exposure", payload["exposure"]["direct_sector_exposure"]), ("Direct Holdings by Sector", payload["holdings"]), ("Look-Through Sector Exposure", payload["exposure"]["look_through_exposure"]), ("Unresolved Fund Look-Through Exposure", payload["exposure"]["unresolved_fund_exposure"]), ("Data Completeness", payload["exposure"]["data_completeness"]), ("Concentration", payload["concentration"]), ("Income Allocation and Quality", payload["income"]), ("Income Allocation by Holding", payload["holdings"]), ("Income Allocation by Asset Type", payload["income"]["by_asset_type"]), ("Income Quality", payload["income"]["quality"]), ("Contribution Allocation", contributions["distribution_by_holding"]), ("Projections", payload["projections"]), ("Historical Portfolio Values", history["records"]), ("Dividend Data Metadata", payload["dividend_data_metadata"]), ("Supplemental Investment Intelligence", payload["supplemental_investment_intelligence"]), ("Historical Security Context", payload["historical_security_context"]), ("Dividend Seasonality", payload["dividend_seasonality"]), ("Supplemental External Context", payload["external_context"]))
+    hd_context = payload.get("hd_historical_context", {}) if isinstance(payload.get("hd_historical_context"), dict) else {}
+    if hd_context.get("available"):
+        economics = hd_context.get("documented_economics", {})
+        realized = hd_context.get("realized", {})
+        coverage = hd_context.get("coverage", {})
+        reconciliation = hd_context.get("reconciliation", {})
+        summary = hd_context.get("summary", {})
+        sections.extend(["", "## HD / ESPP Historical Economics", "- Coverage: Source-bounded documented HD / ESPP history.", f"- Documented ESPP contributions: {_money(economics.get('espp_employee_contributions'))}", f"- ESPP shares purchased: {_display(economics.get('espp_shares'))}", f"- Purchase discount benefit: {_money(economics.get('espp_purchase_discount_benefit'))}", f"- Effective documented discount: {_pct(economics.get('effective_documented_discount_pct'))}", f"- DRIP gross dividends: {_money(economics.get('drip_gross_dividends'))}; net reinvested: {_money(economics.get('drip_net_reinvested'))}; shares: {_display(economics.get('drip_shares'))}", f"- Documented cash dividends: {_money(economics.get('documented_cash_dividend_total'))}", f"- Documented sale proceeds: {_money(realized.get('aggregate_sale_proceeds'))}", f"- Documented realized gain: {_money(realized.get('documented_realized_gain'))} ({_pct(coverage.get('basis_coverage_pct'))} basis coverage)", f"- Origin coverage: {_pct(coverage.get('origin_coverage_pct'))}", f"- Phase 3A status: {reconciliation.get('phase3a_status')}", f"- Historical/live difference: {_display(reconciliation.get('historical_live_difference'))} shares", f"- Lifetime total return: {summary.get('lifetime_return_status')}", "", "### HD Realized By Origin", "```json", json.dumps(hd_context.get('realized', {}).get('by_origin', []), indent=2, allow_nan=False), "```", "", "### HD Performance Availability", "```json", json.dumps(hd_context.get('performance_availability', []), indent=2, allow_nan=False), "```", "", "### HD Historical Issues", "```json", json.dumps(hd_context.get('issues', []), indent=2, allow_nan=False), "```"])
+    else:
+        sections.extend(["", "## HD / ESPP Historical Economics", f"- {_display((hd_context.get('summary') or {}).get('reason', 'No HD historical data imported'))}"])
     for title, content in json_sections:
         sections.extend(["", f"## {title}", "```json", json.dumps(content, indent=2, allow_nan=False), "```"])
     sections.extend(["", "## Data Limitations", *[f"- {note}" for note in payload["data_limitations"]]])

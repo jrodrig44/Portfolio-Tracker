@@ -32,7 +32,7 @@ def _insights_asset_type(value: Any) -> str:
     return "Other/Unassigned"
 
 
-def build_portfolio_insights(metrics: pd.DataFrame, *, fund_weights: dict[str, dict[str, float]] | None = None) -> dict[str, Any]:
+def build_portfolio_insights(metrics: pd.DataFrame, *, fund_weights: dict[str, dict[str, float]] | None = None, hd_historical_context: dict[str, Any] | None = None) -> dict[str, Any]:
     frame = metrics.copy() if isinstance(metrics, pd.DataFrame) else pd.DataFrame()
     if frame.empty:
         return {
@@ -42,7 +42,7 @@ def build_portfolio_insights(metrics: pd.DataFrame, *, fund_weights: dict[str, d
             "allocation": [], "economic_exposure": [], "direct_sector": [], "income_allocation": [], "income_quality": [], "concentration": {}, "fund_lookthrough": {}, "data_completeness": {}, "observations": [],
         }
 
-    analysis = build_analysis(frame, fund_weights=fund_weights)
+    analysis = build_analysis(frame, fund_weights=fund_weights, hd_historical_context=hd_historical_context)
     value = finite(frame.get("market_value", pd.Series(dtype=float)).sum())
     income = finite(frame.get("annual_income", pd.Series(dtype=float)).sum())
     yields = [{"ticker": str(row.get("ticker", "N/A")), "yield_pct": _holding_yield(row)} for row in frame.to_dict(orient="records")]
@@ -89,6 +89,15 @@ def build_portfolio_insights(metrics: pd.DataFrame, *, fund_weights: dict[str, d
     ]
     if concentration.get("espp_concentration_flag"):
         observations.append("Employer-stock context: HD remains a concentration exposure while receiving ESPP contributions with a 15.00% discount.")
+    if isinstance(hd_historical_context, dict) and hd_historical_context.get("available"):
+        economics = hd_historical_context.get("documented_economics", {})
+        realized = hd_historical_context.get("realized", {})
+        coverage = hd_historical_context.get("coverage", {})
+        reconciliation = hd_historical_context.get("reconciliation", {})
+        summary = hd_historical_context.get("summary", {})
+        observations.append(f"HD historical ESPP context: documented employee contributions ${finite(economics.get('espp_employee_contributions')):,.2f}, purchase discount benefit ${finite(economics.get('espp_purchase_discount_benefit')):,.2f}.")
+        observations.append(f"HD documented realized gain is source-bounded: ${finite(realized.get('documented_realized_gain')):,.2f} with {finite(coverage.get('basis_coverage_pct')) * 100 if 0 <= finite(coverage.get('basis_coverage_pct')) <= 1 else finite(coverage.get('basis_coverage_pct')):.2f}% basis coverage.")
+        observations.append(f"Complete lifetime HD return remains {summary.get('lifetime_return_status', 'UNKNOWN')} because Phase 3A status is {reconciliation.get('phase3a_status', 'UNKNOWN')} and historical/live difference is {reconciliation.get('historical_live_difference', 'Unknown')} shares.")
     lookthrough = analysis["fund_lookthrough"]
     if finite(lookthrough.get("unresolved_value")) > 0:
         observations.append(f"Fund look-through is incomplete: ${finite(lookthrough.get('unresolved_value')):,.2f} remains unresolved ({finite(lookthrough.get('fund_lookthrough_completeness_pct')):.2f}% coverage).")
@@ -107,5 +116,6 @@ def build_portfolio_insights(metrics: pd.DataFrame, *, fund_weights: dict[str, d
         "concentration": {**concentration, "top3_income_pct": top3_income_pct},
         "fund_lookthrough": lookthrough,
         "data_completeness": analysis["data_completeness"],
+        "hd_historical_context": hd_historical_context or {"available": False},
         "observations": observations,
     }

@@ -27,6 +27,7 @@ from onemin_ai_client import (
     OneMinAIUnsupportedModelError,
     messages_to_prompt,
 )
+from hd_espp_integration import compact_hd_historical_context
 
 
 ONEMIN_AI_RECOMMENDED_MODELS = [
@@ -231,6 +232,7 @@ def _production_shape(payload: dict[str, Any]) -> dict[str, Any]:
         "recommendation_constraints": payload.get("recommendation_constraints", external.get("recommendation_constraints", {})),
         "recommendation_context": payload.get("recommendation_context", {}),
         "data_quality_issues": payload.get("data_quality_issues", []),
+        "hd_historical_context": payload.get("hd_historical_context", {}),
     }
 
 
@@ -277,6 +279,7 @@ def compact_ai_context(payload: dict[str, Any], analysis_type: str, custom_quest
         "tracker_health_score_metadata": _pick(full.get("tracker_health_score_metadata", {}), ["income_stability_explanation", "data_quality_explanation", "risk_explanation"]),
         "income_quality_summary": _pick(full.get("income_quality", {}), ["income_quality_score", "distribution_stability_score", "yield_sustainability_score", "payout_risk_score", "alerts"]) if selected in {"Comprehensive Portfolio Review", "Income and Dividend Analysis"} else {},
         "contribution_context": {"summary": {"total_regular_biweekly_contribution": source_summary.get("total_regular_biweekly_contribution"), "total_espp_biweekly_contributions": source_summary.get("total_espp_biweekly_contributions"), "annual_regular_contributions": source_summary.get("estimated_annual_regular_contributions"), "annual_espp_contributions": source_summary.get("estimated_annual_espp_contributions"), "estimated_combined_annual_contributions": source_summary.get("estimated_combined_annual_contributions"), "special_contribution": source_summary.get("special_contribution"), "hd_espp_purchase_frequency": source_summary.get("hd_espp_purchase_frequency"), "hd_espp_discount_pct": source_summary.get("hd_espp_discount_pct")}, "employer_stock_concentration_context": _pick(contribution.get("employer_stock_concentration_context", {}), ["primary_employer_ticker", "primary_employer_capital_concentration_pct", "primary_employer_income_concentration_pct", "is_concentration_alert"])},
+        "hd_historical_context": compact_hd_historical_context(full.get("hd_historical_context", {})),
         "data_completeness": _pick(full.get("data_completeness", {}), ["direct_sector_classification_coverage_pct", "fund_lookthrough_coverage_pct", "overall_resolved_exposure_coverage_pct"]),
         "unresolved_exposure": _pick(full.get("unresolved_exposure", {}), ["unresolved_fund_exposure", "resolved_lookthrough_value", "fund_total_value"]),
         "supplemental_yahoo_financial_data": supplemental,

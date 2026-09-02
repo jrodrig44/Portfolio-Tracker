@@ -19,8 +19,8 @@ def income_quality_records(metrics: pd.DataFrame) -> list[dict[str, Any]]:
     return build_analysis(metrics)["income_quality"]
 
 
-def analysis_package(metrics: pd.DataFrame) -> dict[str, Any]:
-    return build_analysis(metrics)
+def analysis_package(metrics: pd.DataFrame, **context: Any) -> dict[str, Any]:
+    return build_analysis(metrics, **context)
 
 
 def analysis_with_fund_weights(metrics: pd.DataFrame, fund_weights: dict[str,dict[str,float]]) -> dict[str, Any]:

@@ -53,6 +53,7 @@ from hd_espp_history import HDESPPHistoryService, transaction_record_type
 from hd_ownership import SHARE_TOLERANCE, reconstruct_hd_ownership
 from hd_espp_reconciliation import build_hd_phase3a_reconciliation
 from hd_espp_lifetime import build_hd_lifetime_economics
+from hd_espp_integration import load_hd_historical_integration_context
 from shared_data_preparation import prepare_shared_data
 
 HOST = "0.0.0.0"
@@ -924,7 +925,8 @@ async def index() -> None:
             ui.spinner(size="lg")
             ui.label("Calculating portfolio analysis…")
         try:
-            package = await run.io_bound(analysis_package, metrics)
+            hd_context = await run.io_bound(load_hd_historical_integration_context, metrics)
+            package = await run.io_bound(analysis_package, metrics, hd_historical_context=hd_context)
             area.clear()
             totals, summary = package["totals"], package["summary"]
             with area:
@@ -948,6 +950,21 @@ async def index() -> None:
                         ("ESPP", format_status(bool(concentration.get("espp_concentration_flag")), enabled="Active", disabled="Not active")),
                     ])
                     guidance_text(concentration.get("guidance"))
+                    historical = package.get("hd_historical_context", {})
+                    if historical.get("available"):
+                        economics = historical.get("documented_economics", {})
+                        realized = historical.get("realized", {})
+                        coverage = historical.get("coverage", {})
+                        reconciliation = historical.get("reconciliation", {})
+                        ui.label("HD / ESPP Historical Context").classes("text-lg font-semibold mt-3")
+                        detail_cards([
+                            ("Documented ESPP Contributions", currency(economics.get("espp_employee_contributions"))),
+                            ("Purchase Discount Benefit", currency(economics.get("espp_purchase_discount_benefit"))),
+                            ("Documented Realized Gain", currency(realized.get("documented_realized_gain"))),
+                            ("Basis Coverage", percent(coverage.get("basis_coverage_pct"))),
+                            ("Historical/Live Reconciliation", str(reconciliation.get("phase3a_status", "Unavailable")).replace("_", " ").title()),
+                            ("Lifetime Return Status", str((historical.get("summary") or {}).get("lifetime_return_status", "Unavailable")).title()),
+                        ])
                 with ui.expansion("Contribution allocation").classes("w-full"):
                     records_table(package["contributions"].get("holdings", []))
                 with ui.expansion("Income allocation and quality").classes("w-full"):
@@ -1184,7 +1201,8 @@ async def index() -> None:
         area = areas["Portfolio Insights"]
         with area:
             ui.spinner(size="lg")
-        package = await run.io_bound(insights_package, metrics)
+        hd_context = await run.io_bound(load_hd_historical_integration_context, metrics)
+        package = await run.io_bound(insights_package, metrics, hd_historical_context=hd_context)
         area.clear()
         with area:
             ui.label("Portfolio Insights").classes("text-2xl font-semibold")
@@ -1196,6 +1214,15 @@ async def index() -> None:
                 records_table(package.get("direct_sector", []), "Direct sector exposure")
             with ui.expansion("Contribution observations").classes("w-full"):
                 records_table(package["contribution"]["rows"])
+                historical = package.get("hd_historical_context", {})
+                if historical.get("available"):
+                    ui.label("HD / ESPP Historical Summary").classes("text-lg font-semibold mt-3")
+                    detail_cards([
+                        ("Documented ESPP Contributions", currency(historical.get("documented_economics", {}).get("espp_employee_contributions"))),
+                        ("Discount Benefit", currency(historical.get("documented_economics", {}).get("espp_purchase_discount_benefit"))),
+                        ("Basis Coverage", percent(historical.get("coverage", {}).get("basis_coverage_pct"))),
+                        ("Lifetime Return", str(historical.get("summary", {}).get("lifetime_return_status", "Unavailable")).title()),
+                    ])
             with ui.expansion("Yield and income observations").classes("w-full"):
                 yield_context = package.get("yield", {})
                 detail_cards([(human_label(key), format_field_value(key, value)) for key, value in yield_context.items() if not isinstance(value, (dict, list))])

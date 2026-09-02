@@ -87,6 +87,18 @@ class NiceGUIPhase2HPolishTests(unittest.TestCase):
         self.assertIn("remain gated", history)
         self.assertIn("XIRR", history)
 
+    def test_phase3c_analysis_and_insights_use_gated_hd_context(self) -> None:
+        analysis = MAIN.split("async def render_analysis", 1)[1].split("def render_ai", 1)[0]
+        insights = MAIN.split("async def render_insights", 1)[1].split("async def render_health", 1)[0]
+
+        self.assertIn("load_hd_historical_integration_context", MAIN)
+        self.assertIn("hd_historical_context=hd_context", analysis)
+        self.assertIn("HD / ESPP Historical Context", analysis)
+        self.assertIn("Lifetime Return Status", analysis)
+        self.assertIn("hd_historical_context=hd_context", insights)
+        self.assertIn("HD / ESPP Historical Summary", insights)
+        self.assertIn("Lifetime Return", insights)
+
     def test_dialogs_and_actions_are_viewport_and_touch_safe(self) -> None:
         self.assertIn("96vw", DIALOG_CARD)
         self.assertIn("90dvh", DIALOG_CARD)
