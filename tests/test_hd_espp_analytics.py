@@ -116,7 +116,41 @@ class HDEconomicsAnalysisTests(unittest.TestCase):
         self.assertEqual(detail["share_purchase_value"], Decimal("9.6422865"))
         self.assertEqual(detail["purchase_value_delta"], Decimal("-0.1477135"))
         self.assertEqual(detail["reconciliation_status"], "SOURCE_RECONCILIATION_EXCEPTION")
+        self.assertEqual(analysis.reconciliation["contribution_reconciliation_status"], "OK")
+        self.assertEqual(analysis.reconciliation["contribution_reconciliation_issues"], 0)
+        self.assertEqual(analysis.reconciliation["drip_reconciliation_status"], "REVIEW_REQUIRED")
+        self.assertEqual(analysis.reconciliation["drip_reconciliation_issues"], 2)
+        self.assertEqual(analysis.reconciliation["drip_source_exception_count"], 1)
+        self.assertEqual(analysis.reconciliation["drip_economics_review_count"], 0)
         self.assertTrue(any("source gross/fee/tax/net values do not reconcile" in issue for issue in analysis.issues))
+        self.assertTrue(any("shares × purchase price differs" in issue for issue in analysis.issues))
+
+    def test_drip_economics_review_is_counted_separately_from_contribution_issues(self) -> None:
+        transactions = [self.transactions[0], {
+            "transaction_date": "2025-06-04",
+            "transaction_type": "DIVIDEND_REINVESTMENT",
+            "source": "EquatePlus/Computershare",
+            "source_account_type": "ESPP",
+            "shares": "0.00183",
+            "amount": "0.70",
+            "purchase_price": "349.52",
+            "fees": "0.00",
+            "taxes": "0.00",
+            "source_document": "quarterly.pdf",
+            "notes": "gross_dividend=0.70; entitled_quantity=0.282706; residual_amount=0.00",
+            "transaction_fingerprint": "fp-drip-economics-review",
+        }]
+
+        analysis = analyze_hd_economics(transactions)
+        detail = analysis.drip_detail[0]
+
+        self.assertEqual(detail["reconciliation_status"], "SOURCE_ECONOMICS_REVIEW")
+        self.assertEqual(analysis.reconciliation["contribution_reconciliation_status"], "OK")
+        self.assertEqual(analysis.reconciliation["contribution_reconciliation_issues"], 0)
+        self.assertEqual(analysis.reconciliation["drip_reconciliation_status"], "REVIEW_REQUIRED")
+        self.assertEqual(analysis.reconciliation["drip_reconciliation_issues"], 1)
+        self.assertEqual(analysis.reconciliation["drip_source_exception_count"], 0)
+        self.assertEqual(analysis.reconciliation["drip_economics_review_count"], 1)
         self.assertTrue(any("shares × purchase price differs" in issue for issue in analysis.issues))
 
     def test_realized_gain_uses_documented_basis(self) -> None:

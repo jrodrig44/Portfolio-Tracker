@@ -168,6 +168,7 @@ def analyze_hd_economics(transactions: Iterable[dict[str, Any]], ownership: Owne
     weighted_average_drip_price = drip_price_numerator / drip_price_denominator if drip_price_denominator else Decimal("0")
 
     drip_detail: list[dict[str, Any]] = []
+    drip_issues: list[str] = []
     gross_dividend_known_count = 0
     gross_dividend_missing_count = 0
     total_gross_dividend = Decimal("0")
@@ -211,9 +212,9 @@ def analyze_hd_economics(transactions: Iterable[dict[str, Any]], ownership: Owne
             "reconciliation_status": status,
         })
         if source_reconciliation_exception:
-            contribution_issues.append(f"DRIP row on {row.get('transaction_date')} source gross/fee/tax/net values do not reconcile; source delta {reconciliation_delta}")
+            drip_issues.append(f"DRIP row on {row.get('transaction_date')} source gross/fee/tax/net values do not reconcile; source delta {reconciliation_delta}")
         if purchase_value_exception:
-            contribution_issues.append(f"DRIP row on {row.get('transaction_date')} shares × purchase price differs from documented reinvested amount by {purchase_value_delta}")
+            drip_issues.append(f"DRIP row on {row.get('transaction_date')} shares × purchase price differs from documented reinvested amount by {purchase_value_delta}")
 
     dividend_total = _sum_decimals(_decimal(row.get("amount")) for row in dividend_rows)
     dividend_event_count = len(dividend_rows)
@@ -314,6 +315,7 @@ def analyze_hd_economics(transactions: Iterable[dict[str, Any]], ownership: Owne
     if ownership is not None and ownership.summary.get("reconciliation_status") == "DIFFERENCE_REQUIRES_REVIEW":
         issues.append("Historical analytics are based on documented reconstructed transactions. The reconstructed remaining-share balance does not currently match the live HD holding, so lifetime/open-position return metrics are intentionally withheld.")
     issues.extend(contribution_issues)
+    issues.extend(drip_issues)
     if not purchase_discount_rows and espp_rows:
         issues.append("No ESPP purchase rows contained both purchase price and fair market value; discount benefit is unavailable.")
 
@@ -336,6 +338,9 @@ def analyze_hd_economics(transactions: Iterable[dict[str, Any]], ownership: Owne
         "contribution_reconciliation_status": contribution_status,
         "contribution_reconciliation_issues": len(contribution_issues),
         "drip_reconciliation_status": "OK" if all((row["reconciliation_status"] == "OK") for row in drip_detail) else "REVIEW_REQUIRED",
+        "drip_reconciliation_issues": len(drip_issues),
+        "drip_source_exception_count": sum(row["reconciliation_status"] == "SOURCE_RECONCILIATION_EXCEPTION" for row in drip_detail),
+        "drip_economics_review_count": sum(row["reconciliation_status"] == "SOURCE_ECONOMICS_REVIEW" for row in drip_detail),
         "live_reconciliation_status": ownership.summary.get("reconciliation_status") if ownership is not None else "UNAVAILABLE",
     }
 

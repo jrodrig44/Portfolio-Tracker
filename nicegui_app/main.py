@@ -290,6 +290,7 @@ async def index() -> None:
             ui.separator()
             ui.label("HD / ESPP Economics").classes("text-xl font-semibold")
             ui.label("Source-bounded historical economics only. No synthetic return history, no Yahoo lookups, and no tax or lifetime-return claims are produced here.").classes("text-sm text-gray-600 dark:text-gray-300")
+            ui.label(f"ESPP Contribution Reconciliation: {analytics.reconciliation['contribution_reconciliation_status'].replace('_', ' ').title()} · DRIP Reconciliation: {analytics.reconciliation['drip_reconciliation_status'].replace('_', ' ').title()}").classes("text-sm font-medium")
             metric_cards([
                 ("ESPP Contributions", currency(summary["total_espp_contributions"])),
                 ("ESPP Shares", str(summary["total_espp_shares"])),

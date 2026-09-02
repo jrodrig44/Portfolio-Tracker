@@ -48,6 +48,14 @@ class NiceGUIPhase2HPolishTests(unittest.TestCase):
         self.assertIn("six-month cadence", holdings)
         self.assertIn("non-positive ESPP contribution uses $100", holdings)
 
+    def test_hd_espp_reconciliation_labels_distinguish_contributions_and_drip(self) -> None:
+        history = MAIN.split("async def render_hd_espp_history", 1)[1].split("async def import_hd_statements", 1)[0]
+
+        self.assertIn("ESPP Contribution Reconciliation", history)
+        self.assertIn("DRIP Reconciliation", history)
+        self.assertIn("contribution_reconciliation_status", history)
+        self.assertIn("drip_reconciliation_status", history)
+
     def test_dialogs_and_actions_are_viewport_and_touch_safe(self) -> None:
         self.assertIn("96vw", DIALOG_CARD)
         self.assertIn("90dvh", DIALOG_CARD)
