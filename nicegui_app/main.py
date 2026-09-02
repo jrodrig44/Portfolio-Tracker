@@ -49,6 +49,7 @@ from nicegui_app.services.operations import format_interval, operational_status
 from portfolio_research import PortfolioResearchService, research_contexts
 from portfolio_statement_history import StatementHistoryService, statement_scan_diagnostic_records, statement_verified_display_records
 from hd_espp_history import HDESPPHistoryService, transaction_record_type
+from hd_ownership import SHARE_TOLERANCE, reconstruct_hd_ownership
 from shared_data_preparation import prepare_shared_data
 
 HOST = "0.0.0.0"
@@ -264,6 +265,9 @@ async def index() -> None:
         area.clear()
         state = await run.io_bound(hd_history_service.state)
         summary = state["summary"]
+        live_hd_shares = next((row.get("shares") for row in holdings if str(row.get("ticker", "")).upper() == "HD"), None)
+        ownership = reconstruct_hd_ownership(state["transactions"], live_hd_shares)
+        ownership_summary = ownership.summary
         with area:
             ui.label("HD / ESPP History").classes("text-2xl font-semibold")
             ui.label("Local transaction reconstruction only. Live HD quantity, cost basis, portfolio history, and forward contribution assumptions remain authoritative and unchanged.").classes("text-sm text-gray-600 dark:text-gray-300")
@@ -300,6 +304,27 @@ async def index() -> None:
                     if not rebuilt:
                         import_button.enable()
             import_button = ui.button("Import HD Statements", icon="document_scanner", on_click=import_hd_statements).classes("w-full sm:w-auto min-h-11")
+            ui.separator()
+            ui.label("Historical Ownership Reconstruction").classes("text-xl font-semibold")
+            ui.label("Derived deterministically from normalized statement transactions. Custody transfers do not change economic ownership; the live portfolio quantity is shown read-only for reconciliation.").classes("text-sm text-gray-600 dark:text-gray-300")
+            metric_cards([
+                ("ESPP Acquired", str(ownership_summary["total_espp_shares"])),
+                ("DRIP Acquired", str(ownership_summary["total_drip_shares"])),
+                ("Restricted Acquired", str(ownership_summary["total_restricted_shares"])),
+                ("Other / Unknown", str(ownership_summary["total_other_unknown_shares"])),
+                ("Total Sold", str(ownership_summary["total_shares_sold"])),
+                ("Reconstructed Remaining", str(ownership_summary["reconstructed_remaining_shares"])),
+                ("Live HD Shares", str(ownership_summary["live_hd_shares"] if ownership_summary["live_hd_shares"] is not None else "Unavailable")),
+                ("Difference", str(ownership_summary["reconciliation_difference"] if ownership_summary["reconciliation_difference"] is not None else "Unavailable")),
+            ])
+            ui.label(f'Reconciliation: {ownership_summary["reconciliation_status"].replace("_", " ").title()}').classes("text-sm font-medium")
+            records_table(ownership.origin_breakdown, "Share Origin Breakdown")
+            open_lots = [lot.display() for lot in ownership.lots if lot.remaining_shares > SHARE_TOLERANCE]
+            records_table(open_lots, "Open Ownership Lots")
+            records_table([lot.display() for lot in ownership.sold_lots], "Realized Lot Provenance")
+            if ownership.issues:
+                records_table([{"issue": issue} for issue in ownership.issues], "Ownership Reconstruction Issues")
+            ui.separator()
             display = [{
                 "date": row["transaction_date"], "record_type": transaction_record_type(row), "type": row["transaction_type"], "source": row["source"],
                 "shares": row["shares"], "amount": row["amount"], "purchase_price": row["purchase_price"],
