@@ -95,21 +95,28 @@ class StructuredLoggingTests(unittest.TestCase):
             first = configure_structured_logging(
                 "test.structured.multi.first", logical_path, "first", date_provider=lambda: day
             )
-            second = configure_structured_logging(
-                "test.structured.multi.second", logical_path, "second", date_provider=lambda: day
-            )
-            log_event(first, "first_event", "First process event")
-            log_event(second, "second_event", "Second process event")
-            for logger in (first, second):
-                for handler in logger.handlers:
-                    handler.flush()
-            records = [
-                json.loads(line)
-                for line in self._dated_path(logical_path).read_text(encoding="utf-8").splitlines()
-            ]
-            self.assertEqual({record["process"] for record in records}, {"first", "second"})
-            self._close_logger(first)
-            self._close_logger(second)
+            second = None
+            try:
+                second = configure_structured_logging(
+                    "test.structured.multi.second", logical_path, "second", date_provider=lambda: day
+                )
+                log_event(first, "first_event", "First process event")
+                log_event(second, "second_event", "Second process event")
+                for logger in (first, second):
+                    for handler in logger.handlers:
+                        handler.flush()
+                records = [
+                    json.loads(line)
+                    for line in self._dated_path(
+                        logical_path,
+                        datetime.combine(day, datetime.min.time()),
+                    ).read_text(encoding="utf-8").splitlines()
+                ]
+                self.assertEqual({record["process"] for record in records}, {"first", "second"})
+            finally:
+                self._close_logger(first)
+                if second is not None:
+                    self._close_logger(second)
 
     def test_overlapping_processes_write_same_daily_file_without_rollover_conflict(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
