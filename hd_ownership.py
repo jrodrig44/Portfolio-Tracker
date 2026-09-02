@@ -126,8 +126,6 @@ def _acquisition_lots(rows: Iterable[dict[str, Any]]) -> list[OwnershipLot]:
             continue
         amount = _decimal(row.get("amount"))
         basis = _decimal(row.get("cost_basis"))
-        if basis is None and origin in {"ESPP_PURCHASE", "DIVIDEND_REINVESTMENT"}:
-            basis = amount
         custodian = "Merrill" if row.get("source") == "Merrill" else str(row.get("source_location") or row.get("source") or "Unknown")
         fingerprint = str(row["transaction_fingerprint"])
         lots.append(OwnershipLot(
@@ -189,11 +187,17 @@ def _apply_custody_transfers(rows: list[dict[str, Any]], transfer_lots: list[dic
     return processed, transferred, precision_difference
 
 
+def _merrill_sale_eligible_shares(lot: OwnershipLot) -> Decimal:
+    if lot.original_custodian == "Merrill":
+        return lot.remaining_shares
+    return max(lot.shares_transferred - lot.shares_sold, Decimal())
+
+
 def _match_sale_lot(lots: list[OwnershipLot], acquired: date, quantity: Decimal) -> list[OwnershipLot]:
-    exact = [lot for lot in lots if lot.acquisition_date == acquired and lot.remaining_shares + LOT_DISPLAY_TOLERANCE >= quantity]
+    exact = [lot for lot in lots if lot.acquisition_date == acquired and _merrill_sale_eligible_shares(lot) + LOT_DISPLAY_TOLERANCE >= quantity]
     if exact:
         return exact
-    return [lot for lot in lots if lot.origin_type == "RESTRICTED_SHARE" and abs((lot.acquisition_date - acquired).days) <= 3 and lot.remaining_shares + LOT_DISPLAY_TOLERANCE >= quantity]
+    return [lot for lot in lots if lot.origin_type == "RESTRICTED_SHARE" and abs((lot.acquisition_date - acquired).days) <= 3 and _merrill_sale_eligible_shares(lot) + LOT_DISPLAY_TOLERANCE >= quantity]
 
 
 def reconstruct_hd_ownership(rows: Iterable[dict[str, Any]], live_shares: Decimal | str | float | None = None, transfer_lots: Iterable[dict[str, Any]] = ()) -> OwnershipReconstruction:

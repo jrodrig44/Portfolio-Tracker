@@ -34,7 +34,14 @@ class HDOwnershipTests(unittest.TestCase):
         self.assertEqual(result.summary["reconstructed_remaining_shares"], Decimal("20.28"))
         self.assertEqual(result.summary["reconciliation_status"], "MATCHED")
         self.assertEqual({lot.origin_type for lot in result.lots}, {"ESPP_PURCHASE", "DIVIDEND_REINVESTMENT", "RESTRICTED_SHARE", "UNKNOWN"})
-        self.assertEqual(next(lot for lot in result.lots if lot.origin_type == "ESPP_PURCHASE").known_cost_basis, Decimal("1400"))
+        espp = next(lot for lot in result.lots if lot.origin_type == "ESPP_PURCHASE")
+        drip = next(lot for lot in result.lots if lot.origin_type == "DIVIDEND_REINVESTMENT")
+        self.assertEqual(espp.employee_contribution, Decimal("1400"))
+        self.assertEqual(drip.reinvested_dividend_amount, Decimal("10.50"))
+        self.assertIsNone(espp.known_cost_basis)
+        self.assertIsNone(drip.known_cost_basis)
+        self.assertEqual(espp.cost_basis_status, "UNKNOWN")
+        self.assertEqual(drip.cost_basis_status, "UNKNOWN")
         self.assertEqual(rows, original)
 
     def test_matched_transfer_changes_custody_not_economic_shares(self):
@@ -56,8 +63,18 @@ class HDOwnershipTests(unittest.TestCase):
         self.assertEqual(result.summary["shares_transferred"], Decimal("5"))
         self.assertEqual(result.summary["total_shares_sold"], Decimal("5"))
         self.assertEqual(result.summary["reconstructed_remaining_shares"], Decimal("0"))
-        self.assertEqual(result.lots[0].known_cost_basis, Decimal("1000"))
-        self.assertNotEqual(result.lots[0].known_cost_basis, Decimal("1500"))
+        self.assertIsNone(result.lots[0].known_cost_basis)
+        self.assertEqual(result.sold_lots[0].cost_basis, Decimal("1000"))
+        self.assertNotEqual(result.sold_lots[0].cost_basis, Decimal("1500"))
+
+    def test_explicit_acquisition_basis_is_preserved_as_known(self):
+        result = reconstruct_hd_ownership([
+            transaction("buy", "ESPP_PURCHASE", "2024-01-01", "2", amount=Decimal("500"), cost_basis=Decimal("777")),
+        ])
+
+        self.assertEqual(result.lots[0].employee_contribution, Decimal("500"))
+        self.assertEqual(result.lots[0].known_cost_basis, Decimal("777"))
+        self.assertEqual(result.lots[0].cost_basis_status, "KNOWN")
 
     def test_transfer_lineage_does_not_depend_on_future_sale_rows(self):
         rows = [
@@ -77,13 +94,16 @@ class HDOwnershipTests(unittest.TestCase):
     def test_realized_lots_support_partial_sales_unknown_rows_and_display_tolerance(self):
         rows = [
             transaction("drip", "DIVIDEND_REINVESTMENT", "2024-06-14", ".063428", amount=Decimal("22.12")),
+            transaction("out", "TRANSFER_OUT", "2024-07-15", ".063428", transfer_match_id="move", destination_location="Merrill"),
+            transaction("in", "TRANSFER_IN", "2024-07-16", ".063428", transfer_match_id="move", source="Merrill", source_location="Computershare", destination_location="Merrill"),
             transaction("restricted", "ADJUSTMENT", "2025-03-24", "15", source="Merrill", source_location="Restricted share award"),
             transaction("drip-sale", "SALE", "2026-02-12", ".0637", source="Merrill", source_account_type="Realized lot", acquisition_date="2024-06-14", lot_sequence=1),
             transaction("rs-sale", "SALE", "2026-02-12", "5", source="Merrill", source_account_type="Realized lot", acquisition_date="2025-03-22", lot_sequence=2),
             transaction("na-sale", "SALE", "2026-02-12", "4", source="Merrill", source_account_type="Realized lot", acquisition_date=None, lot_sequence=3),
             transaction("total", "SALE", "2026-02-12", "9.0637", source="Merrill", source_account_type="Brokerage"),
         ]
-        result = reconstruct_hd_ownership(rows)
+        details = [{"parent_transfer_fingerprint": "out", "acquisition_date": "2024-06-14", "transferred_shares": ".063428", "transfer_lot_fingerprint": "detail"}]
+        result = reconstruct_hd_ownership(rows, transfer_lots=details)
 
         self.assertEqual(result.summary["known_origin_sold_lots"], 2)
         self.assertEqual(result.summary["unresolved_origin_sold_lots"], 1)
@@ -97,6 +117,37 @@ class HDOwnershipTests(unittest.TestCase):
         self.assertEqual(result.summary["unknown_origin_acquired_shares"], Decimal("0"))
         self.assertEqual(result.summary["lot_ledger_difference"], Decimal("0"))
         self.assertEqual(result.summary["lot_ledger_status"], "LOT_LEDGER_HAS_UNALLOCATED_SALE")
+
+    def test_merrill_sale_cannot_consume_computershare_only_lot(self):
+        rows = [
+            transaction("buy", "ESPP_PURCHASE", "2024-01-01", "2"),
+            transaction("sale", "SALE", "2026-02-12", "1", source="Merrill", source_account_type="Realized lot", acquisition_date="2024-01-01", lot_sequence=1),
+            transaction("total", "SALE", "2026-02-12", "1", source="Merrill", source_account_type="Brokerage"),
+        ]
+        result = reconstruct_hd_ownership(rows)
+
+        self.assertEqual(result.lots[0].remaining_shares, Decimal("2"))
+        self.assertEqual(result.sold_lots[0].match_status, "UNRESOLVED")
+        self.assertEqual(result.summary["unresolved_sold_lot_shares"], Decimal("1"))
+
+    def test_partial_transfer_limits_merrill_sale_and_preserves_computershare_remainder(self):
+        rows = [
+            transaction("buy", "ESPP_PURCHASE", "2024-01-01", "5.5"),
+            transaction("out", "TRANSFER_OUT", "2024-07-15", "5", transfer_match_id="move", destination_location="Merrill"),
+            transaction("in", "TRANSFER_IN", "2024-07-16", "5", transfer_match_id="move", source="Merrill", source_location="Computershare", destination_location="Merrill"),
+            transaction("sale", "SALE", "2026-02-12", "5", source="Merrill", source_account_type="Realized lot", acquisition_date="2024-01-01", lot_sequence=1),
+            transaction("excess", "SALE", "2026-02-12", ".1", source="Merrill", source_account_type="Realized lot", acquisition_date="2024-01-01", lot_sequence=2),
+            transaction("total", "SALE", "2026-02-12", "5.1", source="Merrill", source_account_type="Brokerage"),
+        ]
+        details = [{"parent_transfer_fingerprint": "out", "acquisition_date": "2024-01-01", "transferred_shares": "5", "transfer_lot_fingerprint": "detail"}]
+        result = reconstruct_hd_ownership(rows, transfer_lots=details)
+
+        self.assertEqual(result.sold_lots[0].match_status, "MATCHED")
+        self.assertEqual(result.sold_lots[1].match_status, "UNRESOLVED")
+        self.assertEqual(result.lots[0].remaining_shares, Decimal(".5"))
+        self.assertEqual(result.lots[0].current_custodian, "Computershare")
+        self.assertEqual(result.summary["reconstructed_remaining_shares"], Decimal(".4"))
+        self.assertEqual(result.summary["lot_ledger_difference"], Decimal("0"))
 
     def test_unknown_acquisitions_are_not_assigned_to_unresolved_sales(self):
         rows = [
