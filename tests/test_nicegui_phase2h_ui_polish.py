@@ -57,7 +57,7 @@ class NiceGUIPhase2HPolishTests(unittest.TestCase):
         self.assertIn("drip_reconciliation_status", history)
 
     def test_hd_espp_phase3a_reconciliation_ui_is_source_bounded(self) -> None:
-        history = MAIN.split("async def render_hd_espp_history", 1)[1].split("async def render_holdings", 1)[0]
+        history = MAIN.split("async def render_hd_espp_history", 1)[1].split('ui.label("Lifetime Documented Economics"', 1)[0]
 
         self.assertIn("build_hd_phase3a_reconciliation", MAIN)
         self.assertIn("Historical → Live Reconciliation", history)
@@ -73,6 +73,19 @@ class NiceGUIPhase2HPolishTests(unittest.TestCase):
         self.assertIn("Phase 3A Reconciliation Issues", history)
         self.assertNotIn("lifetime total return", history.lower())
         self.assertNotIn("xirr", history.lower())
+
+    def test_hd_espp_phase3b_lifetime_ui_is_gated_and_source_bounded(self) -> None:
+        history = MAIN.split("async def render_hd_espp_history", 1)[1].split("async def render_holdings", 1)[0]
+
+        self.assertIn("build_hd_lifetime_economics", MAIN)
+        self.assertIn("Lifetime Documented Economics", history)
+        self.assertIn("Documented Cash Flow Ledger", history)
+        self.assertIn("Performance Availability / Coverage", history)
+        self.assertIn("Lifetime Realized Economics by Origin", history)
+        self.assertIn("Phase 3B Lifetime Economics Issues", history)
+        self.assertIn("Complete lifetime total return", history)
+        self.assertIn("remain gated", history)
+        self.assertIn("XIRR", history)
 
     def test_dialogs_and_actions_are_viewport_and_touch_safe(self) -> None:
         self.assertIn("96vw", DIALOG_CARD)

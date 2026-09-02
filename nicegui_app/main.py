@@ -52,6 +52,7 @@ from hd_espp_analytics import analyze_hd_economics
 from hd_espp_history import HDESPPHistoryService, transaction_record_type
 from hd_ownership import SHARE_TOLERANCE, reconstruct_hd_ownership
 from hd_espp_reconciliation import build_hd_phase3a_reconciliation
+from hd_espp_lifetime import build_hd_lifetime_economics
 from shared_data_preparation import prepare_shared_data
 
 HOST = "0.0.0.0"
@@ -273,6 +274,7 @@ async def index() -> None:
         current_hd_price = next((row.get("current_price") for row in holdings if str(row.get("ticker", "")).upper() == "HD"), None)
         analytics = analyze_hd_economics(state["transactions"], ownership, live_hd_shares, current_hd_price)
         phase3a = build_hd_phase3a_reconciliation(state["transactions"], state["transfer_lots"], state.get("documents", []), state.get("position_checkpoints", []), ownership, live_hd_shares)
+        lifetime = build_hd_lifetime_economics(state["transactions"], ownership, analytics, phase3a, live_hd_shares, current_hd_price)
         with area:
             ui.label("HD / ESPP History").classes("text-2xl font-semibold")
             ui.label("Local transaction reconstruction only. Live HD quantity, cost basis, portfolio history, and forward contribution assumptions remain authoritative and unchanged.").classes("text-sm text-gray-600 dark:text-gray-300")
@@ -389,6 +391,24 @@ async def index() -> None:
             records_table(phase3a.surviving_lots, "Surviving Lots / Difference Audit")
             if phase3a.issues:
                 records_table(phase3a.issues, "Phase 3A Reconciliation Issues")
+            ui.separator()
+            ui.label("Lifetime Documented Economics").classes("text-xl font-semibold")
+            ui.label("Source-bounded documented economics only. Complete lifetime total return, IRR, XIRR, CAGR, and reconstructed-lot current unrealized return remain gated by reconciliation coverage.").classes("text-sm text-gray-600 dark:text-gray-300")
+            metric_cards([
+                ("Employee ESPP Contributions", currency(lifetime.summary["total_employee_cash_contributed"])),
+                ("ESPP Purchase Discount Benefit", currency(lifetime.summary["espp_purchase_discount_benefit"])),
+                ("Documented DRIP Dividends", currency(lifetime.drip_lifetime["total_gross_dividend"])),
+                ("Documented Cash Dividends", currency(lifetime.dividend_lifetime["total_documented_cash_dividends"])),
+                ("Documented Sale Proceeds", currency(lifetime.sales_lifetime["aggregate_documented_sale_proceeds"])),
+                ("Known-Basis Realized Gain", currency(lifetime.sales_lifetime["documented_realized_gain"])),
+                ("Open Economic Acquisition Cash", currency(lifetime.open_economic_cost["open_lot_economic_cash"])),
+                ("Lifetime Return Status", str(lifetime.summary["lifetime_total_return_status"]).title()),
+            ])
+            records_table(lifetime.cash_flows, "Documented Cash Flow Ledger")
+            records_table(lifetime.performance_gating, "Performance Availability / Coverage")
+            records_table(lifetime.realized_by_origin, "Lifetime Realized Economics by Origin")
+            if lifetime.issues:
+                records_table(lifetime.issues, "Phase 3B Lifetime Economics Issues")
             records_table(ownership.origin_breakdown, "Share Origin Breakdown")
             records_table(state["transfer_lots"], "Normalized Custody Transfer Lot Details")
             open_lots = [lot.display() for lot in ownership.lots if lot.remaining_shares > SHARE_TOLERANCE]
