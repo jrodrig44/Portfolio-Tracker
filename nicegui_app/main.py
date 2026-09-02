@@ -300,6 +300,34 @@ async def index() -> None:
                 ("Documents", str(summary["documents"])),
                 ("Unresolved", str(summary["issues"])),
             ])
+            if current_hd_price is not None or live_hd_shares is not None:
+                ui.label("Current Snapshot").classes("text-lg font-semibold")
+                metric_cards([
+                    ("Current HD Price", currency(current_hd_price) if current_hd_price is not None else "Unavailable"),
+                    ("Live HD Shares", str(live_hd_shares) if live_hd_shares is not None else "Unavailable"),
+                    ("Current HD Market Value", currency(analytics.current_snapshot["current_hd_market_value"]) if analytics.current_snapshot["current_hd_market_value"] is not None else "Unavailable"),
+                ])
+            ui.label("Coverage").classes("text-lg font-semibold")
+            metric_cards([
+                ("Total Shares Sold", str(analytics.coverage["total_shares_sold"])),
+                ("Shares With Documented Basis", str(analytics.coverage["shares_with_documented_basis"])),
+                ("Shares Without Documented Basis", str(analytics.coverage["shares_without_documented_basis"])),
+                ("Basis Share Coverage", percent(analytics.coverage["share_basis_coverage_pct"])),
+                ("Proceeds Coverage", percent(analytics.coverage["proceeds_coverage_pct"])),
+                ("Known-Origin Sold Shares", str(analytics.coverage["known_origin_sold_shares"])),
+                ("Unresolved-Origin Sold Shares", str(analytics.coverage["unresolved_origin_sold_shares"])),
+                ("Origin Coverage", percent(analytics.coverage["origin_coverage_pct"])),
+            ])
+            ui.label("ESPP Purchase Economics").classes("text-lg font-semibold")
+            records_table(analytics.per_purchase_discount, "ESPP Purchase Economics")
+            ui.label("DRIP Economics").classes("text-lg font-semibold")
+            records_table(analytics.drip_detail, "DRIP Economics")
+            ui.label("Documented Realized Gain").classes("text-lg font-semibold")
+            records_table(analytics.realized_detail, "Documented Realized Gain")
+            ui.label("Realized Gain by Origin").classes("text-lg font-semibold")
+            records_table(analytics.realized_by_origin.get("records", []), "Realized Gain by Origin")
+            if analytics.issues:
+                records_table([{"issue": issue} for issue in analytics.issues], "Analytics Issues")
             import_status = ui.label("").classes("text-sm")
             importing = {"value": False}
             async def import_hd_statements() -> None:

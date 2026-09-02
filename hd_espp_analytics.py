@@ -11,7 +11,6 @@ from typing import Any, Iterable
 from hd_ownership import OwnershipReconstruction
 
 
-DECIMAL_ZERO = Decimal("0")
 CONTRIBUTION_TOLERANCE = Decimal("0.01")
 DRIP_TOLERANCE = Decimal("0.01")
 
@@ -74,19 +73,17 @@ def _first_last_dates(rows: Iterable[dict[str, Any]], field: str) -> tuple[date 
     return min(values), max(values)
 
 
-def _extract_gross_dividend(row: dict[str, Any]) -> Decimal | None:
-    if row.get("source_account_type") != "ESPP":
-        return None
+def _extract_gross_dividend(row: dict[str, Any]) -> tuple[Decimal | None, bool]:
     notes = str(row.get("notes") or "")
     match = re.search(r"gross_dividend\s*=\s*([-+]?\d+(?:,\d{3})*(?:\.\d+)?)", notes, re.I)
     if match:
-        return _decimal(match.group(1))
-    gross = _decimal(row.get("amount"))
+        return _decimal(match.group(1)), True
+    net = _decimal(row.get("amount"))
     fees = _decimal(row.get("fees"))
     taxes = _decimal(row.get("taxes"))
-    if gross is not None and fees is not None and taxes is not None:
-        return gross + fees + taxes
-    return gross
+    if net is not None and fees is not None and taxes is not None:
+        return net + fees + taxes, True
+    return None, False
 
 
 def analyze_hd_economics(transactions: Iterable[dict[str, Any]], ownership: OwnershipReconstruction | None = None, live_hd_shares: Decimal | str | float | None = None, current_hd_price: Decimal | str | float | None = None) -> HDEconomicsAnalysis:
@@ -106,7 +103,6 @@ def analyze_hd_economics(transactions: Iterable[dict[str, Any]], ownership: Owne
 
     contribution_issues: list[str] = []
     contribution_status = "OK"
-    contribution_reconciliation_rows: list[dict[str, Any]] = []
     for row in espp_rows:
         shares = _decimal(row.get("shares"))
         employee = _decimal(row.get("amount"))
@@ -115,14 +111,6 @@ def analyze_hd_economics(transactions: Iterable[dict[str, Any]], ownership: Owne
             continue
         purchase_cost = shares * purchase_price
         difference = employee - purchase_cost
-        contribution_reconciliation_rows.append({
-            "date": row.get("transaction_date"),
-            "shares": shares,
-            "employee_contribution": employee,
-            "purchase_cost_from_shares": purchase_cost,
-            "contribution_difference": difference,
-            "status": "OK" if abs(difference) <= CONTRIBUTION_TOLERANCE else "REVIEW_REQUIRED",
-        })
         if abs(difference) > CONTRIBUTION_TOLERANCE:
             contribution_issues.append(f"ESPP purchase on {row.get('transaction_date')} differs by {difference} from shares × price; review required")
             contribution_status = "REVIEW_REQUIRED"
@@ -154,7 +142,7 @@ def analyze_hd_economics(transactions: Iterable[dict[str, Any]], ownership: Owne
             "discount_value": discount_value,
             "discount_pct": discount_pct,
             "contribution_difference": (employee - employee_purchase_cost) if employee is not None else None,
-            "status": "OK" if employee is not None and abs((employee - employee_purchase_cost)) <= CONTRIBUTION_TOLERANCE else "REVIEW_REQUIRED",
+            "status": "OK" if employee is not None and abs(employee - employee_purchase_cost) <= CONTRIBUTION_TOLERANCE else "REVIEW_REQUIRED",
         })
         discount_total_value += discount_value
         discount_total_market_value += market_value_at_purchase
@@ -169,21 +157,26 @@ def analyze_hd_economics(transactions: Iterable[dict[str, Any]], ownership: Owne
     drip_price_numerator = _sum_decimals(((_decimal(row.get("shares")) or Decimal("0")) * (_decimal(row.get("purchase_price")) or Decimal("0"))) for row in drip_rows if _decimal(row.get("shares")) is not None and _decimal(row.get("purchase_price")) is not None)
     drip_price_denominator = _sum_decimals(_decimal(row.get("shares")) for row in drip_rows if _decimal(row.get("purchase_price")) is not None)
     weighted_average_drip_price = drip_price_numerator / drip_price_denominator if drip_price_denominator else Decimal("0")
+
     drip_detail: list[dict[str, Any]] = []
+    gross_dividend_known_count = 0
+    gross_dividend_missing_count = 0
     total_gross_dividend = Decimal("0")
     for row in drip_rows:
         shares = _decimal(row.get("shares"))
         amount = _decimal(row.get("amount"))
         fees = _decimal(row.get("fees"))
         taxes = _decimal(row.get("taxes"))
-        gross = _extract_gross_dividend(row)
-        if gross is None:
-            gross = (amount or Decimal("0")) + (fees or Decimal("0")) + (taxes or Decimal("0"))
-        total_gross_dividend += gross
-        net_reinvested = amount if amount is not None else gross - (fees or Decimal("0")) - (taxes or Decimal("0"))
+        gross, gross_known = _extract_gross_dividend(row)
+        if gross_known:
+            gross_dividend_known_count += 1
+            total_gross_dividend += gross or Decimal("0")
+        else:
+            gross_dividend_missing_count += 1
+        net_reinvested = amount if amount is not None else (gross or Decimal("0")) - (fees or Decimal("0")) - (taxes or Decimal("0"))
         price = _decimal(row.get("purchase_price"))
-        reconciliation_delta = (gross - (fees or Decimal("0")) - (taxes or Decimal("0"))) - (net_reinvested or Decimal("0"))
-        status = "OK" if abs(reconciliation_delta) <= DRIP_TOLERANCE else "REVIEW_REQUIRED"
+        reconciliation_delta = Decimal("0") if gross is None else ((gross - (fees or Decimal("0")) - (taxes or Decimal("0"))) - (net_reinvested or Decimal("0")))
+        status = "OK" if gross is None or abs(reconciliation_delta) <= DRIP_TOLERANCE else "REVIEW_REQUIRED"
         drip_detail.append({
             "transaction_date": row.get("transaction_date"),
             "gross_dividend": gross,
@@ -213,33 +206,40 @@ def analyze_hd_economics(transactions: Iterable[dict[str, Any]], ownership: Owne
         total_shares_sold = _sum_decimals(_decimal(row.get("shares")) for row in realized_rows if _decimal(row.get("shares")) is not None)
     if total_sale_proceeds == Decimal("0"):
         total_sale_proceeds = known_basis_proceeds
-    realized_gain_coverage_pct = known_basis_shares / total_shares_sold if total_shares_sold else Decimal("0")
-    proceeds_coverage_pct = known_basis_proceeds / total_sale_proceeds if total_sale_proceeds else Decimal("0")
-    basis_coverage_pct = documented_basis_total / total_sale_proceeds if total_sale_proceeds else Decimal("0")
 
-    realized_detail = []
+    known_basis_lot_count = len(known_basis_rows)
+    total_realized_lot_count = len(realized_rows)
+    share_basis_coverage_pct = known_basis_shares / total_shares_sold if total_shares_sold else Decimal("0")
+    proceeds_coverage_pct = known_basis_proceeds / total_sale_proceeds if total_sale_proceeds else Decimal("0")
+    lot_basis_coverage_pct = Decimal(known_basis_lot_count) / Decimal(total_realized_lot_count) if total_realized_lot_count else Decimal("0")
+
+    sale_fingerprint_map = {str(sold_lot.sale_fingerprint): sold_lot for sold_lot in (ownership.sold_lots if ownership is not None else [])}
+    realized_detail: list[dict[str, Any]] = []
     for row in realized_rows:
+        sale_fingerprint = str(row.get("transaction_fingerprint") or "")
+        sold_lot = sale_fingerprint_map.get(sale_fingerprint)
         shares = _decimal(row.get("shares"))
         sale_amount = _decimal(row.get("amount"))
         basis = _decimal(row.get("cost_basis"))
         gain = None if sale_amount is None or basis is None else sale_amount - basis
         realized_detail.append({
-            "transaction_date": row.get("transaction_date"),
+            "sale_date": row.get("transaction_date"),
             "acquisition_date": row.get("acquisition_date"),
+            "origin": sold_lot.origin_type if sold_lot is not None else "UNRESOLVED",
             "shares_sold": shares,
             "sale_proceeds": sale_amount,
             "documented_basis": basis,
             "documented_realized_gain": gain,
             "gain_pct": None if gain is None or basis in (None, Decimal("0")) else (gain / basis),
-            "origin": "UNKNOWN",
+            "status": "Known basis" if basis is not None else "Unknown basis",
         })
 
-    realized_by_origin: dict[str, Any] = {"records": [], "origin_coverage_pct": Decimal("0")}
+    realized_by_origin: dict[str, Any] = {"records": [], "origin_coverage_pct": Decimal("0"), "known_origin_sold_shares": Decimal("0"), "unresolved_origin_sold_shares": Decimal("0")}
     if ownership is not None:
         origin_summary: dict[str, dict[str, Any]] = {}
         for sold_lot in ownership.sold_lots:
-            origin = sold_lot.origin_type or "UNKNOWN"
-            bucket = origin_summary.setdefault(origin, {"shares_sold": Decimal("0"), "proceeds": Decimal("0"), "documented_cost_basis": Decimal("0"), "documented_realized_gain": Decimal("0"), "known_basis_rows": 0})
+            origin = sold_lot.origin_type or "UNRESOLVED"
+            bucket = origin_summary.setdefault(origin, {"shares_sold": Decimal("0"), "proceeds": Decimal("0"), "documented_cost_basis": Decimal("0"), "documented_realized_gain": Decimal("0"), "known_basis_rows": 0, "status": "Unknown / unresolved" if origin in {"UNRESOLVED", "UNKNOWN"} else "Known origin"})
             shares = sold_lot.shares_sold
             sale_amount = sold_lot.sale_amount
             basis = sold_lot.cost_basis
@@ -254,23 +254,36 @@ def analyze_hd_economics(transactions: Iterable[dict[str, Any]], ownership: Owne
                 bucket["documented_realized_gain"] += sale_amount - basis
         for key, value in sorted(origin_summary.items()):
             value["documented_realized_gain_pct"] = (value["documented_realized_gain"] / value["documented_cost_basis"]) if value["documented_cost_basis"] else Decimal("0")
-            if key in {"ESPP_PURCHASE", "DIVIDEND_REINVESTMENT", "RESTRICTED_SHARE", "OTHER_DOCUMENTED_ACQUISITION", "UNKNOWN"}:
-                realized_by_origin["records"].append({"origin": key, **value})
-        if realized_by_origin["records"]:
-            assigned_shares = sum((record["shares_sold"] for record in realized_by_origin["records"] if record["shares_sold"] is not None), Decimal("0"))
-            realized_by_origin["origin_coverage_pct"] = assigned_shares / known_basis_shares if known_basis_shares else Decimal("0")
+            realized_by_origin["records"].append({"origin": key, **value})
+        known_origin_sold_shares = _sum_decimals((entry["shares_sold"] for entry in realized_by_origin["records"] if entry["origin"] not in {"UNRESOLVED", "UNKNOWN"}))
+        unresolved_origin_sold_shares = total_shares_sold - known_origin_sold_shares if total_shares_sold else Decimal("0")
+        realized_by_origin["known_origin_sold_shares"] = known_origin_sold_shares
+        realized_by_origin["unresolved_origin_sold_shares"] = unresolved_origin_sold_shares
+        realized_by_origin["origin_coverage_pct"] = known_origin_sold_shares / total_shares_sold if total_shares_sold else Decimal("0")
     else:
         realized_by_origin["records"] = []
 
     open_lot_economic_cost = {
+        "lifetime_documented_acquisition_cash": Decimal("0"),
+        "open_lot_economic_cash": Decimal("0"),
         "economic_employee_cash_invested": Decimal("0"),
         "economic_reinvested_cash": Decimal("0"),
-        "economic_acquisition_cash_total": Decimal("0"),
     }
     if ownership is not None:
-        open_lot_economic_cost["economic_employee_cash_invested"] = _sum_decimals((lot.employee_contribution for lot in ownership.lots if lot.origin_type == "ESPP_PURCHASE" and lot.employee_contribution is not None))
-        open_lot_economic_cost["economic_reinvested_cash"] = _sum_decimals((lot.reinvested_dividend_amount for lot in ownership.lots if lot.origin_type == "DIVIDEND_REINVESTMENT" and lot.reinvested_dividend_amount is not None))
-        open_lot_economic_cost["economic_acquisition_cash_total"] = open_lot_economic_cost["economic_employee_cash_invested"] + open_lot_economic_cost["economic_reinvested_cash"]
+        total_life_employee = _sum_decimals((lot.employee_contribution for lot in ownership.lots if lot.origin_type == "ESPP_PURCHASE" and lot.employee_contribution is not None))
+        total_life_reinvested = _sum_decimals((lot.reinvested_dividend_amount for lot in ownership.lots if lot.origin_type == "DIVIDEND_REINVESTMENT" and lot.reinvested_dividend_amount is not None))
+        open_employee = Decimal("0")
+        for lot in ownership.lots:
+            if lot.origin_type == "ESPP_PURCHASE" and lot.employee_contribution is not None and lot.original_shares > Decimal("0"):
+                open_employee += lot.employee_contribution * (lot.remaining_shares / lot.original_shares)
+        open_drip = Decimal("0")
+        for lot in ownership.lots:
+            if lot.origin_type == "DIVIDEND_REINVESTMENT" and lot.reinvested_dividend_amount is not None and lot.original_shares > Decimal("0"):
+                open_drip += lot.reinvested_dividend_amount * (lot.remaining_shares / lot.original_shares)
+        open_lot_economic_cost["lifetime_documented_acquisition_cash"] = total_life_employee + total_life_reinvested
+        open_lot_economic_cost["economic_employee_cash_invested"] = open_employee
+        open_lot_economic_cost["economic_reinvested_cash"] = open_drip
+        open_lot_economic_cost["open_lot_economic_cash"] = open_employee + open_drip
 
     issues: list[str] = []
     if ownership is not None and ownership.summary.get("reconciliation_status") == "DIFFERENCE_REQUIRES_REVIEW":
@@ -279,17 +292,19 @@ def analyze_hd_economics(transactions: Iterable[dict[str, Any]], ownership: Owne
     if not purchase_discount_rows and espp_rows:
         issues.append("No ESPP purchase rows contained both purchase price and fair market value; discount benefit is unavailable.")
 
-    if ownership is not None and ownership.summary.get("reconciliation_status") == "DIFFERENCE_REQUIRES_REVIEW":
-        pass
-
     coverage = {
         "total_shares_sold": total_shares_sold,
         "shares_with_documented_basis": known_basis_shares,
         "shares_without_documented_basis": (total_shares_sold - known_basis_shares) if total_shares_sold else Decimal("0"),
-        "realized_gain_coverage_pct": realized_gain_coverage_pct,
+        "share_basis_coverage_pct": share_basis_coverage_pct,
+        "realized_gain_coverage_pct": share_basis_coverage_pct,
         "proceeds_coverage_pct": proceeds_coverage_pct,
-        "basis_coverage_pct": basis_coverage_pct,
+        "lot_basis_coverage_pct": lot_basis_coverage_pct,
+        "known_origin_sold_shares": realized_by_origin.get("known_origin_sold_shares", Decimal("0")),
+        "unresolved_origin_sold_shares": realized_by_origin.get("unresolved_origin_sold_shares", Decimal("0")),
         "origin_coverage_pct": realized_by_origin.get("origin_coverage_pct", Decimal("0")),
+        "total_sale_proceeds": total_sale_proceeds,
+        "known_basis_proceeds": known_basis_proceeds,
     }
 
     reconciliation = {
@@ -336,6 +351,8 @@ def analyze_hd_economics(transactions: Iterable[dict[str, Any]], ownership: Owne
             "weighted_average_drip_price": weighted_average_drip_price,
             "purchase_price_completeness_count": len([row for row in drip_rows if _decimal(row.get("purchase_price")) is not None]),
             "missing_purchase_price_count": sum(1 for row in drip_rows if _decimal(row.get("purchase_price")) is None),
+            "gross_dividend_known_count": gross_dividend_known_count,
+            "gross_dividend_missing_count": gross_dividend_missing_count,
         },
         dividend_summary={
             "cash_dividend_event_count": dividend_event_count,
@@ -343,7 +360,8 @@ def analyze_hd_economics(transactions: Iterable[dict[str, Any]], ownership: Owne
             "coverage_label": "Documented in available statements",
         },
         realized_summary={
-            "known_basis_lot_count": len(known_basis_rows),
+            "total_realized_lot_count": total_realized_lot_count,
+            "known_basis_lot_count": known_basis_lot_count,
             "known_basis_shares": known_basis_shares,
             "known_basis_proceeds": known_basis_proceeds,
             "documented_basis_total": documented_basis_total,
@@ -352,6 +370,7 @@ def analyze_hd_economics(transactions: Iterable[dict[str, Any]], ownership: Owne
             "unknown_basis_lot_count": len(realized_rows) - len(known_basis_rows),
             "unknown_basis_shares": _sum_decimals(_decimal(row.get("shares")) for row in realized_rows if _decimal(row.get("cost_basis")) is None),
             "unknown_basis_proceeds": _sum_decimals(_decimal(row.get("amount")) for row in realized_rows if _decimal(row.get("cost_basis")) is None),
+            "total_sale_proceeds": total_sale_proceeds,
         },
         realized_by_origin=realized_by_origin,
         coverage=coverage,
