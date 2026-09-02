@@ -24,7 +24,7 @@ import pdfplumber
 PROJECT_ROOT = Path(__file__).resolve().parent
 HD_STATEMENTS_DIR = PROJECT_ROOT / "Statements" / "HD"
 HD_HISTORY_DB_PATH = PROJECT_ROOT / "data" / "stash_statement_history.sqlite"
-PARSER_VERSION = "hd-espp-v3"
+PARSER_VERSION = "hd-espp-v4"
 TYPES = {"ESPP_PURCHASE", "DIVIDEND", "DIVIDEND_REINVESTMENT", "TRANSFER_OUT", "TRANSFER_IN", "SALE", "ADJUSTMENT"}
 DATE_WORD = r"\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4}"
 MONEY = r"\(?\d+(?:[ ,]\d{3})*(?:\.\d+)?\)?"
@@ -201,14 +201,7 @@ def _equateplus(text: str, document: str) -> list[HDTransaction]:
         values = re.findall(r"\d+(?:,\d{3})*(?:\.\d+)?", tail)
         if len(dates) >= 3 and len(values) >= 7:
             rows.append(HDTransaction(_date(dates[2]), "ESPP_PURCHASE", "EquatePlus/Computershare", "ESPP", shares=_decimal(values[-2]), amount=_decimal(values[0]), fair_market_value=_decimal(values[-4]), purchase_price=_decimal(values[-3]), acquisition_date=_date(dates[2]), source_location="EquatePlus", source_document=document, source_period_start=start, source_period_end=end))
-    for line in drip_text.splitlines():
-        if "Dividend Reinvestments" in line or "Record Date" in line or "Purchase Date" in line or "Gross Dividend" in line or "ESPP-PURCHASE at" in line:
-            continue
-        date_match = re.search(rf"({DATE_WORD})\s+", line, re.I)
-        if date_match is None:
-            continue
-        remainder = line[date_match.end():]
-        tokens = re.findall(r"[-+]?\d+(?:,\d{3})*(?:\.\d+)?", remainder)
+    for transaction_date, tokens in _equateplus_drip_records(drip_text):
         if len(tokens) < 7:
             continue
         # Real EquatePlus table layout after the date: entitled quantity, gross dividend, taxes, fees, net reinvested, purchase price, purchased shares, residual amount.
@@ -221,8 +214,35 @@ def _equateplus(text: str, document: str) -> list[HDTransaction]:
         shares_value = _decimal(shares)
         if gross_value is None or net_value is None or price_value is None or shares_value is None:
             continue
-        rows.append(HDTransaction(_date(date_match.group(1)), "DIVIDEND_REINVESTMENT", "EquatePlus/Computershare", "ESPP", shares=shares_value, amount=net_value, purchase_price=price_value, fees=fees_value or Decimal("0"), taxes=taxes_value or Decimal("0"), source_location="EquatePlus", source_document=document, source_period_start=start, source_period_end=end, notes=f"gross_dividend={gross_value}"))
+        notes = f"gross_dividend={gross_value}; entitled_quantity={_decimal(entitled)}; residual_amount={_decimal(rest[0]) if rest else None}"
+        rows.append(HDTransaction(transaction_date, "DIVIDEND_REINVESTMENT", "EquatePlus/Computershare", "ESPP", shares=shares_value, amount=net_value, purchase_price=price_value, fees=fees_value if fees_value is not None else Decimal("0"), taxes=taxes_value if taxes_value is not None else Decimal("0"), source_location="EquatePlus", source_document=document, source_period_start=start, source_period_end=end, notes=notes))
     return rows
+
+
+def _equateplus_drip_records(text: str) -> list[tuple[date, list[str]]]:
+    records: list[tuple[date, list[str]]] = []
+    pending_date: date | None = None
+    pending_tokens: list[str] = []
+    for line in text.splitlines():
+        if "Dividend Reinvestments" in line or "Record Date" in line or "Purchase Date" in line or "Gross Dividend" in line:
+            continue
+        if "ESPP-PURCHASE at" in line:
+            break
+        date_match = re.search(rf"({DATE_WORD})\s*", line, re.I)
+        if date_match is not None:
+            if pending_date is not None and len(pending_tokens) >= 8:
+                records.append((pending_date, pending_tokens))
+            pending_date = _date(date_match.group(1))
+            pending_tokens = re.findall(r"[-+]?\d+(?:,\d{3})*(?:\.\d+)?", line[date_match.end():])
+        elif pending_date is not None and len(pending_tokens) < 8:
+            pending_tokens.extend(re.findall(r"[-+]?\d+(?:,\d{3})*(?:\.\d+)?", line))
+        if pending_date is not None and len(pending_tokens) >= 8:
+            records.append((pending_date, pending_tokens))
+            pending_date = None
+            pending_tokens = []
+    if pending_date is not None and len(pending_tokens) >= 8:
+        records.append((pending_date, pending_tokens))
+    return records
 
 
 def _merrill(text: str, document: str) -> list[HDTransaction]:

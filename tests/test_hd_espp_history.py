@@ -8,7 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
-from hd_espp_history import HDESPPHistoryService, HDTransaction, _connect, detect_document_family, economic_share_ownership, match_custody_transfers, parse_hd_statement_text, parse_hd_transfer_lots, reconcile_custody_transfers, transaction_fingerprint, transaction_record_type
+from hd_espp_history import HDESPPHistoryService, HDTransaction, PARSER_VERSION, _connect, detect_document_family, economic_share_ownership, match_custody_transfers, parse_hd_statement_text, parse_hd_transfer_lots, reconcile_custody_transfers, transaction_fingerprint, transaction_record_type
 
 
 LEGACY = """The Home Depot, Inc ESPP - Employee Plan Statement
@@ -157,9 +157,36 @@ rate
         self.assertEqual(row.amount, Decimal("9.79"))
         self.assertEqual(row.fees, Decimal("0.14"))
         self.assertEqual(row.taxes, Decimal("0.00"))
+        self.assertEqual(str(row.taxes), "0.00")
         self.assertEqual(row.purchase_price, Decimal("358.05"))
         self.assertEqual(row.shares, Decimal("0.02693"))
-        self.assertEqual(row.notes, "gross_dividend=9.78")
+        self.assertEqual(row.notes, "gross_dividend=9.78; entitled_quantity=4.255534; residual_amount=0.00")
+
+    def test_equateplus_drip_multiline_record_is_assembled_deterministically(self) -> None:
+        text = """Purchase activity statement Jeffrey Rodriguez
+1 Jan 2025 - 31 Mar 2025 User ID: 204474190
+Dividend Reinvestments
+Gross Dividend Dividend Purchase Purchased Residual
+Record Date Purchase Date Entitled Quantity Payment Taxes Fees Reinvested Price Shares Amount
+12 Mar 2025 4.255534 9.78 USD
+0.00 USD 0.14 USD 9.79 USD
+358.05 USD 0.02693 0.00 USD
+ESPP-PURCHASE at 2.3 USD
+"""
+        _, rows, issues = parse_hd_statement_text(text)
+
+        self.assertFalse(issues)
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row.transaction_date, date(2025, 3, 12))
+        self.assertEqual(row.amount, Decimal("9.79"))
+        self.assertEqual(row.fees, Decimal("0.14"))
+        self.assertEqual(str(row.taxes), "0.00")
+        self.assertEqual(row.purchase_price, Decimal("358.05"))
+        self.assertEqual(row.shares, Decimal("0.02693"))
+
+    def test_parser_version_tracks_material_drip_mapping_change(self) -> None:
+        self.assertEqual(PARSER_VERSION, "hd-espp-v4")
 
     def test_transfer_values_are_not_cost_basis(self) -> None:
         _, merrill, issues = parse_hd_statement_text(MERRILL_TRANSFERS)

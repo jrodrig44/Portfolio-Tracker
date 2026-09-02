@@ -91,6 +91,34 @@ class HDEconomicsAnalysisTests(unittest.TestCase):
         self.assertEqual(analysis.espp_summary["total_employee_contributions"], Decimal("1400.00"))
         self.assertNotEqual(analysis.espp_summary["total_employee_contributions"], analysis.drip_summary["total_net_reinvested"])
 
+    def test_drip_source_exception_and_purchase_value_diagnostic_are_visible(self) -> None:
+        transactions = [{
+            "transaction_date": "2025-03-12",
+            "transaction_type": "DIVIDEND_REINVESTMENT",
+            "source": "EquatePlus/Computershare",
+            "source_account_type": "ESPP",
+            "shares": "0.02693",
+            "amount": "9.79",
+            "purchase_price": "358.05",
+            "fees": "0.14",
+            "taxes": "0.00",
+            "source_document": "quarterly.pdf",
+            "notes": "gross_dividend=9.78; entitled_quantity=4.255534; residual_amount=0.00",
+            "transaction_fingerprint": "fp-drip-source-exception",
+        }]
+
+        analysis = analyze_hd_economics(transactions)
+        detail = analysis.drip_detail[0]
+
+        self.assertEqual(detail["net_reinvested"], Decimal("9.79"))
+        self.assertEqual(detail["fees"], Decimal("0.14"))
+        self.assertEqual(detail["gross_reconciliation_delta"], Decimal("-0.15"))
+        self.assertEqual(detail["share_purchase_value"], Decimal("9.6422865"))
+        self.assertEqual(detail["purchase_value_delta"], Decimal("-0.1477135"))
+        self.assertEqual(detail["reconciliation_status"], "SOURCE_RECONCILIATION_EXCEPTION")
+        self.assertTrue(any("source gross/fee/tax/net values do not reconcile" in issue for issue in analysis.issues))
+        self.assertTrue(any("shares × purchase price differs" in issue for issue in analysis.issues))
+
     def test_realized_gain_uses_documented_basis(self) -> None:
         analysis = analyze_hd_economics(self.transactions)
         self.assertEqual(analysis.realized_summary["known_basis_shares"], Decimal("5.3021"))

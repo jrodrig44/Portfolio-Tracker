@@ -13,6 +13,8 @@ from hd_ownership import OwnershipReconstruction
 
 CONTRIBUTION_TOLERANCE = Decimal("0.01")
 DRIP_TOLERANCE = Decimal("0.01")
+DRIP_PURCHASE_VALUE_ABSOLUTE_TOLERANCE = Decimal("0.02")
+DRIP_PURCHASE_VALUE_RELATIVE_TOLERANCE = Decimal("0.005")
 
 
 def _decimal(value: Any) -> Decimal | None:
@@ -84,6 +86,13 @@ def _extract_gross_dividend(row: dict[str, Any]) -> tuple[Decimal | None, bool]:
     if net is not None and fees is not None and taxes is not None:
         return net + fees + taxes, True
     return None, False
+
+
+def _drip_purchase_value_tolerance(amount: Decimal | None) -> Decimal:
+    if amount is None:
+        return DRIP_PURCHASE_VALUE_ABSOLUTE_TOLERANCE
+    relative = abs(amount) * DRIP_PURCHASE_VALUE_RELATIVE_TOLERANCE
+    return max(DRIP_PURCHASE_VALUE_ABSOLUTE_TOLERANCE, relative)
 
 
 def analyze_hd_economics(transactions: Iterable[dict[str, Any]], ownership: OwnershipReconstruction | None = None, live_hd_shares: Decimal | str | float | None = None, current_hd_price: Decimal | str | float | None = None) -> HDEconomicsAnalysis:
@@ -176,7 +185,17 @@ def analyze_hd_economics(transactions: Iterable[dict[str, Any]], ownership: Owne
         net_reinvested = amount if amount is not None else (gross or Decimal("0")) - (fees or Decimal("0")) - (taxes or Decimal("0"))
         price = _decimal(row.get("purchase_price"))
         reconciliation_delta = Decimal("0") if gross is None else ((gross - (fees or Decimal("0")) - (taxes or Decimal("0"))) - (net_reinvested or Decimal("0")))
-        status = "OK" if gross is None or abs(reconciliation_delta) <= DRIP_TOLERANCE else "REVIEW_REQUIRED"
+        share_purchase_value = (shares * price) if shares is not None and price is not None else None
+        purchase_value_delta = None if share_purchase_value is None or net_reinvested is None else share_purchase_value - net_reinvested
+        purchase_value_tolerance = _drip_purchase_value_tolerance(net_reinvested)
+        source_reconciliation_exception = gross is not None and abs(reconciliation_delta) > DRIP_TOLERANCE
+        purchase_value_exception = purchase_value_delta is not None and abs(purchase_value_delta) > purchase_value_tolerance
+        if source_reconciliation_exception:
+            status = "SOURCE_RECONCILIATION_EXCEPTION"
+        elif purchase_value_exception:
+            status = "SOURCE_ECONOMICS_REVIEW"
+        else:
+            status = "OK"
         drip_detail.append({
             "transaction_date": row.get("transaction_date"),
             "gross_dividend": gross,
@@ -185,10 +204,16 @@ def analyze_hd_economics(transactions: Iterable[dict[str, Any]], ownership: Owne
             "net_reinvested": net_reinvested,
             "shares_acquired": shares,
             "purchase_price": price,
+            "share_purchase_value": share_purchase_value,
+            "gross_reconciliation_delta": reconciliation_delta,
+            "purchase_value_delta": purchase_value_delta,
+            "purchase_value_tolerance": purchase_value_tolerance,
             "reconciliation_status": status,
         })
-        if status == "REVIEW_REQUIRED":
-            contribution_issues.append(f"DRIP row on {row.get('transaction_date')} gross/fee/tax/net reconciliation differs by {reconciliation_delta}")
+        if source_reconciliation_exception:
+            contribution_issues.append(f"DRIP row on {row.get('transaction_date')} source gross/fee/tax/net values do not reconcile; source delta {reconciliation_delta}")
+        if purchase_value_exception:
+            contribution_issues.append(f"DRIP row on {row.get('transaction_date')} shares × purchase price differs from documented reinvested amount by {purchase_value_delta}")
 
     dividend_total = _sum_decimals(_decimal(row.get("amount")) for row in dividend_rows)
     dividend_event_count = len(dividend_rows)
