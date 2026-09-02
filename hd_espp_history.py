@@ -65,6 +65,8 @@ class HDTransaction:
     fees: Decimal | None = None
     taxes: Decimal | None = None
     cost_basis: Decimal | None = None
+    transfer_value: Decimal | None = None
+    lot_sequence: int | None = None
     acquisition_date: date | None = None
     source_location: str | None = None
     destination_location: str | None = None
@@ -88,6 +90,7 @@ def transaction_fingerprint(row: HDTransaction) -> str:
         row.ticker.upper(), row.source.lower(), row.transaction_type,
         row.transaction_date.isoformat(), str(row.shares or ""), str(row.amount or ""),
         str(row.purchase_price or ""), row.acquisition_date.isoformat() if row.acquisition_date else "",
+        str(row.lot_sequence or "") if row.source_account_type == "Realized lot" else "",
     )
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
@@ -113,14 +116,15 @@ def _legacy(text: str, document: str) -> list[HDTransaction]:
     start, end = _period(text)
     purchase = re.compile(rf"({DATE_WORD}) Purchase ({MONEY}) ({MONEY}) ({DATE_WORD}) ({MONEY}) ({DATE_WORD}) ({MONEY}) ({MONEY}) ({MONEY})", re.I)
     drip = re.compile(rf"({DATE_WORD}) Dividend Reinvestment ({MONEY}) ({MONEY}) ({MONEY}) ({MONEY}) ({MONEY})", re.I)
-    transfer = re.compile(rf"({DATE_WORD}) (?:Plan Transfer Confirm|Transfer) (-?{MONEY})(?: ({MONEY}))?", re.I)
+    transfer = re.compile(rf"({DATE_WORD}) (Plan Transfer Confirm|Transfer) (-?{MONEY})(?: ({MONEY}))?", re.I)
     for match in purchase.finditer(text):
         rows.append(HDTransaction(_date(match[1]), "ESPP_PURCHASE", "Computershare", "ESPP", shares=_decimal(match[9]), amount=_decimal(match[2]), fair_market_value=_decimal(match[7]), purchase_price=_decimal(match[8]), acquisition_date=_date(match[1]), source_location="Computershare", source_document=document, source_period_start=start, source_period_end=end, notes=f"grant_date={_date(match[4])}; grant_fmv={_decimal(match[5])}"))
     for match in drip.finditer(text):
         rows.append(HDTransaction(_date(match[1]), "DIVIDEND_REINVESTMENT", "Computershare", "ESPP", shares=_decimal(match[6]), amount=_decimal(match[4]), purchase_price=_decimal(match[5]), fees=_decimal(match[3]), source_location="Computershare", source_document=document, source_period_start=start, source_period_end=end, notes=f"gross_dividend={_decimal(match[2])}"))
     for match in transfer.finditer(text):
-        shares = abs(_decimal(match[2]) or Decimal())
-        rows.append(HDTransaction(_date(match[1]), "TRANSFER_OUT", "Computershare", "ESPP", shares=shares, cost_basis=_decimal(match[3]), source_location="Computershare", destination_location="Merrill", source_document=document, source_period_start=start, source_period_end=end))
+        shares = abs(_decimal(match[3]) or Decimal())
+        transfer_value = _decimal(match[4]) if match[2].lower() == "transfer" else None
+        rows.append(HDTransaction(_date(match[1]), "TRANSFER_OUT", "Computershare", "ESPP", shares=shares, transfer_value=transfer_value, source_location="Computershare", destination_location="Merrill", source_document=document, source_period_start=start, source_period_end=end))
     return rows
 
 
@@ -159,17 +163,22 @@ def _merrill(text: str, document: str) -> list[HDTransaction]:
         rows.append(HDTransaction(merrill_date(match[1]), "DIVIDEND", "Merrill", "Brokerage", amount=_decimal(match[2]), source_location="Merrill", source_document=document, source_period_start=start, source_period_end=end))
     for match in re.finditer(rf"(\d{{2}}/\d{{2}}) HOME DEPOT INC (Security Transfer In|Transfer / Adjustment) ({MONEY}) ({MONEY})", text, re.I):
         kind = "TRANSFER_IN" if "security" in match[2].lower() else "ADJUSTMENT"
-        rows.append(HDTransaction(merrill_date(match[1]), kind, "Merrill", "Brokerage", shares=_decimal(match[3]), cost_basis=_decimal(match[4]), source_location="External" if kind == "TRANSFER_IN" else "Restricted share plan", destination_location="Merrill", source_document=document, source_period_start=start, source_period_end=end, notes=match[2]))
+        rows.append(HDTransaction(merrill_date(match[1]), kind, "Merrill", "Brokerage", shares=_decimal(match[3]), transfer_value=_decimal(match[4]), source_location="External" if kind == "TRANSFER_IN" else "Restricted share plan", destination_location="Merrill", source_document=document, source_period_start=start, source_period_end=end, notes=match[2]))
     for match in re.finditer(rf"(\d{{2}}/\d{{2}}) HOME DEPOT INC Sale -({MONEY}) ({MONEY})", text, re.I):
         shares, amount = _decimal(match[2]), _decimal(match[3])
         rows.append(HDTransaction(merrill_date(match[1]), "SALE", "Merrill", "Brokerage", shares=shares, amount=amount, purchase_price=(amount / shares if shares else None), source_location="Merrill", source_document=document, source_period_start=start, source_period_end=end))
-    lot_re = re.compile(rf"HOME DEPOT INC ({MONEY}) (\d{{2}}/\d{{2}}/\d{{2}}|N/A) (\d{{2}}/\d{{2}}/\d{{2}}) ({MONEY}) ({MONEY}|N/A)", re.I)
-    for match in lot_re.finditer(text):
-        if match[2].upper() == "N/A":
-            continue
-        sold = _date(match[3]); acquired = _date(match[2])
-        rows.append(HDTransaction(sold, "SALE", "Merrill", "Realized lot", shares=_decimal(match[1]), amount=_decimal(match[4]), cost_basis=_decimal(match[5]), acquisition_date=acquired, source_location="Merrill", source_document=document, source_period_start=start, source_period_end=end, notes="realized_lot"))
+    for sequence, match in enumerate(_merrill_lot_matches(text), start=1):
+        sold = _date(match[3]); acquired = None if match[2].upper() == "N/A" else _date(match[2])
+        basis = None if match[5].upper() == "N/A" else _decimal(match[5])
+        notes = "realized_lot" if acquired and basis is not None else "realized_lot; acquisition_date_and_cost_basis_unavailable"
+        rows.append(HDTransaction(sold, "SALE", "Merrill", "Realized lot", shares=_decimal(match[1]), amount=_decimal(match[4]), cost_basis=basis, acquisition_date=acquired, lot_sequence=sequence, source_location="Merrill", source_document=document, source_period_start=start, source_period_end=end, notes=notes, ambiguous=acquired is None or basis is None))
     return rows
+
+
+def _merrill_lot_matches(text: str) -> list[re.Match[str]]:
+    shares = r"(?:\d+(?:\.\d+)?|\.\d+)"
+    pattern = re.compile(rf"(?im)^\s*(?:x\s+)?HOME DEPOT INC\s+({shares})\s+(\d{{2}}/\d{{2}}/\d{{2}}|N/A)\s+(\d{{2}}/\d{{2}}/\d{{2}})\s+({MONEY})\s+({MONEY}|N/A)(?:\s+(?:{MONEY}|N/A|\([^\r\n]+\)))?\s*$", re.I)
+    return list(pattern.finditer(text))
 
 
 def parse_hd_statement_text(text: str, source_document: str = "sanitized.txt") -> tuple[str, list[HDTransaction], list[str]]:
@@ -209,10 +218,14 @@ def _section_completeness_issues(family: str, text: str, rows: list[HDTransactio
         ]
     issues = []
     for label, detected, expected in checks:
+        if label == "Realized Lots":
+            recognized = len(_merrill_lot_matches(text))
+            parsed = sum(row.source_account_type == "Realized lot" for row in rows)
+            if recognized != parsed:
+                issues.append(f"Recognized {recognized} HD realized-lot rows but parsed {parsed}; review skipped lot rows")
+            continue
         if label == "Sales":
             accounted = any(row.transaction_type == "SALE" and row.source_account_type == "Brokerage" for row in rows)
-        elif label == "Realized Lots":
-            accounted = any(row.source_account_type == "Realized lot" for row in rows)
         else:
             accounted = any(row.transaction_type in expected for row in rows)
         if detected and not accounted:
@@ -222,7 +235,7 @@ def _section_completeness_issues(family: str, text: str, rows: list[HDTransactio
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS hd_espp_documents (source_document TEXT PRIMARY KEY, document_hash TEXT NOT NULL, document_family TEXT NOT NULL, period_start TEXT, period_end TEXT, parser_version TEXT NOT NULL, imported_at TEXT NOT NULL, issue_count INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE IF NOT EXISTS hd_espp_transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, ticker TEXT NOT NULL, transaction_date TEXT NOT NULL, transaction_type TEXT NOT NULL, source TEXT NOT NULL, source_account_type TEXT NOT NULL, shares TEXT, amount TEXT, purchase_price TEXT, fair_market_value TEXT, fees TEXT, taxes TEXT, cost_basis TEXT, acquisition_date TEXT, source_location TEXT, destination_location TEXT, source_document TEXT NOT NULL, source_period_start TEXT, source_period_end TEXT, transaction_fingerprint TEXT NOT NULL UNIQUE, notes TEXT NOT NULL DEFAULT '', ambiguous INTEGER NOT NULL DEFAULT 0, transfer_match_id TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS hd_espp_transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, ticker TEXT NOT NULL, transaction_date TEXT NOT NULL, transaction_type TEXT NOT NULL, source TEXT NOT NULL, source_account_type TEXT NOT NULL, shares TEXT, amount TEXT, purchase_price TEXT, fair_market_value TEXT, fees TEXT, taxes TEXT, cost_basis TEXT, transfer_value TEXT, lot_sequence INTEGER, acquisition_date TEXT, source_location TEXT, destination_location TEXT, source_document TEXT NOT NULL, source_period_start TEXT, source_period_end TEXT, transaction_fingerprint TEXT NOT NULL UNIQUE, notes TEXT NOT NULL DEFAULT '', ambiguous INTEGER NOT NULL DEFAULT 0, transfer_match_id TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS hd_espp_import_issues (id INTEGER PRIMARY KEY AUTOINCREMENT, source_document TEXT NOT NULL, issue TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_hd_espp_date ON hd_espp_transactions(transaction_date);
 """
@@ -231,7 +244,12 @@ CREATE INDEX IF NOT EXISTS idx_hd_espp_date ON hd_espp_transactions(transaction_
 def _connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path); connection.row_factory = sqlite3.Row
-    connection.executescript(SCHEMA); return connection
+    connection.executescript(SCHEMA)
+    columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(hd_espp_transactions)")}
+    for name, kind in (("transfer_value", "TEXT"), ("lot_sequence", "INTEGER")):
+        if name not in columns:
+            connection.execute(f"ALTER TABLE hd_espp_transactions ADD COLUMN {name} {kind}")
+    return connection
 
 
 def _transfer_provenance_ok(out: HDTransaction, incoming: HDTransaction) -> bool:
@@ -342,13 +360,13 @@ class HDESPPHistoryService:
             connection.executemany("INSERT INTO hd_espp_documents VALUES (?, ?, ?, ?, ?, ?, ?, ?)", document_rows)
             connection.executemany("INSERT INTO hd_espp_import_issues (source_document, issue, created_at) VALUES (?, ?, ?)", [(document, issue, now) for document, issue in issue_rows])
             for row in canonical_rows:
-                values = [row.ticker, row.transaction_date.isoformat(), row.transaction_type, row.source, row.source_account_type, row.shares, row.amount, row.purchase_price, row.fair_market_value, row.fees, row.taxes, row.cost_basis, row.acquisition_date.isoformat() if row.acquisition_date else None, row.source_location, row.destination_location, row.source_document, row.source_period_start.isoformat() if row.source_period_start else None, row.source_period_end.isoformat() if row.source_period_end else None, row.transaction_fingerprint, row.notes, int(row.ambiguous), match_ids.get(row.transaction_fingerprint), now]
-                connection.execute(f"INSERT INTO hd_espp_transactions ({','.join(['ticker','transaction_date','transaction_type','source','source_account_type','shares','amount','purchase_price','fair_market_value','fees','taxes','cost_basis','acquisition_date','source_location','destination_location','source_document','source_period_start','source_period_end','transaction_fingerprint','notes','ambiguous','transfer_match_id','created_at'])}) VALUES ({','.join('?' for _ in values)})", [str(value) if isinstance(value, Decimal) else value for value in values])
+                values = [row.ticker, row.transaction_date.isoformat(), row.transaction_type, row.source, row.source_account_type, row.shares, row.amount, row.purchase_price, row.fair_market_value, row.fees, row.taxes, row.cost_basis, row.transfer_value, row.lot_sequence, row.acquisition_date.isoformat() if row.acquisition_date else None, row.source_location, row.destination_location, row.source_document, row.source_period_start.isoformat() if row.source_period_start else None, row.source_period_end.isoformat() if row.source_period_end else None, row.transaction_fingerprint, row.notes, int(row.ambiguous), match_ids.get(row.transaction_fingerprint), now]
+                connection.execute(f"INSERT INTO hd_espp_transactions ({','.join(['ticker','transaction_date','transaction_type','source','source_account_type','shares','amount','purchase_price','fair_market_value','fees','taxes','cost_basis','transfer_value','lot_sequence','acquisition_date','source_location','destination_location','source_document','source_period_start','source_period_end','transaction_fingerprint','notes','ambiguous','transfer_match_id','created_at'])}) VALUES ({','.join('?' for _ in values)})", [str(value) if isinstance(value, Decimal) else value for value in values])
         return {"documents": len(paths), "parsed": len(occurrences), "inserted": len(canonical_rows), "issues": len(issue_rows)}
 
     @staticmethod
     def _canonical_rank(row: HDTransaction) -> tuple[int, date, str]:
-        completeness = sum(value is not None and value != "" for value in (row.fair_market_value, row.fees, row.taxes, row.cost_basis, row.source_location, row.destination_location, row.notes))
+        completeness = sum(value is not None and value != "" for value in (row.fair_market_value, row.fees, row.taxes, row.cost_basis, row.transfer_value, row.source_location, row.destination_location, row.notes))
         return completeness, row.source_period_end or date.min, row.source_document or ""
 
     def state(self) -> dict[str, Any]:

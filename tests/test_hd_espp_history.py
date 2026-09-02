@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import tempfile
+import sqlite3
 import unittest
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
-from hd_espp_history import HDESPPHistoryService, HDTransaction, detect_document_family, economic_share_ownership, match_custody_transfers, parse_hd_statement_text, reconcile_custody_transfers, transaction_fingerprint, transaction_record_type
+from hd_espp_history import HDESPPHistoryService, HDTransaction, _connect, detect_document_family, economic_share_ownership, match_custody_transfers, parse_hd_statement_text, reconcile_custody_transfers, transaction_fingerprint, transaction_record_type
 
 
 LEGACY = """The Home Depot, Inc ESPP - Employee Plan Statement
@@ -28,6 +29,26 @@ January 01, 2026 - February 27, 2026
 HOME DEPOT INC HD
 02/13 HOME DEPOT INC Sale -28.0000 10,972.22 10,972.22
 HOME DEPOT INC 5.3021 06/30/23 02/12/26 2,077.71 1,399.99 677.72
+x HOME DEPOT INC .0325 09/15/23 02/12/26 12.74 10.64 2.10
+x HOME DEPOT INC .0306 12/15/23 02/12/26 11.99 10.71 1.28
+x HOME DEPOT INC 4.7527 12/29/23 02/12/26 1,862.41 1,399.99 462.42
+x HOME DEPOT INC .0552 03/22/24 02/12/26 21.63 21.89 (.26)
+x HOME DEPOT INC .0637 06/14/24 02/12/26 24.96 22.12 2.84
+x HOME DEPOT INC 4.7632 06/28/24 02/12/26 1,866.53 1,393.73 472.80
+HOME DEPOT INC 4.0000 N/A 02/12/26 1,567.46 N/A N/A
+HOME DEPOT INC 4.0000 N/A 02/12/26 1,567.46 N/A N/A
+HOME DEPOT INC 5.0000 03/22/25 02/12/26 1,959.33 1,755.75 203.58
+"""
+MERRILL_TRANSFERS = """Merrill Lynch
+June 29, 2024 - September 30, 2024
+HOME DEPOT INC HD
+07/16 HOME DEPOT INC Security Transfer In 15.0000 5,536.80
+07/17 HOME DEPOT INC Transfer / Adjustment 11.0000 3,639.90
+"""
+COMPUTERSHARE_TRANSFER = """The Home Depot, Inc ESPP - Employee Plan Statement
+01 Jan 2024 - 30 Sep 2024
+15 Jul 2024 Plan Transfer Confirm -15.000000 0.021341
+15 Jul 2024 Transfer -15.000000 4,259.06
 """
 
 
@@ -70,6 +91,46 @@ class HDESPPHistoryTests(unittest.TestCase):
         self.assertEqual(sale.shares, Decimal("28.0000"))
         self.assertEqual(sale.amount, Decimal("10972.22"))
         self.assertEqual(lot.acquisition_date, date(2023, 6, 30))
+        lots = [row for row in rows if row.source_account_type == "Realized lot"]
+        self.assertEqual(len(lots), 10)
+        self.assertEqual(sum(row.shares for row in lots), Decimal("28.0000"))
+        self.assertEqual(sum(row.acquisition_date is not None and row.cost_basis is not None for row in lots), 8)
+        unavailable = [row for row in lots if row.acquisition_date is None]
+        self.assertEqual(len(unavailable), 2)
+        self.assertTrue(all(row.ambiguous and "unavailable" in row.notes for row in unavailable))
+        self.assertEqual(len({row.transaction_fingerprint for row in unavailable}), 2)
+
+    def test_transfer_values_are_not_cost_basis(self) -> None:
+        _, merrill, issues = parse_hd_statement_text(MERRILL_TRANSFERS)
+        self.assertFalse(issues)
+        self.assertEqual([row.transfer_value for row in merrill], [Decimal("5536.80"), Decimal("3639.90")])
+        self.assertTrue(all(row.cost_basis is None for row in merrill))
+        _, computershare, _ = parse_hd_statement_text(COMPUTERSHARE_TRANSFER)
+        transfers = [row for row in computershare if row.transaction_type == "TRANSFER_OUT"]
+        self.assertTrue(all(row.cost_basis is None for row in transfers))
+        self.assertEqual([row.transfer_value for row in transfers], [None, Decimal("4259.06")])
+
+    def test_existing_hd_transaction_table_migrates_new_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "history.sqlite"
+            connection = sqlite3.connect(db)
+            try:
+                connection.execute("""CREATE TABLE hd_espp_transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, ticker TEXT NOT NULL, transaction_date TEXT NOT NULL, transaction_type TEXT NOT NULL, source TEXT NOT NULL, source_account_type TEXT NOT NULL, shares TEXT, amount TEXT, purchase_price TEXT, fair_market_value TEXT, fees TEXT, taxes TEXT, cost_basis TEXT, acquisition_date TEXT, source_location TEXT, destination_location TEXT, source_document TEXT NOT NULL, source_period_start TEXT, source_period_end TEXT, transaction_fingerprint TEXT NOT NULL UNIQUE, notes TEXT NOT NULL DEFAULT '', ambiguous INTEGER NOT NULL DEFAULT 0, transfer_match_id TEXT, created_at TEXT NOT NULL)""")
+                connection.commit()
+            finally:
+                connection.close()
+            connection = _connect(db)
+            try:
+                columns = {row[1] for row in connection.execute("PRAGMA table_info(hd_espp_transactions)")}
+                self.assertTrue({"transfer_value", "lot_sequence"}.issubset(columns))
+            finally:
+                connection.close()
+            reopened = sqlite3.connect(db)
+            try:
+                persisted = {row[1] for row in reopened.execute("PRAGMA table_info(hd_espp_transactions)")}
+            finally:
+                reopened.close()
+            self.assertTrue({"transfer_value", "lot_sequence"}.issubset(persisted))
 
     def test_fingerprint_is_filename_independent_and_deduplicates(self) -> None:
         _, first, _ = parse_hd_statement_text(LEGACY, "quarter-one.pdf")
@@ -87,19 +148,19 @@ class HDESPPHistoryTests(unittest.TestCase):
                 connection.close()
 
     def test_transfer_matching_prevents_duplicate_economic_ownership(self) -> None:
-        outgoing = HDTransaction(date(2024, 7, 15), "TRANSFER_OUT", "Computershare", "ESPP", shares=Decimal("15"), source_location="Computershare", destination_location="Merrill")
+        outgoing = HDTransaction(date(2024, 7, 15), "TRANSFER_OUT", "Computershare", "ESPP", shares=Decimal("15"), transfer_value=Decimal("4259.06"), source_location="Computershare", destination_location="Merrill")
         incoming = HDTransaction(date(2024, 7, 16), "TRANSFER_IN", "Merrill", "Brokerage", shares=Decimal("15"), source_location="External", destination_location="Merrill")
         self.assertEqual(len(match_custody_transfers([outgoing, incoming])), 1)
         purchase = HDTransaction(date(2024, 6, 28), "ESPP_PURCHASE", "Computershare", "ESPP", shares=Decimal("15"))
         self.assertEqual(economic_share_ownership([purchase]), economic_share_ownership([purchase, outgoing, incoming]))
 
     def test_transfer_matching_requires_provenance_and_surfaces_ambiguity(self) -> None:
-        outgoing = HDTransaction(date(2024, 7, 15), "TRANSFER_OUT", "Computershare", "ESPP", shares=Decimal("15"), source_location="Computershare", destination_location="Merrill")
+        outgoing = HDTransaction(date(2024, 7, 15), "TRANSFER_OUT", "Computershare", "ESPP", shares=Decimal("15"), transfer_value=Decimal("4259.06"), source_location="Computershare", destination_location="Merrill")
         wrong = HDTransaction(date(2024, 7, 16), "TRANSFER_IN", "Other Broker", "Brokerage", shares=Decimal("15"), source_location="External", destination_location="Other Broker")
-        right = HDTransaction(date(2024, 7, 16), "TRANSFER_IN", "Merrill", "Brokerage", shares=Decimal("15"), source_location="Computershare", destination_location="Merrill")
+        right = HDTransaction(date(2024, 7, 16), "TRANSFER_IN", "Merrill", "Brokerage", shares=Decimal("15"), transfer_value=Decimal("4259.06"), source_location="Computershare", destination_location="Merrill")
         self.assertEqual(match_custody_transfers([outgoing, wrong]), [])
         self.assertEqual(match_custody_transfers([outgoing, wrong, right]), [(outgoing.transaction_fingerprint, right.transaction_fingerprint)])
-        second = HDTransaction(date(2024, 7, 17), "TRANSFER_IN", "Merrill", "Brokerage", shares=Decimal("15"), source_location="External", destination_location="Merrill", cost_basis=Decimal("5000"))
+        second = HDTransaction(date(2024, 7, 17), "TRANSFER_IN", "Merrill", "Brokerage", shares=Decimal("15"), transfer_value=Decimal("5000"), source_location="External", destination_location="Merrill")
         matches, issues = reconcile_custody_transfers([outgoing, right, second])
         self.assertFalse(matches); self.assertEqual(len(issues), 1)
 
@@ -119,12 +180,27 @@ Dividends
         self.assertEqual(len(rows), 1)
         self.assertTrue(any("Purchases" in issue for issue in issues))
 
+    def test_realized_lot_completeness_counts_recognizable_rows(self) -> None:
+        aggregate = HDTransaction(date(2026, 2, 13), "SALE", "Merrill", "Brokerage", shares=Decimal("28"), amount=Decimal("10972.22"))
+        one_lot = HDTransaction(date(2026, 2, 12), "SALE", "Merrill", "Realized lot", shares=Decimal("5.3021"), amount=Decimal("2077.71"), cost_basis=Decimal("1399.99"), acquisition_date=date(2023, 6, 30), lot_sequence=1)
+        with patch("hd_espp_history._merrill", return_value=[aggregate, one_lot]):
+            _, _, issues = parse_hd_statement_text(MERRILL)
+        self.assertTrue(any("Recognized 10" in issue and "parsed 1" in issue for issue in issues))
+
     def test_record_type_distinguishes_aggregate_sale_and_realized_lot(self) -> None:
         _, rows, _ = parse_hd_statement_text(MERRILL)
         aggregate = next(row for row in rows if row.source_account_type == "Brokerage")
         lot = next(row for row in rows if row.source_account_type == "Realized lot")
         self.assertEqual(transaction_record_type(aggregate), "Brokerage Transaction")
         self.assertEqual(transaction_record_type(lot), "Realized Lot")
+
+    def test_realized_lots_do_not_inflate_shares_sold(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); service = HDESPPHistoryService(root / "pdfs", root / "history.sqlite")
+            self._import_texts(service, {"sale.pdf": MERRILL})
+            state = service.state()
+            self.assertEqual(state["summary"]["total_shares_sold"], Decimal("28.0000"))
+            self.assertEqual(sum(row["source_account_type"] == "Realized lot" for row in state["transactions"]), 10)
 
     def test_authoritative_rebuild_replaces_stale_fields_and_is_repeatable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

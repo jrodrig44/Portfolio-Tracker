@@ -303,7 +303,7 @@ async def index() -> None:
             display = [{
                 "date": row["transaction_date"], "record_type": transaction_record_type(row), "type": row["transaction_type"], "source": row["source"],
                 "shares": row["shares"], "amount": row["amount"], "purchase_price": row["purchase_price"],
-                "fmv": row["fair_market_value"], "fees": row["fees"], "cost_basis": row["cost_basis"],
+                "fmv": row["fair_market_value"], "fees": row["fees"], "cost_basis": row["cost_basis"], "transfer_value": row["transfer_value"],
                 "acquisition_date": row["acquisition_date"],
                 "source_destination": " → ".join(part for part in (row["source_location"], row["destination_location"]) if part),
             } for row in state["transactions"]]
