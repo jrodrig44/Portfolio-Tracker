@@ -51,6 +51,7 @@ from portfolio_statement_history import StatementHistoryService, statement_scan_
 from hd_espp_analytics import analyze_hd_economics
 from hd_espp_history import HDESPPHistoryService, transaction_record_type
 from hd_ownership import SHARE_TOLERANCE, reconstruct_hd_ownership
+from hd_espp_reconciliation import build_hd_phase3a_reconciliation
 from shared_data_preparation import prepare_shared_data
 
 HOST = "0.0.0.0"
@@ -271,6 +272,7 @@ async def index() -> None:
         ownership_summary = ownership.summary
         current_hd_price = next((row.get("current_price") for row in holdings if str(row.get("ticker", "")).upper() == "HD"), None)
         analytics = analyze_hd_economics(state["transactions"], ownership, live_hd_shares, current_hd_price)
+        phase3a = build_hd_phase3a_reconciliation(state["transactions"], state["transfer_lots"], state.get("documents", []), state.get("position_checkpoints", []), ownership, live_hd_shares)
         with area:
             ui.label("HD / ESPP History").classes("text-2xl font-semibold")
             ui.label("Local transaction reconstruction only. Live HD quantity, cost basis, portfolio history, and forward contribution assumptions remain authoritative and unchanged.").classes("text-sm text-gray-600 dark:text-gray-300")
@@ -369,6 +371,23 @@ async def index() -> None:
             ])
             ui.label(f'Reconciliation: {ownership_summary["reconciliation_status"].replace("_", " ").title()}').classes("text-sm font-medium")
             ui.label(f'Lot ledger: {ownership_summary["lot_ledger_status"].replace("_", " ").title()}').classes("text-sm font-medium")
+            ui.separator()
+            ui.label("Historical → Live Reconciliation").classes("text-xl font-semibold")
+            metric_cards([
+                ("Historical Reconstructed Shares", str(phase3a.summary["historical_reconstructed_shares"])),
+                ("Live HD Shares", str(phase3a.summary["live_hd_shares"] if phase3a.summary["live_hd_shares"] is not None else "Unavailable")),
+                ("Difference", str(phase3a.summary["raw_historical_live_difference"] if phase3a.summary["raw_historical_live_difference"] is not None else "Unavailable")),
+                ("Last Reconciled Date", str(phase3a.summary["last_reconciled_historical_date"] or "Unavailable")),
+                ("Unresolved Sold Shares", str(phase3a.summary["unresolved_sold_shares"])),
+                ("Coverage Status", str(phase3a.summary["phase3a_status"]).replace("_", " ").title()),
+            ])
+            records_table(phase3a.share_bridge, "Historical-to-Live Share Bridge")
+            records_table(phase3a.coverage_timeline, "Statement Coverage / Custody Timeline")
+            records_table(phase3a.custody_timeline, "Documented Custody Movements")
+            records_table(phase3a.checkpoint_reconciliation, "HD Position Checkpoint Reconciliation")
+            records_table(phase3a.surviving_lots, "Surviving Lots / Difference Audit")
+            if phase3a.issues:
+                records_table(phase3a.issues, "Phase 3A Reconciliation Issues")
             records_table(ownership.origin_breakdown, "Share Origin Breakdown")
             records_table(state["transfer_lots"], "Normalized Custody Transfer Lot Details")
             open_lots = [lot.display() for lot in ownership.lots if lot.remaining_shares > SHARE_TOLERANCE]

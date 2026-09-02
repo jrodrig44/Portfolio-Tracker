@@ -317,6 +317,24 @@ Dividends
             after = [(row["transaction_fingerprint"], row["fair_market_value"], row["fees"], row["notes"]) for row in service.state()["transactions"]]
             self.assertEqual(before, after)
 
+    def test_hd_position_checkpoints_are_persisted_separately_from_transactions(self) -> None:
+        text = """The Home Depot, Inc ESPP - Employee Plan Statement
+01 Jan 2024 - 31 Mar 2024
+30 Jun 2023 Purchase 1,400.00 1,400.00 01 Jan 2023 315.860000 30 Jun 2023 310.640000 264.044000 5.302147 5.302147
+The Home Depot Inc ESPP 5.302147 0.055252 5.357399 300.00 1,607.22
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); service = HDESPPHistoryService(root / "pdfs", root / "history.sqlite")
+            result = self._import_texts(service, {"checkpoint.pdf": text})
+            state = service.state()
+
+        self.assertEqual(result["position_checkpoints"], 1)
+        self.assertEqual(state["summary"]["position_checkpoints"], 1)
+        self.assertEqual(state["documents"][0]["source_document"], "checkpoint.pdf")
+        self.assertEqual(state["position_checkpoints"][0]["custodian"], "Computershare")
+        self.assertEqual(state["position_checkpoints"][0]["shares"], "5.357399")
+        self.assertEqual(len(state["transactions"]), 1)
+
     def test_removed_and_replaced_documents_leave_no_stale_history(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); service = HDESPPHistoryService(root / "pdfs", root / "history.sqlite")

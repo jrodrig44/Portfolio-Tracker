@@ -106,6 +106,22 @@ class HDTransferLot:
         self.transfer_lot_fingerprint = hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
+@dataclass
+class HDPositionCheckpoint:
+    checkpoint_date: date
+    custodian: str
+    shares: Decimal
+    source_document: str
+    source_type: str
+    confidence: str
+    notes: str = ""
+    checkpoint_fingerprint: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        identity = "|".join((self.checkpoint_date.isoformat(), self.custodian, str(self.shares), self.source_document, self.source_type))
+        self.checkpoint_fingerprint = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
 def transaction_fingerprint(row: HDTransaction) -> str:
     """Stable economic identity; filenames and statement periods are excluded."""
     parts = (
@@ -186,6 +202,27 @@ def parse_hd_transfer_lots(text: str, rows: Iterable[HDTransaction], source_docu
         )
         for sequence, match in enumerate(detail.finditer(text), start=1)
     ]
+
+
+def parse_hd_position_checkpoints(text: str, source_document: str = "sanitized.txt") -> list[HDPositionCheckpoint]:
+    family = detect_document_family(text)
+    start, end = _period(text)
+    if end is None:
+        return []
+    checkpoints: list[HDPositionCheckpoint] = []
+    if family == "computershare_legacy":
+        pattern = re.compile(r"(?im)^\s*The Home Depot Inc ESPP\s+(\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s+(\d+(?:,\d{3})*(?:\.\d+)?)\s*$")
+        for match in pattern.finditer(text):
+            shares = _decimal(match.group(3))
+            if shares is not None:
+                checkpoints.append(HDPositionCheckpoint(end, "Computershare", shares, Path(source_document).name, family, "HIGH", "Legacy Computershare total ESPP summary ending shares"))
+    elif family == "merrill_hd":
+        pattern = re.compile(r"(?im)^\s*HOME DEPOT INC HD\s+(\d+(?:\.\d+)?)\s+(\d+(?:,\d{3})*(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s+(\d+(?:,\d{3})*(?:\.\d+)?)\b")
+        for match in pattern.finditer(text):
+            shares = _decimal(match.group(1))
+            if shares is not None:
+                checkpoints.append(HDPositionCheckpoint(end, "Merrill", shares, Path(source_document).name, family, "HIGH", "Merrill HD holdings position quantity"))
+    return checkpoints
 
 
 def _equateplus(text: str, document: str) -> list[HDTransaction]:
@@ -341,9 +378,11 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS hd_espp_documents (source_document TEXT PRIMARY KEY, document_hash TEXT NOT NULL, document_family TEXT NOT NULL, period_start TEXT, period_end TEXT, parser_version TEXT NOT NULL, imported_at TEXT NOT NULL, issue_count INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS hd_espp_transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, ticker TEXT NOT NULL, transaction_date TEXT NOT NULL, transaction_type TEXT NOT NULL, source TEXT NOT NULL, source_account_type TEXT NOT NULL, shares TEXT, amount TEXT, purchase_price TEXT, fair_market_value TEXT, fees TEXT, taxes TEXT, cost_basis TEXT, transfer_value TEXT, lot_sequence INTEGER, acquisition_date TEXT, source_location TEXT, destination_location TEXT, source_document TEXT NOT NULL, source_period_start TEXT, source_period_end TEXT, transaction_fingerprint TEXT NOT NULL UNIQUE, notes TEXT NOT NULL DEFAULT '', ambiguous INTEGER NOT NULL DEFAULT 0, transfer_match_id TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS hd_espp_transfer_lots (id INTEGER PRIMARY KEY AUTOINCREMENT, parent_transfer_fingerprint TEXT NOT NULL, transfer_date TEXT NOT NULL, acquisition_date TEXT NOT NULL, transferred_shares TEXT NOT NULL, source_type TEXT NOT NULL, reported_value TEXT, source_document TEXT NOT NULL, sequence INTEGER NOT NULL, provenance TEXT NOT NULL, ambiguous INTEGER NOT NULL DEFAULT 0, transfer_lot_fingerprint TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS hd_espp_position_checkpoints (id INTEGER PRIMARY KEY AUTOINCREMENT, checkpoint_date TEXT NOT NULL, custodian TEXT NOT NULL, shares TEXT NOT NULL, source_document TEXT NOT NULL, source_type TEXT NOT NULL, confidence TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '', checkpoint_fingerprint TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS hd_espp_import_issues (id INTEGER PRIMARY KEY AUTOINCREMENT, source_document TEXT NOT NULL, issue TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_hd_espp_date ON hd_espp_transactions(transaction_date);
 CREATE INDEX IF NOT EXISTS idx_hd_espp_transfer_lot_parent ON hd_espp_transfer_lots(parent_transfer_fingerprint);
+CREATE INDEX IF NOT EXISTS idx_hd_espp_checkpoint_date ON hd_espp_position_checkpoints(checkpoint_date);
 """
 
 
@@ -434,6 +473,7 @@ class HDESPPHistoryService:
             raise FileNotFoundError(f"HD statement folder does not exist: {self.source_dir}")
         occurrences: list[HDTransaction] = []
         transfer_lot_occurrences: list[HDTransferLot] = []
+        checkpoint_occurrences: list[HDPositionCheckpoint] = []
         document_rows: list[tuple[Any, ...]] = []
         issue_rows: list[tuple[str, str]] = []
         now = datetime.now(timezone.utc).isoformat()
@@ -443,6 +483,7 @@ class HDESPPHistoryService:
                 text = "\n".join(page.extract_text() or "" for page in pdf.pages)
             family, rows, issues = parse_hd_statement_text(text, path.name)
             parsed_transfer_lots = parse_hd_transfer_lots(text, rows, path.name)
+            parsed_checkpoints = parse_hd_position_checkpoints(text, path.name)
             if re.search(r"(?im)^\s*\d{1,2}\s+\w+\s+\d{4}\s+-[\d.]+\s+[\d,]+\.\d{2}\s+(?:Covered|Noncovered|Unknown)\s*$", text) and not parsed_transfer_lots:
                 issues.append("Detected Computershare transfer-lot detail but parsed no normalized transfer lots")
             start, end = _period(text)
@@ -450,6 +491,7 @@ class HDESPPHistoryService:
             issue_rows.extend((path.name, issue) for issue in issues)
             occurrences.extend(rows)
             transfer_lot_occurrences.extend(parsed_transfer_lots)
+            checkpoint_occurrences.extend(parsed_checkpoints)
 
         canonical: dict[str, HDTransaction] = {}
         for row in occurrences:
@@ -458,6 +500,7 @@ class HDESPPHistoryService:
                 canonical[row.transaction_fingerprint] = row
         canonical_rows = sorted(canonical.values(), key=lambda row: (row.transaction_date, row.transaction_fingerprint))
         canonical_transfer_lots = {row.transfer_lot_fingerprint: row for row in transfer_lot_occurrences}
+        canonical_checkpoints = {row.checkpoint_fingerprint: row for row in checkpoint_occurrences}
         transfer_matches, transfer_issues = reconcile_custody_transfers(canonical_rows)
         issue_rows.extend(("Transfer reconciliation", issue) for issue in transfer_issues)
         match_ids: dict[str, str] = {}
@@ -467,6 +510,7 @@ class HDESPPHistoryService:
 
         with closing(_connect(self.db_path)) as connection, connection:
             connection.execute("DELETE FROM hd_espp_import_issues")
+            connection.execute("DELETE FROM hd_espp_position_checkpoints")
             connection.execute("DELETE FROM hd_espp_transfer_lots")
             connection.execute("DELETE FROM hd_espp_transactions")
             connection.execute("DELETE FROM hd_espp_documents")
@@ -478,7 +522,10 @@ class HDESPPHistoryService:
             for row in sorted(canonical_transfer_lots.values(), key=lambda item: (item.transfer_date, item.sequence)):
                 values = [row.parent_transfer_fingerprint, row.transfer_date.isoformat(), row.acquisition_date.isoformat(), row.transferred_shares, row.source_type, row.reported_value, row.source_document, row.sequence, row.provenance, int(row.ambiguous), row.transfer_lot_fingerprint, now]
                 connection.execute("INSERT INTO hd_espp_transfer_lots (parent_transfer_fingerprint,transfer_date,acquisition_date,transferred_shares,source_type,reported_value,source_document,sequence,provenance,ambiguous,transfer_lot_fingerprint,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", [str(value) if isinstance(value, Decimal) else value for value in values])
-        return {"documents": len(paths), "parsed": len(occurrences), "inserted": len(canonical_rows), "transfer_lots": len(canonical_transfer_lots), "issues": len(issue_rows)}
+            for row in sorted(canonical_checkpoints.values(), key=lambda item: (item.checkpoint_date, item.custodian, item.source_document)):
+                values = [row.checkpoint_date.isoformat(), row.custodian, row.shares, row.source_document, row.source_type, row.confidence, row.notes, row.checkpoint_fingerprint, now]
+                connection.execute("INSERT INTO hd_espp_position_checkpoints (checkpoint_date,custodian,shares,source_document,source_type,confidence,notes,checkpoint_fingerprint,created_at) VALUES (?,?,?,?,?,?,?,?,?)", [str(value) if isinstance(value, Decimal) else value for value in values])
+        return {"documents": len(paths), "parsed": len(occurrences), "inserted": len(canonical_rows), "transfer_lots": len(canonical_transfer_lots), "position_checkpoints": len(canonical_checkpoints), "issues": len(issue_rows)}
 
     @staticmethod
     def _canonical_rank(row: HDTransaction) -> tuple[int, date, str]:
@@ -488,15 +535,17 @@ class HDESPPHistoryService:
     def state(self) -> dict[str, Any]:
         with closing(_connect(self.db_path)) as connection:
             rows = [dict(row) for row in connection.execute("SELECT * FROM hd_espp_transactions ORDER BY transaction_date DESC, id DESC")]
+            document_records = [dict(row) for row in connection.execute("SELECT * FROM hd_espp_documents ORDER BY period_start, period_end, source_document")]
             documents = connection.execute("SELECT COUNT(*) FROM hd_espp_documents").fetchone()[0]
             issues = connection.execute("SELECT COUNT(*) FROM hd_espp_import_issues").fetchone()[0]
             issue_records = [dict(row) for row in connection.execute("SELECT source_document, issue FROM hd_espp_import_issues ORDER BY source_document, id")]
             transfer_lots = [dict(row) for row in connection.execute("SELECT * FROM hd_espp_transfer_lots ORDER BY transfer_date, sequence")]
+            position_checkpoints = [dict(row) for row in connection.execute("SELECT * FROM hd_espp_position_checkpoints ORDER BY checkpoint_date, custodian, source_document")]
         def total(kind: str, field: str) -> Decimal:
             return sum((_decimal(row[field]) or Decimal()) for row in rows if row["transaction_type"] == kind and row["source_account_type"] != "Realized lot")
         matched = {row["transfer_match_id"] for row in rows if row.get("transfer_match_id")}
         economic_shares = economic_share_ownership(rows)
-        return {"transactions": rows, "transfer_lots": transfer_lots, "issues": issue_records, "summary": {"total_espp_contributions": total("ESPP_PURCHASE", "amount"), "total_espp_shares": total("ESPP_PURCHASE", "shares"), "total_drip_shares": total("DIVIDEND_REINVESTMENT", "shares"), "total_dividends_reinvested": total("DIVIDEND_REINVESTMENT", "amount"), "total_shares_transferred": total("TRANSFER_OUT", "shares"), "total_shares_sold": total("SALE", "shares"), "documents": documents, "transactions": len(rows), "transfer_lots": len(transfer_lots), "issues": issues, "matched_transfers": len(matched), "economic_shares": economic_shares}}
+        return {"transactions": rows, "documents": document_records, "transfer_lots": transfer_lots, "position_checkpoints": position_checkpoints, "issues": issue_records, "summary": {"total_espp_contributions": total("ESPP_PURCHASE", "amount"), "total_espp_shares": total("ESPP_PURCHASE", "shares"), "total_drip_shares": total("DIVIDEND_REINVESTMENT", "shares"), "total_dividends_reinvested": total("DIVIDEND_REINVESTMENT", "amount"), "total_shares_transferred": total("TRANSFER_OUT", "shares"), "total_shares_sold": total("SALE", "shares"), "documents": documents, "transactions": len(rows), "transfer_lots": len(transfer_lots), "position_checkpoints": len(position_checkpoints), "issues": issues, "matched_transfers": len(matched), "economic_shares": economic_shares}}
 
 
-__all__ = ["HDESPPHistoryService", "HDTransaction", "HDTransferLot", "detect_document_family", "economic_share_ownership", "match_custody_transfers", "parse_hd_statement_text", "parse_hd_transfer_lots", "reconcile_custody_transfers", "transaction_fingerprint", "transaction_record_type"]
+    __all__ = ["HDESPPHistoryService", "HDPositionCheckpoint", "HDTransaction", "HDTransferLot", "detect_document_family", "economic_share_ownership", "match_custody_transfers", "parse_hd_position_checkpoints", "parse_hd_statement_text", "parse_hd_transfer_lots", "reconcile_custody_transfers", "transaction_fingerprint", "transaction_record_type"]

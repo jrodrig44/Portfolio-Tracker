@@ -56,6 +56,20 @@ class NiceGUIPhase2HPolishTests(unittest.TestCase):
         self.assertIn("contribution_reconciliation_status", history)
         self.assertIn("drip_reconciliation_status", history)
 
+    def test_hd_espp_phase3a_reconciliation_ui_is_source_bounded(self) -> None:
+        history = MAIN.split("async def render_hd_espp_history", 1)[1].split("async def render_holdings", 1)[0]
+
+        self.assertIn("build_hd_phase3a_reconciliation", MAIN)
+        self.assertIn("Historical → Live Reconciliation", history)
+        self.assertIn("Historical-to-Live Share Bridge", history)
+        self.assertIn("Statement Coverage / Custody Timeline", history)
+        self.assertIn("Documented Custody Movements", history)
+        self.assertIn("HD Position Checkpoint Reconciliation", history)
+        self.assertIn("Surviving Lots / Difference Audit", history)
+        self.assertIn("Phase 3A Reconciliation Issues", history)
+        self.assertNotIn("lifetime total return", history.lower())
+        self.assertNotIn("xirr", history.lower())
+
     def test_dialogs_and_actions_are_viewport_and_touch_safe(self) -> None:
         self.assertIn("96vw", DIALOG_CARD)
         self.assertIn("90dvh", DIALOG_CARD)
