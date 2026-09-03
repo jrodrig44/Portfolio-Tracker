@@ -37,10 +37,13 @@ from nicegui_app.services.page_runtime import PageRefreshGuard, client_is_alive
 from nicegui_app.services.refresh import ReadOnlyRefreshCoordinator
 from nicegui_app.services.ui_state import (
     NAVIGATION_AREAS,
+    PRIMARY_NAVIGATION_AREAS,
+    SECONDARY_NAVIGATION_AREAS,
     PageUIState,
     canonical_navigation,
     invalidate_section_views,
     refresh_view_plan,
+    primary_navigation_value,
 )
 from nicegui_app.services.yahoo import clear_market_data_cache,current_market_data,yahoo_intelligence_package
 from nicegui_app.services.ticker_chart import DEFAULT_TICKER_CHART_RANGE, TICKER_CHART_RANGES, load_ticker_chart
@@ -458,28 +461,45 @@ async def index() -> None:
                 records_table(state["issues"], "Review Issues")
         loaded["HD / ESPP History"] = True
 
-    with ui.header().classes("flex-wrap items-center justify-between gap-2 shadow-sm px-3 sm:px-5"):
-        ui.label("Portfolio Tracker").classes("text-lg sm:text-xl font-semibold")
-        ui.label("NiceGUI Production").classes("rounded bg-white/20 px-3 py-1 text-xs sm:text-sm")
+    with ui.left_drawer(value=False, bordered=True).classes("w-[min(86vw,20rem)]") as navigation_drawer:
+        with ui.row().classes("w-full items-center justify-between gap-2 px-1"):
+            ui.label("More sections").classes("text-lg font-semibold")
+            ui.button(icon="close", on_click=navigation_drawer.close).props("flat round aria-label='Close navigation menu'")
+        ui.separator()
+        drawer_buttons = {
+            name: ui.button(name).props("flat no-caps align=left").classes("w-full min-h-11 justify-start")
+            for name in SECONDARY_NAVIGATION_AREAS
+        }
+
+    with ui.header().classes("flex-wrap items-center gap-2 shadow-sm px-2 sm:px-4"):
+        with ui.row().classes("items-center gap-1 shrink-0"):
+            menu_button = ui.button(icon="menu", on_click=navigation_drawer.toggle).props("flat round aria-label='More sections'")
+            menu_button.tooltip("More sections")
+            ui.label("Portfolio Tracker").classes("text-base sm:text-xl font-semibold whitespace-nowrap")
+        primary_tabs = ui.tabs(value=primary_navigation_value(ui_state.selected_navigation)).classes("order-3 md:order-none w-full md:w-auto md:flex-1 min-w-0").props("dense no-caps align=justify")
+        primary_labels = {
+            "Holdings": "Holdings",
+            "Portfolio Analysis": "Analysis",
+            "Portfolio Insights": "Insights",
+            "Portfolio Health": "Health",
+        }
+        with primary_tabs:
+            primary_tab_objects = {
+                name: ui.tab(name=name, label=primary_labels[name]).classes("min-w-0 px-1 sm:px-3 text-xs sm:text-sm")
+                for name in PRIMARY_NAVIGATION_AREAS
+            }
+        secondary_active_label = ui.label("").classes("hidden lg:block text-xs rounded bg-white/20 px-2 py-1")
+        system_button = ui.button(icon="settings").props("flat round aria-label='System status and settings'")
+        system_button.tooltip("System status and settings")
     with ui.column().classes("w-full max-w-screen-2xl mx-auto p-2 sm:p-4 gap-4"):
         with ui.row().classes("w-full flex-wrap items-center gap-2"):
             spinner = ui.spinner(size="lg")
             status = ui.label("Loading portfolio and history from read-only databases…").classes("grow text-sm break-words")
             refresh_button = ui.button("Refresh Data", icon="refresh").classes("min-h-11")
-        with ui.element("nav").classes("w-full max-w-full overflow-x-auto").props('aria-label="Portfolio sections"'):
-            tabs = ui.tabs().classes("w-max min-w-full").props("mobile-arrows outside-arrows")
-        with tabs:
-            tab_objects = {name: ui.tab(name) for name in NAVIGATION_AREAS}
-        tabs.bind_value(
-            ui_state,
-            "selected_navigation",
-            forward=canonical_navigation,
-            backward=canonical_navigation,
-        )
-        with ui.tab_panels(tabs, value=tab_objects[ui_state.selected_navigation]).classes("w-full"):
+        with ui.tab_panels(value=ui_state.selected_navigation).classes("w-full") as section_panels:
             areas: dict[str, Any] = {}
             for name in NAVIGATION_AREAS:
-                with ui.tab_panel(tab_objects[name]):
+                with ui.tab_panel(name):
                     areas[name] = ui.column().classes("w-full gap-3")
 
     def render_holdings() -> None:
@@ -1498,12 +1518,24 @@ async def index() -> None:
             replace_with_placeholder,
         )
 
-    async def navigate(event: Any) -> None:
-        name = canonical_navigation(event.value)
+    async def select_navigation(value: object) -> None:
+        name = canonical_navigation(value)
         ui_state.selected_navigation = name
+        section_panels.value = name
+        primary_tabs.value = primary_navigation_value(name)
+        secondary_active_label.set_text(name if name not in PRIMARY_NAVIGATION_AREAS else "")
+        secondary_active_label.set_visibility(name not in PRIMARY_NAVIGATION_AREAS)
+        navigation_drawer.close()
         await refresh_section(name)
 
-    tabs.on_value_change(navigate)
+    async def navigate_primary(event: Any) -> None:
+        if event.value is not None:
+            await select_navigation(event.value)
+
+    primary_tabs.on_value_change(navigate_primary)
+    for drawer_name, drawer_button in drawer_buttons.items():
+        drawer_button.on_click(lambda _event, name=drawer_name: select_navigation(name))
+    system_button.on_click(lambda: select_navigation("System"))
     async def refresh_data(force: bool = False, *, timer_tick: bool = False) -> None:
         nonlocal holdings,history,metrics
         result = await refresh_guard.run(

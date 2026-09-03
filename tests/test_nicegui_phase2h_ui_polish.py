@@ -18,6 +18,9 @@ from nicegui_app.services.formatting import (
 )
 from nicegui_app.services.ui_state import (
     PageUIState,
+    PRIMARY_NAVIGATION_AREAS,
+    SECONDARY_NAVIGATION_AREAS,
+    primary_navigation_value,
     refresh_view_plan,
 )
 
@@ -27,18 +30,19 @@ MAIN = (ROOT / "nicegui_app" / "main.py").read_text(encoding="utf-8")
 
 
 class NiceGUIPhase2HPolishTests(unittest.TestCase):
-    def test_single_destination_mapping_drives_desktop_and_mobile_navigation(self) -> None:
+    def test_primary_tabs_and_secondary_drawer_share_one_navigation_state(self) -> None:
         self.assertEqual(len(NAVIGATION_AREAS), 10)
         self.assertEqual(len(set(NAVIGATION_AREAS)), 10)
         self.assertIn("HD / ESPP History", NAVIGATION_AREAS)
-        self.assertIn('tabs = ui.tabs().classes("w-max min-w-full")', MAIN)
-        self.assertIn('tab_objects = {name: ui.tab(name) for name in NAVIGATION_AREAS}', MAIN)
-        self.assertIn("mobile-arrows outside-arrows", MAIN)
-        self.assertIn('ui.element("nav").classes("w-full max-w-full overflow-x-auto")', MAIN)
-        self.assertNotIn("hidden lg:block", MAIN)
-        self.assertNotIn("mobile_navigation", MAIN)
-        self.assertIn("tabs.on_value_change(navigate)", MAIN)
+        self.assertEqual(PRIMARY_NAVIGATION_AREAS, ("Holdings", "Portfolio Analysis", "Portfolio Insights", "Portfolio Health"))
+        self.assertEqual(SECONDARY_NAVIGATION_AREAS, tuple(name for name in NAVIGATION_AREAS if name not in (*PRIMARY_NAVIGATION_AREAS, "System")))
+        self.assertIn("ui.left_drawer(value=False", MAIN)
+        self.assertIn("for name in SECONDARY_NAVIGATION_AREAS", MAIN)
+        self.assertIn("for name in PRIMARY_NAVIGATION_AREAS", MAIN)
+        self.assertIn("primary_tabs.on_value_change(navigate_primary)", MAIN)
+        self.assertIn("await select_navigation(event.value)", MAIN)
         self.assertIn("ui_state.selected_navigation = name", MAIN)
+        self.assertIsNone(primary_navigation_value("Supplemental Research"))
 
     def test_hd_grid_rules_are_clearly_disclosed_and_backend_enforced(self) -> None:
         holdings = MAIN.split("def render_holdings", 1)[1].split("async def render_statement_history", 1)[0]
@@ -176,8 +180,8 @@ class NiceGUIPhase2HPolishTests(unittest.TestCase):
         self.assertNotIn("busy", PageUIState.__dataclass_fields__)
         self.assertIn("ui_state.selected_navigation = name", MAIN)
         self.assertIn("ui_state.history_range = range_name", MAIN)
-        self.assertIn("forward=canonical_navigation", MAIN)
-        self.assertIn("backward=canonical_navigation", MAIN)
+        self.assertIn("section_panels.value = name", MAIN)
+        self.assertIn("primary_tabs.value = primary_navigation_value(name)", MAIN)
 
     def test_refresh_plan_preserves_active_view_and_lazily_invalidates_inactive_views(self) -> None:
         analysis = refresh_view_plan("Portfolio Analysis", metrics_changed=True, history_changed=False)

@@ -52,6 +52,23 @@ NAVIGATION_AREAS = (
     "System",
 )
 
+PRIMARY_NAVIGATION_AREAS = (
+    "Holdings",
+    "Portfolio Analysis",
+    "Portfolio Insights",
+    "Portfolio Health",
+)
+
+SECONDARY_NAVIGATION_AREAS = tuple(
+    name for name in NAVIGATION_AREAS if name not in (*PRIMARY_NAVIGATION_AREAS, "System")
+)
+
+
+def primary_navigation_value(selected_navigation: object) -> str | None:
+    """Project the authoritative section onto the primary-only tab control."""
+    selected = canonical_navigation(selected_navigation)
+    return selected if selected in PRIMARY_NAVIGATION_AREAS else None
+
 
 async def invalidate_section_views(
     names: Iterable[str],
@@ -120,8 +137,11 @@ class PageUIState:
 __all__ = [
     "METRICS_DERIVED_VIEWS",
     "NAVIGATION_AREAS",
+    "PRIMARY_NAVIGATION_AREAS",
+    "SECONDARY_NAVIGATION_AREAS",
     "PageUIState",
     "canonical_navigation",
+    "primary_navigation_value",
     "invalidate_section_views",
     "refresh_view_plan",
 ]

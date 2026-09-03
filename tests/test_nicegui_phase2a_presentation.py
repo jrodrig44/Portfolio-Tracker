@@ -94,9 +94,9 @@ class NiceGuiPhase2APresentationTests(unittest.TestCase):
         source = (ROOT / "nicegui_app" / "main.py").read_text(encoding="utf-8")
         self.assertIn("RESPONSIVE_CARD_GRID", source)
         self.assertIn("SCROLL_TABLE", source)
-        self.assertIn('tabs = ui.tabs()', source)
-        self.assertIn("mobile-arrows outside-arrows", source)
-        self.assertNotIn("hidden lg:block", source)
+        self.assertIn("primary_tabs = ui.tabs(", source)
+        self.assertIn("ui.left_drawer(value=False", source)
+        self.assertIn("align=justify", source)
         self.assertIn("w-full sm:w-auto min-h-11", source)
 
     def test_database_writes_remain_isolated_to_snapshot_persistence(self) -> None:

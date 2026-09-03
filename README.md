@@ -61,6 +61,8 @@ The two refresh mechanisms have separate responsibilities:
 
 The market worker does not render expensive tabs or automatically trigger AI Analysis, Supplemental Research, Yahoo Investment Intelligence enrichment, fund-sector look-through downloads, historical downloads, or ticker charts. Those remain controlled by explicit actions and their existing caches.
 
+The NiceGUI header keeps Holdings, Portfolio Analysis, Portfolio Insights, and Portfolio Health in the primary navigation. Other application sections are available from the compact side drawer, while System status and settings are opened from the header gear icon.
+
 ## Application Tabs
 
 1. **Holdings** — add, edit, remove, and save holdings; configure dividends, contributions, ESPP, asset type, and sector; download **Holdings CSV**, **Portfolio report**, or **Structured data**.
