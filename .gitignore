@@ -20,6 +20,9 @@ env/
 # Runtime CSV data
 data/*.csv
 
+# Personal normalized investment evidence stays local; tests use sanitized fixtures.
+/data/hd_espp_evidence.json
+
 # Local environment and secrets
 .env
 .env.*

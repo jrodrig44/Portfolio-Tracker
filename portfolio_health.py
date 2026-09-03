@@ -26,9 +26,12 @@ def build_portfolio_health(
     fund_weights: dict[str, dict[str, float]] | None = None,
     monthly_dividend_weights: dict[str, list[float]] | None = None,
     asset_type_map: dict[str, str] | None = None,
+    hd_historical_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     frame = metrics.copy() if isinstance(metrics, pd.DataFrame) else pd.DataFrame()
-    analysis = build_analysis(frame, fund_weights=fund_weights, month_weights=monthly_dividend_weights)
+    analysis = build_analysis(frame, fund_weights=fund_weights, month_weights=monthly_dividend_weights, hd_historical_context=hd_historical_context)
+    from beneficial_exposure import beneficial_metrics_frame
+    frame = beneficial_metrics_frame(frame, hd_historical_context)
     lookthrough = analysis.get("fund_lookthrough", {})
     contributions = contribution_context(frame)
 

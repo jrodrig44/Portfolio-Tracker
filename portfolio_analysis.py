@@ -5,6 +5,7 @@ import re
 from typing import Any
 
 import pandas as pd
+from beneficial_exposure import beneficial_metrics_frame
 
 from income_quality_engine import compute_income_quality
 
@@ -164,7 +165,9 @@ def resolve_fund_lookthrough(metrics: pd.DataFrame, weights: dict[str,dict[str,f
 
 
 def build_analysis(metrics: pd.DataFrame, fund_weights: dict[str,dict[str,float]]|None=None, expected_return:float=.08, projection_biweekly:float=280.0, month_weights:dict[str,list[float]]|None=None, hd_historical_context: dict[str,Any]|None=None) -> dict[str,Any]:
-    df=metrics.copy()
+    # Analysis describes economic exposure, so reconciled Equate HD supplements
+    # (and never replaces or duplicates) the Merrill custody row.
+    df=beneficial_metrics_frame(metrics, hd_historical_context)
     if df.empty:return {"totals":{},"summary":{},"snapshot":{},"snowball":snowball_tracker(0.0,0.0,projection_biweekly),"concentration":{},"asset_allocation":[],"direct_sector":[],"income_quality":[],"income_quality_summary":compute_income_quality(df,{},{}),"contributions":contribution_context(df),"fund_lookthrough":resolve_fund_lookthrough(df,fund_weights)}
     asset_types=df["asset_type"] if "asset_type" in df else pd.Series("Stock",index=df.index)
     sectors=df["sector"] if "sector" in df else pd.Series("",index=df.index)

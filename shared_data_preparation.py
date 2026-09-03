@@ -15,6 +15,8 @@ from nicegui_app.services.calculations import metrics_frame
 from nicegui_app.services.market_refresh_lock import MARKET_REFRESH_LOCK
 from nicegui_app.services.portfolio_data import load_history, load_holdings
 from stash_history import upsert_live_portfolio_snapshot
+from beneficial_exposure import beneficial_hd_exposure
+from hd_espp_integration import load_hd_historical_integration_context
 
 
 PORTFOLIO_REQUIRED_TABLES = {"holdings"}
@@ -97,7 +99,10 @@ def persist_live_snapshot_if_ready(
     if bool(((shares > 0) & (prices.isna() | ~prices.apply(math.isfinite) | (prices <= 0))).any()):
         return "Not applicable"
     if total_value is None:
-        total_value = float(pd.to_numeric(metrics.get("market_value", pd.Series(dtype=float)), errors="coerce").fillna(0.0).sum())
+        # Imported statements are immutable custody snapshots; only today's live
+        # point represents current total beneficial exposure, including Equate HD.
+        context = load_hd_historical_integration_context(metrics)
+        total_value = float(beneficial_hd_exposure(metrics, context)["total_beneficial_portfolio_value"])
     if not math.isfinite(total_value) or total_value <= 0:
         return "Not applicable"
     snapshot_date = date.today().isoformat()

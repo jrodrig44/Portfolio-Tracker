@@ -54,6 +54,7 @@ from hd_ownership import SHARE_TOLERANCE, reconstruct_hd_ownership
 from hd_espp_reconciliation import build_hd_phase3a_reconciliation
 from hd_espp_lifetime import build_hd_lifetime_economics
 from hd_espp_integration import load_hd_historical_integration_context
+from hd_espp_evidence import merge_hd_evidence
 from shared_data_preparation import prepare_shared_data
 
 HOST = "0.0.0.0"
@@ -267,7 +268,10 @@ async def index() -> None:
             return
         area = areas["HD / ESPP History"]
         area.clear()
-        state = await run.io_bound(hd_history_service.state)
+        # This page consumes the same normalized evidence merge as Analysis so
+        # custody reconciliation cannot diverge between the two surfaces.
+        raw_state = await run.io_bound(hd_history_service.state)
+        state = await run.io_bound(merge_hd_evidence, raw_state)
         summary = state["summary"]
         live_hd_shares = next((row.get("shares") for row in holdings if str(row.get("ticker", "")).upper() == "HD"), None)
         ownership = reconstruct_hd_ownership(state["transactions"], live_hd_shares, state["transfer_lots"])
@@ -1252,7 +1256,8 @@ async def index() -> None:
             ui.spinner(size="lg")
             ui.label("Calculating tracker health…")
         try:
-            package = await run.io_bound(health_package, metrics)
+            hd_context = await run.io_bound(load_hd_historical_integration_context, metrics)
+            package = await run.io_bound(health_package, metrics, hd_historical_context=hd_context)
             area.clear()
             with area:
                 ui.label("Portfolio Health").classes("text-2xl font-semibold")

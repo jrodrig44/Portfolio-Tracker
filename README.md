@@ -75,7 +75,11 @@ The market worker does not render expensive tabs or automatically trigger AI Ana
 
 ## Portfolio History
 
-History combines the long-term imported brokerage statement baseline with `live_portfolio_snapshots`. The live table stores one row per calendar date. Repeated market refreshes update today's row rather than creating a five-minute or intraday tick series. After the final post-close refresh, the row effectively represents that session's closing portfolio value. Imported statement records and their existing union with live snapshots remain unchanged.
+History combines the long-term imported brokerage statement baseline with `live_portfolio_snapshots`. Historical brokerage statement points are immutable custody records. The live table stores one row per calendar date and represents current total beneficial exposure, including normalized, reconciled Equate-held HD. Repeated market refreshes update today's row rather than creating a five-minute or intraday tick series.
+
+The Holdings table and Holdings CSV are custody-oriented: HD held at Merrill remains the normal HD position, and no synthetic Equate row is inserted. Portfolio Analysis, Insights, Health, concentration, reports, AI context, and the current live History point use total beneficial exposure, supplementing Merrill custody with externally held Equate HD exactly once. Normalized local HD evidence drives purchases, DRIPs, transfers, sales, custody, and basis provenance. Price refreshes reuse the cached HD price to update market-derived values without changing shares, basis, transfers, realized results, or other accounting history.
+
+Personal production evidence lives at `data/hd_espp_evidence.json`, is ignored by Git, and remains on the local machine. Automated tests use the sanitized source-controlled fixture under `tests/fixtures/`.
 
 ## AI Analysis, Supplemental Research, and Exports
 

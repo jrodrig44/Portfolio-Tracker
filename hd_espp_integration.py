@@ -81,10 +81,15 @@ def build_hd_historical_integration_context(state: dict[str, Any], metrics: pd.D
     evidence = state.get("evidence", {})
     evidence_lots = evidence.get("transfer_lots", [])
     reconstructed_transfer_basis = sum(((_decimal(row.get("transferred_shares")) or Decimal()) * (_decimal(row.get("reported_value")) or Decimal()) for row in evidence_lots), Decimal())
-    broker_reported_gain = _decimal(evidence.get("broker_reported_february_gain"))
-    reconstructed_gain = None if broker_reported_gain is None else broker_reported_gain + Decimal("3134.92") - reconstructed_transfer_basis
-    june = next((row for row in transactions if row.get("transaction_fingerprint") == "evidence-sale-2026-06"), {})
-    june_lot = next((row for row in transactions if row.get("transaction_fingerprint") == "evidence-sale-lot-2026-06"), {})
+    realized_evidence = evidence.get("realized_events", {})
+    february = realized_evidence.get("february_transfer_sale", {})
+    broker_reported_gain = _decimal(february.get("broker_reported_gain"))
+    february_proceeds = _decimal(february.get("net_proceeds"))
+    reconstructed_gain = None if february_proceeds is None else february_proceeds - reconstructed_transfer_basis
+    sale_events = [row for row in transactions if row.get("transaction_type") == "SALE" and row.get("source_account_type") != "Realized lot"]
+    june = max(sale_events, key=lambda row: str(row.get("transaction_date") or ""), default={})
+    lot_events = [row for row in transactions if row.get("transaction_type") == "SALE" and row.get("source_account_type") == "Realized lot"]
+    june_lot = next((row for row in lot_events if row.get("transaction_date") == june.get("transaction_date") and _decimal(row.get("shares")) == _decimal(june.get("shares"))), {})
     corrected_realized = ({
         "broker_reported_realized_gain": broker_reported_gain,
         "reconstructed_realized_gain": reconstructed_gain,
@@ -98,6 +103,16 @@ def build_hd_historical_integration_context(state: dict[str, Any], metrics: pd.D
     lifetime_total_return = _performance_status({"performance_gating": lifetime.performance_gating}, "Lifetime Total Return")
     irr = _performance_status({"performance_gating": lifetime.performance_gating}, "IRR")
     xirr = _performance_status({"performance_gating": lifetime.performance_gating}, "XIRR")
+    current_custody = phase3a.summary.get("current_custody") or {}
+    combined_shares = _decimal(current_custody.get("combined_beneficial_shares"))
+    equate_shares = _decimal(current_custody.get("equate_shares")) or Decimal("0")
+    custody_value = Decimal(str(pd.to_numeric(metrics.get("market_value", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())) if isinstance(metrics, pd.DataFrame) else Decimal("0")
+    market_exposure = {
+        "hd_price": current_price,
+        "combined_hd_market_value": combined_shares * current_price if combined_shares is not None and current_price is not None else None,
+        "external_equate_market_value": equate_shares * current_price if current_price is not None else None,
+        "total_beneficial_portfolio_value": custody_value + equate_shares * current_price if current_price is not None else None,
+    }
 
     return {
         "available": True,
@@ -144,8 +159,10 @@ def build_hd_historical_integration_context(state: dict[str, Any], metrics: pd.D
             "basis_status": "COMPLETE" if corrected_realized else lifetime.coverage.get("basis_status"),
             "origin_status": lifetime.coverage.get("origin_status"),
         },
+        "market_exposure": market_exposure,
         "reconciliation": {
             "current_custody": phase3a.summary.get("current_custody"),
+            "as_of_date": (phase3a.summary.get("current_custody") or {}).get("as_of_date"),
             "historical_reconstructed_shares": phase3a.summary.get("historical_reconstructed_shares"),
             "live_hd_shares": phase3a.summary.get("live_hd_shares"),
             "historical_live_difference": phase3a.summary.get("raw_historical_live_difference"),
@@ -178,6 +195,7 @@ def compact_hd_historical_context(context: dict[str, Any]) -> dict[str, Any]:
     coverage = context.get("coverage", {})
     reconciliation = context.get("reconciliation", {})
     summary = context.get("summary", {})
+    market = context.get("market_exposure", {})
     return {
         "available": True,
         "source_bounded": True,
@@ -190,6 +208,15 @@ def compact_hd_historical_context(context: dict[str, Any]) -> dict[str, Any]:
         "historical_live_difference": reconciliation.get("historical_live_difference"),
         "phase3a_status": reconciliation.get("phase3a_status"),
         "current_custody": reconciliation.get("current_custody"),
+        "reconciliation_as_of": str(reconciliation.get("as_of_date")) if reconciliation.get("as_of_date") is not None else None,
+        "combined_beneficial_shares": (reconciliation.get("current_custody") or {}).get("combined_beneficial_shares"),
+        "broker_reported_realized_gain": realized.get("broker_reported_realized_gain"),
+        "reconstructed_realized_gain": realized.get("reconstructed_realized_gain"),
+        "reconstructed_basis": realized.get("february_transfer_lot_basis"),
+        "basis_provenance": realized.get("basis_provenance"),
+        "remaining_unknown_basis_shares": realized.get("remaining_unknown_basis_shares"),
+        "combined_hd_market_value": market.get("combined_hd_market_value"),
+        "total_beneficial_portfolio_value": market.get("total_beneficial_portfolio_value"),
         "lifetime_return_status": summary.get("lifetime_return_status"),
         "withheld_metrics": [row.get("metric") for row in context.get("performance_availability", []) if row.get("status") == "WITHHELD"],
         "issue_types": [row.get("issue_type") for row in context.get("issues", []) if isinstance(row, dict)],

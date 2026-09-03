@@ -12,6 +12,8 @@ from nicegui_app.services.calculations import metrics_frame
 from nicegui_app.services.market_refresh_lock import MARKET_REFRESH_LOCK
 from nicegui_app.services.portfolio_data import HISTORY_DB_PATH,PORTFOLIO_DB_PATH,load_history,load_holdings
 from shared_data_preparation import persist_live_snapshot_if_ready
+from beneficial_exposure import beneficial_hd_exposure
+from hd_espp_integration import load_hd_historical_integration_context
 
 Fingerprint=tuple[int,int]
 
@@ -81,7 +83,9 @@ class ReadOnlyRefreshCoordinator:
         # new brokerage statement, but only when every priced holding is usable.
         snapshot_attempted=bool(self.market_loader and priced_tickers and market_data_complete)
         if snapshot_attempted:
-            live_snapshot_changed=self.snapshot_persister(recalculated,self.history_path)=="Updated"
+            context=load_hd_historical_integration_context(recalculated,self.history_path)
+            total_value=float(beneficial_hd_exposure(recalculated,context)["total_beneficial_portfolio_value"])
+            live_snapshot_changed=self.snapshot_persister(recalculated,self.history_path,total_value=total_value)=="Updated"
         final_history_fp=database_fingerprint(self.history_path) if snapshot_attempted else history_fp
         history_changed=history_changed or live_snapshot_changed
         history=self.history_loader(self.history_path) if history_changed else None

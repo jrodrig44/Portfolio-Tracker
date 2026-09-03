@@ -5,6 +5,7 @@ from typing import Any
 import pandas as pd
 
 from portfolio_analysis import build_analysis, canonical_asset_type, finite
+from beneficial_exposure import beneficial_metrics_frame
 
 
 def _holding_yield(row: dict[str, Any]) -> float:
@@ -33,7 +34,7 @@ def _insights_asset_type(value: Any) -> str:
 
 
 def build_portfolio_insights(metrics: pd.DataFrame, *, fund_weights: dict[str, dict[str, float]] | None = None, hd_historical_context: dict[str, Any] | None = None) -> dict[str, Any]:
-    frame = metrics.copy() if isinstance(metrics, pd.DataFrame) else pd.DataFrame()
+    frame = beneficial_metrics_frame(metrics, hd_historical_context)
     if frame.empty:
         return {
             "totals": {"portfolio_value": 0.0, "annual_income": 0.0, "weighted_yield_pct": 0.0, "average_monthly_income": 0.0},
