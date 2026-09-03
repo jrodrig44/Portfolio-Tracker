@@ -395,7 +395,7 @@ The Home Depot Inc ESPP 5.302147 0.055252 5.357399 300.00 1,607.22
         self.assertIn('if importing["value"]:', block)
         self.assertIn("import_button.disable()", block)
         self.assertIn("import_button.enable()", block)
-        self.assertIn('"record_type": transaction_record_type(row)', block)
+        self.assertIn('build_hd_transaction_display_records(state["transactions"])', block)
 
     def test_unknown_document_is_flagged_not_guessed(self) -> None:
         family, rows, issues = parse_hd_statement_text("unrecognized row 12.34")

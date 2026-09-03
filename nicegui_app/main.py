@@ -116,6 +116,36 @@ def percent(value: Any) -> str:
     return format_percentage(value)
 
 
+def build_hd_transaction_display_records(transactions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build stable table rows from heterogeneous normalized HD events."""
+    records: list[dict[str, Any]] = []
+    for row in transactions:
+        source_location = row.get("source_location")
+        destination_location = row.get("destination_location")
+        records.append({
+            "date": row.get("transaction_date"),
+            "record_type": transaction_record_type(row),
+            "type": row.get("transaction_type"),
+            "source": row.get("source"),
+            "shares": row.get("shares"),
+            "amount": row.get("amount"),
+            "purchase_price": row.get("purchase_price"),
+            "fmv": row.get("fair_market_value"),
+            "fees": row.get("fees"),
+            "cost_basis": row.get("cost_basis"),
+            "transfer_value": row.get("transfer_value"),
+            "acquisition_date": row.get("acquisition_date"),
+            "settlement_date": row.get("settlement_date"),
+            "source_destination": " → ".join(
+                str(part) for part in (source_location, destination_location) if part
+            ),
+            "basis_provenance": row.get("basis_provenance"),
+            "transfer_match_id": row.get("transfer_match_id"),
+            "status": row.get("status"),
+        })
+    return records
+
+
 def metric_cards(items: list[tuple[str, str]]) -> None:
     with ui.element("div").classes(RESPONSIVE_CARD_GRID):
         for label, value in items:
@@ -422,13 +452,7 @@ async def index() -> None:
             if ownership.issues:
                 records_table([{"issue": issue} for issue in ownership.issues], "Ownership Reconstruction Issues")
             ui.separator()
-            display = [{
-                "date": row["transaction_date"], "record_type": transaction_record_type(row), "type": row["transaction_type"], "source": row["source"],
-                "shares": row["shares"], "amount": row["amount"], "purchase_price": row["purchase_price"],
-                "fmv": row["fair_market_value"], "fees": row["fees"], "cost_basis": row["cost_basis"], "transfer_value": row["transfer_value"],
-                "acquisition_date": row["acquisition_date"],
-                "source_destination": " → ".join(part for part in (row["source_location"], row["destination_location"]) if part),
-            } for row in state["transactions"]]
+            display = build_hd_transaction_display_records(state["transactions"])
             records_table(display, "Normalized HD Transactions")
             if state["issues"]:
                 records_table(state["issues"], "Review Issues")
