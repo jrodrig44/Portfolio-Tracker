@@ -76,7 +76,7 @@ def build_hd_historical_integration_context(state: dict[str, Any], metrics: pd.D
     live_shares, current_price = _hd_live_values(metrics)
     ownership = reconstruct_hd_ownership(transactions, live_shares, state.get("transfer_lots") or [])
     phase2 = analyze_hd_economics(transactions, ownership, live_shares, current_price)
-    phase3a = build_hd_phase3a_reconciliation(transactions, state.get("transfer_lots") or [], state.get("documents") or [], state.get("position_checkpoints") or [], ownership, live_shares)
+    phase3a = build_hd_phase3a_reconciliation(transactions, state.get("transfer_lots") or [], state.get("documents") or [], state.get("position_checkpoints") or [], ownership, live_shares, state.get("failed_transfers") or [])
     lifetime = build_hd_lifetime_economics(transactions, ownership, phase2, phase3a, live_shares, current_price)
     evidence = state.get("evidence", {})
     evidence_lots = evidence.get("transfer_lots", [])

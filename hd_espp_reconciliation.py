@@ -12,7 +12,7 @@ from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable
 
-from hd_ownership import LIVE_TOLERANCE, LOT_DISPLAY_TOLERANCE, OwnershipReconstruction, reconstruct_hd_ownership
+from hd_ownership import LIVE_TOLERANCE, LOT_DISPLAY_TOLERANCE, OwnershipReconstruction, classify_acquisition_origin, reconstruct_hd_ownership
 
 
 ROUNDING_TOLERANCE = Decimal("0.0005")
@@ -368,7 +368,7 @@ def _issue(issue_type: str, message: str, severity: str = "REVIEW") -> dict[str,
     return {"issue_type": issue_type, "severity": severity, "message": message}
 
 
-def roll_forward_current_custody(transactions: Iterable[dict[str, Any]], checkpoints: Iterable[dict[str, Any]]) -> dict[str, Any]:
+def roll_forward_current_custody(transactions: Iterable[dict[str, Any]], checkpoints: Iterable[dict[str, Any]], failed_transfers: Iterable[dict[str, Any]] = ()) -> dict[str, Any]:
     """Roll each custodian's latest documented position through later activity."""
     tx_rows, checkpoint_rows = [dict(row) for row in transactions], [dict(row) for row in checkpoints]
     result: dict[str, Decimal] = {}
@@ -379,35 +379,50 @@ def roll_forward_current_custody(transactions: Iterable[dict[str, Any]], checkpo
         at, shares = _date(row.get("checkpoint_date")), _decimal(row.get("shares"))
         if custodian and at and shares is not None and (custodian not in dates or at >= dates[custodian]):
             dates[custodian], result[custodian] = at, shares
-    for custodian, start in dates.items():
-        for row in tx_rows:
-            at, shares = _date(row.get("transaction_date")), _decimal(row.get("shares")) or Decimal("0")
-            if not at or at <= start: continue
-            kind = row.get("transaction_type")
-            source = f"{row.get('source_location') or ''} {row.get('source') or ''}"
-            if kind in {"ESPP_PURCHASE", "DIVIDEND_REINVESTMENT", "ADJUSTMENT"} and aliases.get("Merrill" if "Merrill" in source else "EquatePlus") == custodian:
-                result[custodian] += shares
-            # Aggregate brokerage rows are the economic disposition; realized lots are detail.
-            elif kind == "SALE" and custodian == "Merrill" and row.get("source_account_type") == "Brokerage":
-                result[custodian] -= shares
-            elif kind == "TRANSFER_OUT" and aliases.get("Merrill" if "Merrill" in source else "EquatePlus") == custodian:
-                result[custodian] -= shares
-            elif kind == "TRANSFER_IN" and custodian == "Merrill" and row.get("transfer_match_id"):
-                result[custodian] += shares
+    applied, ignored, unresolved = [], [], []
+    earliest_checkpoint = min(dates.values()) if dates else None
+    for row in sorted(tx_rows, key=lambda item: str(item.get("transaction_date"))):
+        at, shares = _date(row.get("transaction_date")), _decimal(row.get("shares")) or Decimal("0")
+        if not at or earliest_checkpoint is None or at <= earliest_checkpoint: continue
+        kind = row.get("transaction_type")
+        source_text = f"{row.get('source_location') or ''} {row.get('source') or ''}"
+        custodian = "Merrill" if "Merrill" in source_text else "Equate"
+        if custodian not in dates or at <= dates[custodian]: continue
+        if kind in {"ESPP_PURCHASE", "DIVIDEND_REINVESTMENT"}:
+            result[custodian] += shares; applied.append(row)
+        elif kind == "ADJUSTMENT" and classify_acquisition_origin(row) == "RESTRICTED_SHARE":
+            # Administrative adjustments are not acquisitions without restricted/lapse provenance.
+            result[custodian] += shares; applied.append(row)
+        elif kind == "SALE" and row.get("source_account_type") == "Brokerage" and custodian == "Merrill":
+            result[custodian] -= shares; applied.append(row)
+        elif kind == "SALE" and row.get("source_account_type") == "Realized lot":
+            ignored.append({"reason": "REALIZED_LOT_DETAIL", "transaction": row})
+        elif kind == "DIVIDEND":
+            ignored.append({"reason": "CASH_ONLY", "transaction": row})
+        elif kind in {"TRANSFER_IN", "TRANSFER_OUT"} and row.get("transfer_match_id"):
+            result[custodian] += shares if kind == "TRANSFER_IN" else -shares; applied.append(row)
+        else:
+            unresolved.append({"reason": "UNSUPPORTED_OR_UNMATCHED_ECONOMIC_EVENT", "transaction": row, "quantity": abs(shares)})
+    failed = list(failed_transfers)
+    ignored.extend({"reason": "FAILED_TRANSFER_ZERO_EFFECT", "transaction": row} for row in failed)
     combined = sum(result.values(), Decimal("0"))
-    return {"equate_shares": result.get("Equate"), "merrill_shares": result.get("Merrill"), "combined_beneficial_shares": combined, "unresolved_quantity": Decimal("0") if len(result) == 2 else None, "checkpoint_dates": dates}
+    # Two checkpoints establish starting balances, but only a complete event audit proves reconciliation.
+    complete = len(result) == 2 and not unresolved
+    unresolved_quantity = sum((_decimal(row.get("quantity")) or Decimal("0") for row in unresolved), Decimal("0")) if len(result) == 2 else None
+    evidence_dates = [at for at in dates.values()] + [d for row in applied for d in [_date(row.get("transaction_date"))] if d] + [d for row in failed for d in [_date(row.get("transaction_date"))] if d]
+    return {"equate_shares": result.get("Equate"), "merrill_shares": result.get("Merrill"), "combined_beneficial_shares": combined, "unresolved_quantity": unresolved_quantity, "unresolved_events": unresolved, "applied_event_count": len(applied), "ignored_detail_event_count": len(ignored), "ignored_events": ignored, "reconciliation_complete": complete, "as_of_date": max(evidence_dates) if evidence_dates else None, "checkpoint_dates": dates}
 
 
-def build_hd_phase3a_reconciliation(transactions: Iterable[dict[str, Any]], transfer_lots: Iterable[dict[str, Any]], documents: Iterable[dict[str, Any]], position_checkpoints: Iterable[dict[str, Any]], ownership: OwnershipReconstruction, live_hd_shares: Decimal | str | float | None) -> HDPhase3AReconciliation:
+def build_hd_phase3a_reconciliation(transactions: Iterable[dict[str, Any]], transfer_lots: Iterable[dict[str, Any]], documents: Iterable[dict[str, Any]], position_checkpoints: Iterable[dict[str, Any]], ownership: OwnershipReconstruction, live_hd_shares: Decimal | str | float | None, failed_transfers: Iterable[dict[str, Any]] = ()) -> HDPhase3AReconciliation:
     tx_rows = [dict(row) for row in transactions]
     transfer_rows = [dict(row) for row in transfer_lots]
     document_rows = [dict(row) for row in documents]
     checkpoint_rows = [dict(row) for row in position_checkpoints]
     live = _decimal(live_hd_shares)
-    current_custody = roll_forward_current_custody(tx_rows, checkpoint_rows)
-    reconstructed = current_custody["combined_beneficial_shares"] if current_custody["unresolved_quantity"] is not None else ownership.summary["reconstructed_remaining_shares"]
+    current_custody = roll_forward_current_custody(tx_rows, checkpoint_rows, failed_transfers)
+    reconstructed = current_custody["combined_beneficial_shares"] if current_custody["reconciliation_complete"] else ownership.summary["reconstructed_remaining_shares"]
     # The normal holdings row is Merrill custody only, not combined beneficial ownership.
-    if current_custody["unresolved_quantity"] is None:
+    if not current_custody["reconciliation_complete"]:
         reconstructed = ownership.summary["reconstructed_remaining_shares"]
         raw_difference = reconstructed - live if live is not None else None
     else:
@@ -440,7 +455,7 @@ def build_hd_phase3a_reconciliation(transactions: Iterable[dict[str, Any]], tran
     explained_difference = sum((_decimal(row.get("shares")) or Decimal("0") for row in explained_components), Decimal("0"))
     remaining_unexplained = None if raw_difference is None else raw_difference - explained_difference
     categories = sorted({issue["issue_type"] for issue in issues}) or ["EXPLAINED_DOCUMENTED_ACTIVITY"]
-    if current_custody["unresolved_quantity"] == 0 and (raw_difference is None or abs(raw_difference) <= LIVE_TOLERANCE):
+    if current_custody["reconciliation_complete"] and current_custody["unresolved_quantity"] == 0 and (raw_difference is None or abs(raw_difference) <= LIVE_TOLERANCE):
         categories = ["CURRENT_CUSTODY_RECONCILED"]
     summary = {
         "historical_reconstructed_shares": reconstructed,
@@ -459,7 +474,7 @@ def build_hd_phase3a_reconciliation(transactions: Iterable[dict[str, Any]], tran
         "unresolved_sold_shares": unresolved_sold_shares,
         "unknown_acquisition_shares": unknown_acquisition_shares,
         "reconciliation_categories": categories,
-        "phase3a_status": "INSUFFICIENT_HISTORICAL_DOCUMENTATION" if remaining_unexplained is None or abs(remaining_unexplained) > LIVE_TOLERANCE else ("RECONCILED" if current_custody["unresolved_quantity"] is not None else "RECONCILED_TO_LIVE"),
+        "phase3a_status": "INSUFFICIENT_HISTORICAL_DOCUMENTATION" if not current_custody["reconciliation_complete"] or remaining_unexplained is None or abs(remaining_unexplained) > LIVE_TOLERANCE else "RECONCILED",
         "plug_transaction_created": False,
         "lifetime_return_withheld": True,
     }

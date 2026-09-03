@@ -5708,6 +5708,7 @@ def _render_hd_historical_analysis_context(hd_historical_context: dict[str, Any]
     basis_coverage_pct = basis_coverage * 100 if basis_coverage is not None and 0 <= basis_coverage <= 1 else basis_coverage
     money = lambda value: _format_currency(value) if value is not None else "Unknown"
     st.markdown("#### HD / ESPP Historical Context")
+    st.caption(f"Custody reconciliation as of {custody.get('as_of_date', 'unknown')}")
     st.dataframe(pd.DataFrame([
         {"Metric": "Documented ESPP Contributions", "Value": money(economics.get("espp_employee_contributions"))},
         {"Metric": "Purchase Discount Benefit", "Value": money(economics.get("espp_purchase_discount_benefit"))},

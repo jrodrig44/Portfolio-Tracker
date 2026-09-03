@@ -1,8 +1,9 @@
 from decimal import Decimal
 import unittest
 import pandas as pd
-from hd_espp_evidence import load_hd_evidence, merge_hd_evidence
+from hd_espp_evidence import _same_economic_event, load_hd_evidence, merge_hd_evidence
 from hd_espp_integration import build_hd_historical_integration_context
+from hd_espp_reconciliation import roll_forward_current_custody
 from hd_ownership import reconstruct_hd_ownership
 
 def tx(fp, kind, when, shares, **extra):
@@ -32,5 +33,29 @@ class AuthoritativeHDEvidenceTests(unittest.TestCase):
 
     def test_transfer_components_are_detail_not_duplicate_transactions(self):
         evidence=load_hd_evidence(); self.assertEqual(sum((row["transferred_shares"] for row in evidence["transfer_lots"][:4]),Decimal()),Decimal("4.000000")); self.assertEqual(sum((row["transferred_shares"] for row in evidence["transfer_lots"][4:]),Decimal()),Decimal("4.000000")); self.assertEqual(sum(row["transaction_type"]=="TRANSFER_OUT" for row in evidence["transactions"]),2)
+
+    def test_checkpoints_do_not_hide_unsupported_or_unmatched_events(self):
+        checkpoints=[{"checkpoint_date":"2026-01-01","custodian":"Computershare","shares":"10"},{"checkpoint_date":"2026-01-01","custodian":"Merrill","shares":"12"}]
+        unsupported=roll_forward_current_custody([tx("admin","ADJUSTMENT","2026-02-01","3",source_location="administrative correction")],checkpoints)
+        unmatched=roll_forward_current_custody([tx("move","TRANSFER_IN","2026-02-01","4",source_location="External")],checkpoints)
+        self.assertFalse(unsupported["reconciliation_complete"]); self.assertEqual(unsupported["unresolved_quantity"],Decimal("3")); self.assertFalse(unmatched["reconciliation_complete"]); self.assertEqual(unmatched["unresolved_quantity"],Decimal("4"))
+
+    def test_failed_transfer_is_explicit_zero_effect_and_realized_detail_is_ignored(self):
+        checkpoints=[{"checkpoint_date":"2026-01-01","custodian":"Computershare","shares":"10"},{"checkpoint_date":"2026-01-01","custodian":"Merrill","shares":"21"}]
+        rows=[tx("aggregate","SALE","2026-06-04","9",amount=Decimal("2819.46")),tx("detail","SALE","2026-06-04","9",amount=Decimal("2819.46"),source_account_type="Realized lot")]
+        result=roll_forward_current_custody(rows,checkpoints,[{"transaction_date":"2026-02-18","shares":Decimal("5"),"status":"Payment failed"}])
+        self.assertTrue(result["reconciliation_complete"]); self.assertEqual(result["merrill_shares"],Decimal("12")); self.assertEqual(result["ignored_detail_event_count"],2); self.assertEqual(result["unresolved_quantity"],Decimal("0"))
+
+    def test_trade_settlement_dedup_is_precise(self):
+        trade=tx("trade","SALE","2026-06-04","9",amount=Decimal("2819.46"),fees=Decimal("0.06"))
+        settlement=tx("settle","SALE","2026-06-05","9",amount=Decimal("2819.52"))
+        separate=tx("other","SALE","2026-06-04","9",amount=Decimal("2800.00"),fees=Decimal("0.06"))
+        self.assertTrue(_same_economic_event(trade,settlement)); self.assertFalse(_same_economic_event(trade,separate))
+
+    def test_only_proven_restricted_adjustment_is_acquisition(self):
+        checkpoints=[{"checkpoint_date":"2026-01-01","custodian":"Computershare","shares":"10"},{"checkpoint_date":"2026-01-01","custodian":"Merrill","shares":"10"}]
+        known=roll_forward_current_custody([tx("lapse","ADJUSTMENT","2026-03-20","11",source_location="Restricted share award")],checkpoints)
+        unknown=roll_forward_current_custody([tx("admin","ADJUSTMENT","2026-03-20","11",source_location="Administrative")],checkpoints)
+        self.assertEqual(known["merrill_shares"],Decimal("21")); self.assertTrue(known["reconciliation_complete"]); self.assertEqual(unknown["merrill_shares"],Decimal("10")); self.assertFalse(unknown["reconciliation_complete"])
 
 if __name__=="__main__": unittest.main()

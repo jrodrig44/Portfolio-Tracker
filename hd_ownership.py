@@ -103,7 +103,7 @@ def _lot_id(fingerprint: str) -> str:
     return "HD-" + hashlib.sha256(fingerprint.encode()).hexdigest()[:16]
 
 
-def _origin(row: dict[str, Any]) -> str | None:
+def classify_acquisition_origin(row: dict[str, Any]) -> str | None:
     kind = row.get("transaction_type")
     if kind == "ESPP_PURCHASE":
         return "ESPP_PURCHASE"
@@ -119,7 +119,7 @@ def _origin(row: dict[str, Any]) -> str | None:
 def _acquisition_lots(rows: Iterable[dict[str, Any]]) -> list[OwnershipLot]:
     lots: list[OwnershipLot] = []
     for row in rows:
-        origin = _origin(row)
+        origin = classify_acquisition_origin(row)
         shares = _decimal(row.get("shares"))
         acquired = _date(row.get("acquisition_date")) or _date(row.get("transaction_date"))
         if not origin or not shares or shares <= 0 or acquired is None:
@@ -290,4 +290,4 @@ def reconstruct_hd_ownership(rows: Iterable[dict[str, Any]], live_shares: Decima
     return OwnershipReconstruction(lots, sold, issues, summary, origin_breakdown)
 
 
-__all__ = ["LIVE_TOLERANCE", "LOT_DISPLAY_TOLERANCE", "SHARE_TOLERANCE", "OwnershipLot", "OwnershipReconstruction", "SoldLot", "reconstruct_hd_ownership"]
+__all__ = ["LIVE_TOLERANCE", "LOT_DISPLAY_TOLERANCE", "SHARE_TOLERANCE", "OwnershipLot", "OwnershipReconstruction", "SoldLot", "classify_acquisition_origin", "reconstruct_hd_ownership"]

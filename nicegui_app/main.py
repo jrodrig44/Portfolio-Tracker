@@ -958,6 +958,7 @@ async def index() -> None:
                         custody = historical.get("reconciliation", {}).get("current_custody", {})
                         reconciliation = historical.get("reconciliation", {})
                         ui.label("HD / ESPP Historical Context").classes("text-lg font-semibold mt-3")
+                        ui.label(f"Custody reconciliation as of {custody.get('as_of_date', 'unknown')}").classes("text-sm text-gray-600 dark:text-gray-300")
                         detail_cards([
                             ("Documented ESPP Contributions", currency(economics.get("espp_employee_contributions"))),
                             ("Purchase Discount Benefit", currency(economics.get("espp_purchase_discount_benefit"))),
