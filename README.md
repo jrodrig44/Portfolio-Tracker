@@ -9,7 +9,7 @@ Dividend Portfolio Tracker is a self-contained local NiceGUI application for man
 - Server-maintained market values and live portfolio history during market sessions, even with no browser connected.
 - Cost basis, unrealized gain/loss, yield on cost, portfolio yield, allocation, concentration, and weighted calculations.
 - Regular, special, and HD ESPP contribution tracking.
-- HD reconciliation separates Equate/Computershare custody (10.318744 shares) from Merrill custody (12 shares) and reports 22.318744 combined beneficial shares. Successful transfers change custody, not ownership; failed transfers have no effect. Transfer detail is aggregated once to prevent duplicate counting. Merrill broker-reported realized gain remains separate from reconstructed gain, and Equate-derived replacement basis retains `reconstructed_from_equate_allocations` provenance.
+- HD reconciliation separates Equate/Computershare and Merrill custody and reports combined beneficial ownership. Successful transfers change custody, not ownership; failed transfers have no effect. Transfer detail is aggregated once to prevent duplicate counting. Broker-reported realized gain remains separate from reconstructed gain, and Equate-derived replacement basis retains `reconstructed_from_equate_allocations` provenance.
 - Growth projections, income estimates, milestones, dividend timing, insights, and methodology-based health views.
 - Optional, explicitly triggered 1min.AI analysis and Supplemental Research.
 - Manual/read-only exports: **Holdings CSV**, **Portfolio report** (Markdown), and **Structured data** (JSON).

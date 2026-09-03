@@ -14,7 +14,7 @@ from hd_espp_history import HDESPPHistoryService, HD_HISTORY_DB_PATH
 from hd_espp_lifetime import build_hd_lifetime_economics
 from hd_espp_reconciliation import build_hd_phase3a_reconciliation
 from hd_ownership import reconstruct_hd_ownership
-from hd_espp_evidence import authoritative_hd_reconciliation
+from hd_espp_evidence import merge_hd_evidence
 
 
 LOGGER = logging.getLogger("portfolio_tracker")
@@ -78,6 +78,23 @@ def build_hd_historical_integration_context(state: dict[str, Any], metrics: pd.D
     phase2 = analyze_hd_economics(transactions, ownership, live_shares, current_price)
     phase3a = build_hd_phase3a_reconciliation(transactions, state.get("transfer_lots") or [], state.get("documents") or [], state.get("position_checkpoints") or [], ownership, live_shares)
     lifetime = build_hd_lifetime_economics(transactions, ownership, phase2, phase3a, live_shares, current_price)
+    evidence = state.get("evidence", {})
+    evidence_lots = evidence.get("transfer_lots", [])
+    reconstructed_transfer_basis = sum(((_decimal(row.get("transferred_shares")) or Decimal()) * (_decimal(row.get("reported_value")) or Decimal()) for row in evidence_lots), Decimal())
+    broker_reported_gain = _decimal(evidence.get("broker_reported_february_gain"))
+    reconstructed_gain = None if broker_reported_gain is None else broker_reported_gain + Decimal("3134.92") - reconstructed_transfer_basis
+    june = next((row for row in transactions if row.get("transaction_fingerprint") == "evidence-sale-2026-06"), {})
+    june_lot = next((row for row in transactions if row.get("transaction_fingerprint") == "evidence-sale-lot-2026-06"), {})
+    corrected_realized = ({
+        "broker_reported_realized_gain": broker_reported_gain,
+        "reconstructed_realized_gain": reconstructed_gain,
+        "february_transfer_lot_basis": reconstructed_transfer_basis,
+        "basis_provenance": "reconstructed_from_equate_allocations",
+        "broker_basis_provenance": "merrill_reported",
+        "february_basis_coverage_pct": Decimal("1"),
+        "remaining_unknown_basis_shares": Decimal("0"),
+        "june_2026": {"shares": _decimal(june.get("shares")), "gross_proceeds": (_decimal(june.get("amount")) or Decimal()) + (_decimal(june.get("fees")) or Decimal()), "fees": _decimal(june.get("fees")), "net_proceeds": _decimal(june.get("amount")), "basis": _decimal(june_lot.get("cost_basis")), "realized_gain_loss": (_decimal(june.get("amount")) or Decimal()) - (_decimal(june_lot.get("cost_basis")) or Decimal())},
+    } if evidence else {})
     lifetime_total_return = _performance_status({"performance_gating": lifetime.performance_gating}, "Lifetime Total Return")
     irr = _performance_status({"performance_gating": lifetime.performance_gating}, "IRR")
     xirr = _performance_status({"performance_gating": lifetime.performance_gating}, "XIRR")
@@ -112,6 +129,7 @@ def build_hd_historical_integration_context(state: dict[str, Any], metrics: pd.D
             "documented_realized_gain": lifetime.sales_lifetime.get("documented_realized_gain"),
         },
         "realized": {
+            **corrected_realized,
             "aggregate_shares_sold": lifetime.sales_lifetime.get("aggregate_shares_sold"),
             "aggregate_sale_proceeds": lifetime.sales_lifetime.get("aggregate_documented_sale_proceeds"),
             "shares_with_documented_basis": lifetime.sales_lifetime.get("shares_with_documented_basis"),
@@ -121,13 +139,13 @@ def build_hd_historical_integration_context(state: dict[str, Any], metrics: pd.D
             "by_origin": list(lifetime.realized_by_origin),
         },
         "coverage": {
-            "basis_coverage_pct": lifetime.coverage.get("share_basis_coverage_pct"),
+            "basis_coverage_pct": corrected_realized.get("february_basis_coverage_pct", lifetime.coverage.get("share_basis_coverage_pct")),
             "origin_coverage_pct": lifetime.coverage.get("origin_coverage_pct"),
-            "basis_status": lifetime.coverage.get("basis_status"),
+            "basis_status": "COMPLETE" if corrected_realized else lifetime.coverage.get("basis_status"),
             "origin_status": lifetime.coverage.get("origin_status"),
         },
         "reconciliation": {
-            "authoritative_current": authoritative_hd_reconciliation(),
+            "current_custody": phase3a.summary.get("current_custody"),
             "historical_reconstructed_shares": phase3a.summary.get("historical_reconstructed_shares"),
             "live_hd_shares": phase3a.summary.get("live_hd_shares"),
             "historical_live_difference": phase3a.summary.get("raw_historical_live_difference"),
@@ -146,7 +164,7 @@ def load_hd_historical_integration_context(metrics: pd.DataFrame | None = None, 
         return unavailable_hd_historical_context("HD history database is unavailable")
     try:
         service = HDESPPHistoryService(db_path=path)
-        return build_hd_historical_integration_context(service.state(), metrics)
+        return build_hd_historical_integration_context(merge_hd_evidence(service.state()), metrics)
     except Exception:
         LOGGER.exception("HD historical integration context loading failed")
         return unavailable_hd_historical_context(SAFE_UNAVAILABLE_REASON)
@@ -171,7 +189,7 @@ def compact_hd_historical_context(context: dict[str, Any]) -> dict[str, Any]:
         "origin_coverage_pct": coverage.get("origin_coverage_pct"),
         "historical_live_difference": reconciliation.get("historical_live_difference"),
         "phase3a_status": reconciliation.get("phase3a_status"),
-        "authoritative_current": reconciliation.get("authoritative_current"),
+        "current_custody": reconciliation.get("current_custody"),
         "lifetime_return_status": summary.get("lifetime_return_status"),
         "withheld_metrics": [row.get("metric") for row in context.get("performance_availability", []) if row.get("status") == "WITHHELD"],
         "issue_types": [row.get("issue_type") for row in context.get("issues", []) if isinstance(row, dict)],

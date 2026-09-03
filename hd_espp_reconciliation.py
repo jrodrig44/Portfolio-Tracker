@@ -368,14 +368,50 @@ def _issue(issue_type: str, message: str, severity: str = "REVIEW") -> dict[str,
     return {"issue_type": issue_type, "severity": severity, "message": message}
 
 
+def roll_forward_current_custody(transactions: Iterable[dict[str, Any]], checkpoints: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    """Roll each custodian's latest documented position through later activity."""
+    tx_rows, checkpoint_rows = [dict(row) for row in transactions], [dict(row) for row in checkpoints]
+    result: dict[str, Decimal] = {}
+    dates: dict[str, date] = {}
+    aliases = {"Computershare": "Equate", "EquatePlus": "Equate", "Equate": "Equate", "Merrill": "Merrill"}
+    for row in checkpoint_rows:
+        custodian = aliases.get(str(row.get("custodian")))
+        at, shares = _date(row.get("checkpoint_date")), _decimal(row.get("shares"))
+        if custodian and at and shares is not None and (custodian not in dates or at >= dates[custodian]):
+            dates[custodian], result[custodian] = at, shares
+    for custodian, start in dates.items():
+        for row in tx_rows:
+            at, shares = _date(row.get("transaction_date")), _decimal(row.get("shares")) or Decimal("0")
+            if not at or at <= start: continue
+            kind = row.get("transaction_type")
+            source = f"{row.get('source_location') or ''} {row.get('source') or ''}"
+            if kind in {"ESPP_PURCHASE", "DIVIDEND_REINVESTMENT", "ADJUSTMENT"} and aliases.get("Merrill" if "Merrill" in source else "EquatePlus") == custodian:
+                result[custodian] += shares
+            # Aggregate brokerage rows are the economic disposition; realized lots are detail.
+            elif kind == "SALE" and custodian == "Merrill" and row.get("source_account_type") == "Brokerage":
+                result[custodian] -= shares
+            elif kind == "TRANSFER_OUT" and aliases.get("Merrill" if "Merrill" in source else "EquatePlus") == custodian:
+                result[custodian] -= shares
+            elif kind == "TRANSFER_IN" and custodian == "Merrill" and row.get("transfer_match_id"):
+                result[custodian] += shares
+    combined = sum(result.values(), Decimal("0"))
+    return {"equate_shares": result.get("Equate"), "merrill_shares": result.get("Merrill"), "combined_beneficial_shares": combined, "unresolved_quantity": Decimal("0") if len(result) == 2 else None, "checkpoint_dates": dates}
+
+
 def build_hd_phase3a_reconciliation(transactions: Iterable[dict[str, Any]], transfer_lots: Iterable[dict[str, Any]], documents: Iterable[dict[str, Any]], position_checkpoints: Iterable[dict[str, Any]], ownership: OwnershipReconstruction, live_hd_shares: Decimal | str | float | None) -> HDPhase3AReconciliation:
     tx_rows = [dict(row) for row in transactions]
     transfer_rows = [dict(row) for row in transfer_lots]
     document_rows = [dict(row) for row in documents]
     checkpoint_rows = [dict(row) for row in position_checkpoints]
     live = _decimal(live_hd_shares)
-    reconstructed = ownership.summary["reconstructed_remaining_shares"]
-    raw_difference = reconstructed - live if live is not None else None
+    current_custody = roll_forward_current_custody(tx_rows, checkpoint_rows)
+    reconstructed = current_custody["combined_beneficial_shares"] if current_custody["unresolved_quantity"] is not None else ownership.summary["reconstructed_remaining_shares"]
+    # The normal holdings row is Merrill custody only, not combined beneficial ownership.
+    if current_custody["unresolved_quantity"] is None:
+        reconstructed = ownership.summary["reconstructed_remaining_shares"]
+        raw_difference = reconstructed - live if live is not None else None
+    else:
+        raw_difference = (current_custody["merrill_shares"] - live) if live is not None and current_custody["merrill_shares"] is not None else current_custody["unresolved_quantity"]
     coverage, gaps, overlaps = build_statement_coverage(document_rows, tx_rows, checkpoint_rows)
     checkpoint_detail, checkpoint_totals, last_reconciled_date, last_reconciled_position, latest_documented_checkpoint_date, latest_documented_position = reconcile_position_checkpoints(tx_rows, transfer_rows, checkpoint_rows)
     unresolved_sold = [lot for lot in ownership.sold_lots if lot.match_status == "UNRESOLVED"]
@@ -404,8 +440,11 @@ def build_hd_phase3a_reconciliation(transactions: Iterable[dict[str, Any]], tran
     explained_difference = sum((_decimal(row.get("shares")) or Decimal("0") for row in explained_components), Decimal("0"))
     remaining_unexplained = None if raw_difference is None else raw_difference - explained_difference
     categories = sorted({issue["issue_type"] for issue in issues}) or ["EXPLAINED_DOCUMENTED_ACTIVITY"]
+    if current_custody["unresolved_quantity"] == 0 and (raw_difference is None or abs(raw_difference) <= LIVE_TOLERANCE):
+        categories = ["CURRENT_CUSTODY_RECONCILED"]
     summary = {
         "historical_reconstructed_shares": reconstructed,
+        "current_custody": current_custody,
         "live_hd_shares": live,
         "raw_historical_live_difference": raw_difference,
         "explained_difference": explained_difference,
@@ -420,7 +459,7 @@ def build_hd_phase3a_reconciliation(transactions: Iterable[dict[str, Any]], tran
         "unresolved_sold_shares": unresolved_sold_shares,
         "unknown_acquisition_shares": unknown_acquisition_shares,
         "reconciliation_categories": categories,
-        "phase3a_status": "INSUFFICIENT_HISTORICAL_DOCUMENTATION" if remaining_unexplained and abs(remaining_unexplained) > LIVE_TOLERANCE else "RECONCILED_TO_LIVE",
+        "phase3a_status": "INSUFFICIENT_HISTORICAL_DOCUMENTATION" if remaining_unexplained is None or abs(remaining_unexplained) > LIVE_TOLERANCE else ("RECONCILED" if current_custody["unresolved_quantity"] is not None else "RECONCILED_TO_LIVE"),
         "plug_transaction_created": False,
         "lifetime_return_withheld": True,
     }
@@ -460,4 +499,5 @@ __all__ = [
     "build_statement_coverage",
     "build_surviving_lot_audit",
     "reconcile_position_checkpoints",
+    "roll_forward_current_custody",
 ]
