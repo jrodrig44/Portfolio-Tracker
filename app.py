@@ -5702,6 +5702,9 @@ def _render_hd_historical_analysis_context(hd_historical_context: dict[str, Any]
     coverage = hd_historical_context.get("coverage", {})
     reconciliation = hd_historical_context.get("reconciliation", {})
     summary = hd_historical_context.get("summary", {})
+    authoritative = reconciliation.get("authoritative_current", {})
+    custody = authoritative.get("custody", {})
+    authoritative_realized = authoritative.get("realized", {})
     basis_value = coverage.get("basis_coverage_pct")
     basis_coverage = float(basis_value) if basis_value is not None else None
     basis_coverage_pct = basis_coverage * 100 if basis_coverage is not None and 0 <= basis_coverage <= 1 else basis_coverage
@@ -5711,11 +5714,16 @@ def _render_hd_historical_analysis_context(hd_historical_context: dict[str, Any]
         {"Metric": "Documented ESPP Contributions", "Value": money(economics.get("espp_employee_contributions"))},
         {"Metric": "Purchase Discount Benefit", "Value": money(economics.get("espp_purchase_discount_benefit"))},
         {"Metric": "Documented Realized Gain", "Value": money(realized.get("documented_realized_gain"))},
+        {"Metric": "Broker-reported Realized Gain", "Value": money(authoritative_realized.get("broker_reported_realized_gain"))},
+        {"Metric": "Reconstructed Realized Gain", "Value": money(authoritative_realized.get("reconstructed_realized_gain"))},
+        {"Metric": "Equate HD Shares", "Value": str(custody.get("equate_shares", "Unknown"))},
+        {"Metric": "Merrill HD Shares", "Value": str(custody.get("merrill_shares", "Unknown"))},
+        {"Metric": "Combined Beneficial HD Shares", "Value": str(custody.get("combined_beneficial_shares", "Unknown"))},
         {"Metric": "Basis Coverage", "Value": _format_percent(basis_coverage_pct) if basis_coverage_pct is not None else "Unknown"},
         {"Metric": "Historical/Live Reconciliation", "Value": f"{reconciliation.get('phase3a_status', 'UNKNOWN')} ({reconciliation.get('historical_live_difference', 'Unknown')} shares)"},
         {"Metric": "Lifetime Return Status", "Value": str(summary.get("lifetime_return_status", "WITHHELD"))},
     ]), width="stretch", hide_index=True)
-    st.caption("Source-bounded documented HD history. Withheld lifetime metrics are not calculated or inferred.")
+    st.caption("Merrill custody is not total HD ownership. Reconstructed Equate basis retains its provenance and does not overwrite broker-reported values.")
 
 
 def _render_analysis_tab(metrics: pd.DataFrame, mobile_mode: bool = False, hd_historical_context: dict[str, Any] | None = None) -> None:

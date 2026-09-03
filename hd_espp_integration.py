@@ -14,6 +14,7 @@ from hd_espp_history import HDESPPHistoryService, HD_HISTORY_DB_PATH
 from hd_espp_lifetime import build_hd_lifetime_economics
 from hd_espp_reconciliation import build_hd_phase3a_reconciliation
 from hd_ownership import reconstruct_hd_ownership
+from hd_espp_evidence import authoritative_hd_reconciliation
 
 
 LOGGER = logging.getLogger("portfolio_tracker")
@@ -126,6 +127,7 @@ def build_hd_historical_integration_context(state: dict[str, Any], metrics: pd.D
             "origin_status": lifetime.coverage.get("origin_status"),
         },
         "reconciliation": {
+            "authoritative_current": authoritative_hd_reconciliation(),
             "historical_reconstructed_shares": phase3a.summary.get("historical_reconstructed_shares"),
             "live_hd_shares": phase3a.summary.get("live_hd_shares"),
             "historical_live_difference": phase3a.summary.get("raw_historical_live_difference"),
@@ -169,6 +171,7 @@ def compact_hd_historical_context(context: dict[str, Any]) -> dict[str, Any]:
         "origin_coverage_pct": coverage.get("origin_coverage_pct"),
         "historical_live_difference": reconciliation.get("historical_live_difference"),
         "phase3a_status": reconciliation.get("phase3a_status"),
+        "authoritative_current": reconciliation.get("authoritative_current"),
         "lifetime_return_status": summary.get("lifetime_return_status"),
         "withheld_metrics": [row.get("metric") for row in context.get("performance_availability", []) if row.get("status") == "WITHHELD"],
         "issue_types": [row.get("issue_type") for row in context.get("issues", []) if isinstance(row, dict)],

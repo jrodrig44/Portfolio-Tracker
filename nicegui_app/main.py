@@ -955,12 +955,20 @@ async def index() -> None:
                         economics = historical.get("documented_economics", {})
                         realized = historical.get("realized", {})
                         coverage = historical.get("coverage", {})
+                        current = historical.get("reconciliation", {}).get("authoritative_current", {})
+                        custody = current.get("custody", {})
+                        authoritative_realized = current.get("realized", {})
                         reconciliation = historical.get("reconciliation", {})
                         ui.label("HD / ESPP Historical Context").classes("text-lg font-semibold mt-3")
                         detail_cards([
                             ("Documented ESPP Contributions", currency(economics.get("espp_employee_contributions"))),
                             ("Purchase Discount Benefit", currency(economics.get("espp_purchase_discount_benefit"))),
                             ("Documented Realized Gain", currency(realized.get("documented_realized_gain"))),
+                            ("Broker-reported Realized Gain", currency(authoritative_realized.get("broker_reported_realized_gain"))),
+                            ("Reconstructed Realized Gain", currency(authoritative_realized.get("reconstructed_realized_gain"))),
+                            ("Equate HD Shares", str(custody.get("equate_shares", "Unknown"))),
+                            ("Merrill HD Shares", str(custody.get("merrill_shares", "Unknown"))),
+                            ("Combined Beneficial HD Shares", str(custody.get("combined_beneficial_shares", "Unknown"))),
                             ("Basis Coverage", percent(coverage.get("basis_coverage_pct"))),
                             ("Historical/Live Reconciliation", str(reconciliation.get("phase3a_status", "Unavailable")).replace("_", " ").title()),
                             ("Lifetime Return Status", str((historical.get("summary") or {}).get("lifetime_return_status", "Unavailable")).title()),
