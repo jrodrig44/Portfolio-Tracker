@@ -935,7 +935,7 @@ async def index() -> None:
             totals, summary = package["totals"], package["summary"]
             with area:
                 ui.label("Portfolio Analysis").classes("text-2xl font-semibold")
-                metric_cards([("Valuation", currency(totals["total_portfolio_value"])), ("Cost basis", currency(totals["total_cost_basis"])), ("Unrealized gain/loss", currency(totals["total_unrealized_gain"])), ("Annual income", currency(totals["total_estimated_annual_income"])), ("Weighted yield", percent(totals["weighted_portfolio_yield"])), ("Largest holding", str(totals["largest_holding"]))])
+                metric_cards([("Valuation", currency(totals["total_portfolio_value"])), ("Cost basis", currency(totals["total_cost_basis"])), ("Unrealized gain/loss (known basis)", currency(totals["total_unrealized_gain"])), ("Annual income", currency(totals["total_estimated_annual_income"])), ("Weighted yield", percent(totals["weighted_portfolio_yield"])), ("Largest holding", str(totals["largest_holding"]))])
                 with ui.expansion("Allocation and economic exposure", value=True).classes("w-full"):
                     records_table(package["asset_allocation"], "Asset allocation")
                     records_table(totals["economic_exposure_allocation"], "Economic exposure")

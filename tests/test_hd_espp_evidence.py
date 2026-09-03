@@ -1,4 +1,6 @@
 from decimal import Decimal
+import json
+import tempfile
 import unittest
 from pathlib import Path
 import pandas as pd
@@ -32,8 +34,26 @@ class AuthoritativeHDEvidenceTests(unittest.TestCase):
 
     def test_basis_and_realized_values_flow_from_normalized_rows(self):
         context=build_hd_historical_integration_context(merge_hd_evidence(state(), FIXTURE)); realized=context["realized"]
-        self.assertEqual(realized["broker_reported_realized_gain"],Decimal("1822.48")); self.assertEqual(realized["february_transfer_lot_basis"],Decimal("2573.2040028683")); self.assertEqual(realized["reconstructed_realized_gain"],Decimal("2384.1959971317")); self.assertEqual(realized["basis_provenance"],"reconstructed_from_equate_allocations"); self.assertEqual(realized["june_2026"]["realized_gain_loss"],Decimal("-340.89"))
-        self.assertEqual(realized["june_2026"],{"shares":Decimal("9"),"gross_proceeds":Decimal("2819.52"),"fees":Decimal("0.06"),"net_proceeds":Decimal("2819.46"),"basis":Decimal("3160.35"),"realized_gain_loss":Decimal("-340.89")}); self.assertEqual(context["coverage"]["basis_coverage_pct"],Decimal("1")); self.assertEqual(context["coverage"]["basis_status"],"COMPLETE")
+        self.assertEqual(realized["broker_reported_realized_gain"],Decimal("1822.48")); self.assertEqual(realized["previously_unknown_basis_lot_proceeds"],Decimal("3134.92")); self.assertEqual(realized["february_transfer_lot_basis"],Decimal("2573.2040028683")); self.assertEqual(realized["reconstructed_realized_gain"],Decimal("2384.1959971317")); self.assertEqual(realized["basis_provenance"],"reconstructed_from_equate_allocations")
+        june=next(row for row in realized["events"] if row["event_id"]=="merrill-sale-2026-06-04")
+        self.assertEqual(june,{"event_id":"merrill-sale-2026-06-04","trade_date":"2026-06-04","settlement_date":"2026-06-05","shares":Decimal("9"),"gross_proceeds":Decimal("2819.52"),"fees":Decimal("0.06"),"net_proceeds":Decimal("2819.46"),"basis":Decimal("3160.35"),"realized_gain_loss":Decimal("-340.89"),"basis_provenance":"merrill_reported","accounting_status":"reconstructed"}); self.assertEqual(context["coverage"]["basis_coverage_pct"],Decimal("1")); self.assertEqual(context["coverage"]["basis_status"],"COMPLETE")
+
+    def test_future_sale_is_separate_and_does_not_mutate_historical_events(self):
+        raw=json.loads(FIXTURE.read_text(encoding="utf-8"))
+        raw["transactions"].extend([
+            {"transaction_fingerprint":"future-sale","event_id":"future-sale-2026-07-15","transaction_type":"SALE","transaction_date":"2026-07-15","settlement_date":"2026-07-16","shares":"decimal:2","amount":"decimal:699","fees":"decimal:1","source":"Merrill","source_location":"Merrill","source_account_type":"Brokerage","source_document":"hypothetical fixture"},
+            {"transaction_fingerprint":"future-sale-lot","event_id":"future-sale-2026-07-15","transaction_type":"SALE","transaction_date":"2026-07-15","settlement_date":"2026-07-16","shares":"decimal:2","amount":"decimal:699","fees":"decimal:1","cost_basis":"decimal:600","basis_provenance":"hypothetical_documented_lot","source":"Merrill","source_location":"Merrill","source_account_type":"Realized lot","source_document":"hypothetical fixture"},
+        ])
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/"future.json"; path.write_text(json.dumps(raw),encoding="utf-8")
+            context=build_hd_historical_integration_context(merge_hd_evidence(state(),path),pd.DataFrame([{"ticker":"HD","shares":10,"current_price":300,"market_value":3000}]))
+        events={row["event_id"]:row for row in context["realized"]["events"]}
+        self.assertEqual(events["merrill-sale-2026-06-04"]["realized_gain_loss"],Decimal("-340.89"))
+        self.assertEqual(events["future-sale-2026-07-15"]["realized_gain_loss"],Decimal("99"))
+        self.assertEqual(events["future-sale-2026-07-15"]["basis_provenance"],"hypothetical_documented_lot")
+        custody=context["reconciliation"]["current_custody"]
+        self.assertEqual(custody["merrill_shares"],Decimal("10")); self.assertEqual(custody["combined_beneficial_shares"],Decimal("20.318744")); self.assertEqual(str(custody["as_of_date"]),"2026-07-15")
+        self.assertEqual(context["realized"]["reconstructed_realized_gain"],Decimal("2384.1959971317")); self.assertEqual(context["reconciliation"]["phase3a_status"],"RECONCILED")
 
     def test_transfer_components_are_detail_not_duplicate_transactions(self):
         evidence=load_hd_evidence(FIXTURE); self.assertEqual(sum((row["transferred_shares"] for row in evidence["transfer_lots"][:4]),Decimal()),Decimal("4.000000")); self.assertEqual(sum((row["transferred_shares"] for row in evidence["transfer_lots"][4:]),Decimal()),Decimal("4.000000")); self.assertEqual(sum(row["transaction_type"]=="TRANSFER_OUT" for row in evidence["transactions"]),2)

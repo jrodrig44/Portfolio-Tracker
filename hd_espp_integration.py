@@ -49,6 +49,21 @@ def _performance_status(lifetime: dict[str, Any], metric: str) -> dict[str, Any]
     return {"metric": metric, "status": "WITHHELD", "value": None, "reason": "Unavailable", "gating_reasons": ["HD_HISTORICAL_DATA_UNAVAILABLE"]}
 
 
+def _realized_sale_events(transactions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build immutable realized events from normalized aggregate and lot rows."""
+    aggregates = [row for row in transactions if row.get("transaction_type") == "SALE" and row.get("source_account_type") != "Realized lot"]
+    lots = [row for row in transactions if row.get("transaction_type") == "SALE" and row.get("source_account_type") == "Realized lot"]
+    events: list[dict[str, Any]] = []
+    for sale in sorted(aggregates, key=lambda row: (str(row.get("transaction_date") or ""), str(row.get("event_id") or row.get("transaction_fingerprint") or ""))):
+        event_id = str(sale.get("event_id") or f"sale:{sale.get('transaction_date')}:{sale.get('shares')}")
+        lot = next((row for row in lots if sale.get("event_id") and row.get("event_id") == sale.get("event_id")), None)
+        if lot is None:
+            lot = next((row for row in lots if row.get("transaction_date") == sale.get("transaction_date") and _decimal(row.get("shares")) == _decimal(sale.get("shares"))), None)
+        net = _decimal(sale.get("amount")); fees = _decimal(sale.get("fees")) or Decimal("0"); basis = _decimal((lot or {}).get("cost_basis"))
+        events.append({"event_id": event_id, "trade_date": sale.get("transaction_date"), "settlement_date": sale.get("settlement_date"), "shares": _decimal(sale.get("shares")), "gross_proceeds": net + fees if net is not None else None, "fees": fees, "net_proceeds": net, "basis": basis, "realized_gain_loss": net - basis if net is not None and basis is not None else None, "basis_provenance": (lot or {}).get("basis_provenance") or ("documented_lot_basis" if basis is not None else "unknown"), "accounting_status": "reconstructed" if basis is not None else "broker_reported_partial"})
+    return events
+
+
 def unavailable_hd_historical_context(reason: str = "No HD historical data imported") -> dict[str, Any]:
     return {
         "available": False,
@@ -81,24 +96,25 @@ def build_hd_historical_integration_context(state: dict[str, Any], metrics: pd.D
     evidence = state.get("evidence", {})
     evidence_lots = evidence.get("transfer_lots", [])
     reconstructed_transfer_basis = sum(((_decimal(row.get("transferred_shares")) or Decimal()) * (_decimal(row.get("reported_value")) or Decimal()) for row in evidence_lots), Decimal())
-    realized_evidence = evidence.get("realized_events", {})
+    realized_evidence = evidence.get("realized_reconstruction", {})
     february = realized_evidence.get("february_transfer_sale", {})
     broker_reported_gain = _decimal(february.get("broker_reported_gain"))
-    february_proceeds = _decimal(february.get("net_proceeds"))
-    reconstructed_gain = None if february_proceeds is None else february_proceeds - reconstructed_transfer_basis
-    sale_events = [row for row in transactions if row.get("transaction_type") == "SALE" and row.get("source_account_type") != "Realized lot"]
-    june = max(sale_events, key=lambda row: str(row.get("transaction_date") or ""), default={})
-    lot_events = [row for row in transactions if row.get("transaction_type") == "SALE" and row.get("source_account_type") == "Realized lot"]
-    june_lot = next((row for row in lot_events if row.get("transaction_date") == june.get("transaction_date") and _decimal(row.get("shares")) == _decimal(june.get("shares"))), {})
+    unknown_basis_proceeds = _decimal(february.get("previously_unknown_basis_lot_proceeds"))
+    # The broker gain covered known-basis lots; reconstruction adds proceeds for
+    # the formerly N/A-basis lots, then subtracts their Equate-derived basis.
+    reconstructed_gain = None if broker_reported_gain is None or unknown_basis_proceeds is None else broker_reported_gain + unknown_basis_proceeds - reconstructed_transfer_basis
+    sale_events = _realized_sale_events(transactions)
     corrected_realized = ({
         "broker_reported_realized_gain": broker_reported_gain,
+        "previously_unknown_basis_lot_proceeds": unknown_basis_proceeds,
         "reconstructed_realized_gain": reconstructed_gain,
         "february_transfer_lot_basis": reconstructed_transfer_basis,
         "basis_provenance": "reconstructed_from_equate_allocations",
         "broker_basis_provenance": "merrill_reported",
         "february_basis_coverage_pct": Decimal("1"),
         "remaining_unknown_basis_shares": Decimal("0"),
-        "june_2026": {"shares": _decimal(june.get("shares")), "gross_proceeds": (_decimal(june.get("amount")) or Decimal()) + (_decimal(june.get("fees")) or Decimal()), "fees": _decimal(june.get("fees")), "net_proceeds": _decimal(june.get("amount")), "basis": _decimal(june_lot.get("cost_basis")), "realized_gain_loss": (_decimal(june.get("amount")) or Decimal()) - (_decimal(june_lot.get("cost_basis")) or Decimal())},
+        # Historical sale events are append-only; a later sale cannot replace June 2026.
+        "events": sale_events,
     } if evidence else {})
     lifetime_total_return = _performance_status({"performance_gating": lifetime.performance_gating}, "Lifetime Total Return")
     irr = _performance_status({"performance_gating": lifetime.performance_gating}, "IRR")
@@ -211,6 +227,7 @@ def compact_hd_historical_context(context: dict[str, Any]) -> dict[str, Any]:
         "reconciliation_as_of": str(reconciliation.get("as_of_date")) if reconciliation.get("as_of_date") is not None else None,
         "combined_beneficial_shares": (reconciliation.get("current_custody") or {}).get("combined_beneficial_shares"),
         "broker_reported_realized_gain": realized.get("broker_reported_realized_gain"),
+        "previously_unknown_basis_lot_proceeds": realized.get("previously_unknown_basis_lot_proceeds"),
         "reconstructed_realized_gain": realized.get("reconstructed_realized_gain"),
         "reconstructed_basis": realized.get("february_transfer_lot_basis"),
         "basis_provenance": realized.get("basis_provenance"),

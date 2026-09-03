@@ -25,6 +25,14 @@ class BeneficialExposureTests(unittest.TestCase):
         self.assertEqual(float(self.metrics.iloc[0]["shares"]), 12.0)
         frame = beneficial_metrics_frame(self.metrics, context())
         self.assertAlmostEqual(float(frame.iloc[0]["shares"]), 22.318744)
+        self.assertEqual(float(frame.iloc[0]["unrealized_gain"]), 600.0)
+        self.assertEqual(frame.attrs["unrealized_gain_basis_scope"], "custody_only_known_basis")
+
+    def test_combined_unrealized_gain_requires_complete_equate_basis(self):
+        complete=context(); complete["open_position"]={"equate_cost_basis":Decimal("2500")}
+        frame=beneficial_metrics_frame(self.metrics,complete)
+        self.assertAlmostEqual(float(frame.iloc[0]["unrealized_gain"]),1195.6232)
+        self.assertEqual(frame.attrs["unrealized_gain_basis_scope"],"combined_complete_basis")
 
     def test_transfer_does_not_change_value_and_price_does_not_change_quantity(self):
         before = beneficial_hd_exposure(self.metrics, context("10.318744", "12"))

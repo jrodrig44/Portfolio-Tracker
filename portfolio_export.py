@@ -83,6 +83,7 @@ def build_export_payload(holdings: list[dict[str, Any]], metrics: pd.DataFrame, 
     }
     if payload["projections"]:
         payload["projections"]["projection_contribution_note"] = f"Projection calculations use the regular ${float(projection_biweekly):,.2f} biweekly contribution assumption at {float(projection_return_pct):g}% expected annual return and exclude ESPP contributions unless otherwise stated."
+    payload["totals"]["unrealized_gain_basis_scope"] = totals.get("unrealized_gain_basis_scope", "custody_only_known_basis")
     return _sanitize(payload)
 
 
@@ -125,6 +126,7 @@ def build_export_markdown(payload: dict[str, Any]) -> str:
     for title, content in json_sections:
         sections.extend(["", f"## {title}", "```json", json.dumps(content, indent=2, allow_nan=False), "```"])
     sections.extend(["", "## Data Limitations", *[f"- {note}" for note in payload["data_limitations"]]])
+    sections.extend(["", "## Unrealized Gain Basis", f"- Scope: {str(totals.get('unrealized_gain_basis_scope', 'custody_only_known_basis')).replace('_', ' ')}"])
     return "\n".join(sections)
 
 

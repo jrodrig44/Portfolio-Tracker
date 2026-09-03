@@ -64,11 +64,15 @@ def beneficial_metrics_frame(metrics: pd.DataFrame, hd_context: dict[str, Any] |
     frame.at[index, "current_value"] = float(exposure["combined_hd_market_value"])
     if "annual_income" in frame and old_shares > 0:
         frame.at[index, "annual_income"] = float(frame.at[index, "annual_income"] or 0) * new_shares / old_shares
-    # External open-position basis is included only when normalized evidence supplies it.
+    # Never imply a full combined unrealized result from Merrill-only basis.
+    # Without complete Equate basis, retain the custody/known-basis unrealized value.
     external_basis = _decimal(((hd_context or {}).get("open_position") or {}).get("equate_cost_basis"))
     if external_basis is not None and "cost_basis" in frame:
         frame.at[index, "cost_basis"] = float(frame.at[index, "cost_basis"] or 0) + float(external_basis)
-    if "unrealized_gain" in frame and "cost_basis" in frame:
+        frame.attrs["unrealized_gain_basis_scope"] = "combined_complete_basis"
+    else:
+        frame.attrs["unrealized_gain_basis_scope"] = "custody_only_known_basis"
+    if external_basis is not None and "unrealized_gain" in frame and "cost_basis" in frame:
         frame.at[index, "unrealized_gain"] = float(frame.at[index, "market_value"] or 0) - float(frame.at[index, "cost_basis"] or 0)
     total = float(pd.to_numeric(frame["market_value"], errors="coerce").fillna(0).sum())
     if "portfolio_weight_pct" in frame:
