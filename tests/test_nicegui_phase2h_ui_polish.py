@@ -133,7 +133,8 @@ class NiceGUIPhase2HPolishTests(unittest.TestCase):
         self.assertIn("overflow-wrap: anywhere", RICH_OUTPUT_CSS)
         self.assertIn("max-width: 100%", RICH_OUTPUT_CSS)
         self.assertGreaterEqual(MAIN.count("classes(SCROLL_TABLE)"), 2)
-        self.assertGreaterEqual(MAIN.count("classes(SAFE_RICH_OUTPUT)"), 2)
+        self.assertGreaterEqual(MAIN.count("classes(SAFE_RICH_OUTPUT)"), 1)
+        self.assertGreaterEqual(MAIN.count("classes(SNAPSHOT_RICH_OUTPUT)"), 2)
         self.assertIn('classes("w-full min-w-0 h-72 sm:h-96")', MAIN)
         self.assertIn('classes("w-full min-w-0 h-64 sm:h-80")', MAIN)
 

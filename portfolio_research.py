@@ -102,6 +102,21 @@ def research_display_row(row: dict[str, Any], now: datetime | None = None) -> di
     }
 
 
+def research_viewer_record(row: dict[str, Any]) -> dict[str, str] | None:
+    """Return persisted display data for the read-only research viewer."""
+    markdown = str(row.get("research_markdown") or "").strip()
+    if not markdown:
+        return None
+    return {
+        "ticker": str(row.get("ticker") or "").strip().upper(),
+        "last_success_at": str(row.get("last_success_at") or "Never"),
+        "model_used": str(row.get("model_used") or "—"),
+        "status": str(row.get("status") or "—"),
+        "next_due_at": str(row.get("next_due_at") or "Not scheduled"),
+        "research_markdown": markdown,
+    }
+
+
 class PortfolioResearchService:
     """NiceGUI-facing orchestration over the production research implementation."""
 

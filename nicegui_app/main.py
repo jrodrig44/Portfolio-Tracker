@@ -46,7 +46,7 @@ from nicegui_app.services.yahoo import clear_market_data_cache,current_market_da
 from nicegui_app.services.ticker_chart import DEFAULT_TICKER_CHART_RANGE, TICKER_CHART_RANGES, load_ticker_chart
 from portfolio_holdings_write import ASSET_TYPES, HoldingsWriteService, summarize_contributions
 from nicegui_app.services.operations import format_interval, operational_status
-from portfolio_research import PortfolioResearchService, research_contexts
+from portfolio_research import PortfolioResearchService, research_contexts, research_viewer_record
 from portfolio_statement_history import StatementHistoryService, statement_scan_diagnostic_records, statement_verified_display_records
 from hd_espp_analytics import analyze_hd_economics
 from hd_espp_history import HDESPPHistoryService, transaction_record_type
@@ -910,6 +910,32 @@ async def index() -> None:
                     ui.notify(str(exc), type="negative", timeout=0)
                     button.enable()
 
+            def open_existing_research(row: dict[str, Any]) -> None:
+                viewer_record = research_viewer_record(row)
+                if viewer_record is None:
+                    ui.notify(f'No stored supplemental research is available for {row.get("ticker") or "this holding"}.', type="info")
+                    return
+                with ui.dialog() as viewer, ui.card().classes(SNAPSHOT_VIEWER_CARD):
+                    with ui.row().classes("w-full shrink-0 items-start justify-between gap-3"):
+                        ui.label(f'{viewer_record["ticker"]} Existing Research').classes("text-xl sm:text-2xl font-semibold break-words")
+                        ui.button(icon="close", on_click=viewer.close).props("flat round aria-label='Close existing research viewer'")
+                    with ui.element("div").classes("w-full shrink-0 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 rounded-lg bg-gray-50 p-3 dark:bg-gray-800"):
+                        for label, value in [
+                            ("Last updated", viewer_record["last_success_at"]),
+                            ("Model", viewer_record["model_used"]),
+                            ("Freshness", viewer_record["status"]),
+                            ("Next refresh", viewer_record["next_due_at"]),
+                        ]:
+                            with ui.column().classes("min-w-0 gap-1"):
+                                ui.label(label).classes("text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400")
+                                ui.label(value).classes("font-medium break-words")
+                    ui.separator().classes("shrink-0")
+                    with ui.element("div").classes(SNAPSHOT_VIEWER_BODY):
+                        ui.markdown(viewer_record["research_markdown"]).classes(SNAPSHOT_RICH_OUTPUT)
+                    with ui.element("div").classes(f"{RESPONSIVE_ACTIONS} shrink-0"):
+                        ui.button("Close", on_click=viewer.close).props("outline").classes("w-full sm:w-auto min-h-11")
+                viewer.open()
+
             ui.label("Portfolio Holdings").classes("text-xl font-semibold mt-2")
             if not package["active"]:
                 ui.label("Add a holding before requesting supplemental research.").classes("text-gray-500 dark:text-gray-400")
@@ -933,9 +959,8 @@ async def index() -> None:
                         action.on_click(lambda _event, t=ticker, b=action: update_ticker(t, b))
                         if not row["can_update"]:
                             action.disable()
-                        if row["research_markdown"]:
-                            with ui.expansion("Existing Research", icon="description").classes("w-full"):
-                                ui.markdown(row["research_markdown"]).classes(SAFE_RICH_OUTPUT)
+                        existing = ui.button("Existing Research", icon="description").props("outline").classes("w-full sm:w-auto min-h-11")
+                        existing.on_click(lambda _event, research_row=row: open_existing_research(research_row))
             if package["archived"]:
                 ui.label("Archived Research").classes("text-xl font-semibold mt-2")
                 ui.label("Production retains research when a holding leaves the portfolio. Re-adding that ticker restores it through the normal holding synchronization path.").classes("text-sm text-gray-500 dark:text-gray-400")
