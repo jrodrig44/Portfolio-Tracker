@@ -162,6 +162,8 @@ There is no database copying or import/export synchronization. The databases, `.
 
 Before switching interfaces, use **System → Prepare Shared Data**, wait for **Shared data is ready**, stop the active server gracefully, and then start the other launcher. Streamlit rollback uses `http://localhost:8502`; production NiceGUI uses `http://localhost:8501`. Never run the handoff as a database copy.
 
+NiceGUI remains the production interface. Streamlit is a supported maintenance and rollback fallback: keep its launcher, imports, shared-data reads, core analysis, holdings CRUD, history, supplemental research, and exports operational. New product features should be implemented in NiceGUI first and need not be duplicated in Streamlit unless they change shared persisted data or are required for safe rollback compatibility. Streamlit saves must preserve database columns it does not own so newer NiceGUI metadata survives a fallback edit.
+
 ## Local Logs
 
 Structured application logs use JSONL, switch to new date-and-process-stamped files at local midnight, retain 14 calendar days, and redact sensitive fields. The configured filename patterns are:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 from datetime import datetime, timedelta
 import calendar
 import json
@@ -906,10 +907,42 @@ def _ensure_holdings_table_schema(conn: sqlite3.Connection) -> None:
 
 def _save_holdings(df: pd.DataFrame) -> None:
     normalized = _normalize_columns(df, drop_blank_tickers=True)
-    with sqlite3.connect(DEFAULT_DB_PATH) as conn:
-        _ensure_holdings_table_schema(conn)
-        conn.execute(f"DELETE FROM {HOLDINGS_TABLE}")
-        normalized.to_sql(HOLDINGS_TABLE, conn, if_exists="append", index=False)
+    with closing(sqlite3.connect(DEFAULT_DB_PATH)) as conn:
+        with conn:
+            _ensure_holdings_table_schema(conn)
+            schema_columns = [str(row[1]) for row in conn.execute(f"PRAGMA table_info({HOLDINGS_TABLE})")]
+            existing = pd.read_sql_query(f"SELECT * FROM {HOLDINGS_TABLE} ORDER BY rowid", conn)
+            owned_columns = [column for column in normalized.columns if column in schema_columns]
+            preserved_columns = [column for column in schema_columns if column not in owned_columns]
+
+            # Streamlit owns only the columns in its normalized edit model.  NiceGUI
+            # can add columns independently, so retain those values for every holding
+            # that remains in the submitted grid instead of replacing the table with
+            # a narrower dataframe and silently turning the newer fields into NULLs.
+            preserved_by_ticker: dict[str, list[dict[str, object]]] = {}
+            if preserved_columns and not existing.empty:
+                for row in existing.to_dict(orient="records"):
+                    ticker = str(row.get("ticker") or "").strip().upper()
+                    preserved_by_ticker.setdefault(ticker, []).append(
+                        {column: row.get(column) for column in preserved_columns}
+                    )
+
+            conn.execute(f"DELETE FROM {HOLDINGS_TABLE}")
+            quoted_table = '"' + HOLDINGS_TABLE.replace('"', '""') + '"'
+            for row in normalized.to_dict(orient="records"):
+                ticker = str(row.get("ticker") or "").strip().upper()
+                record = {column: row.get(column) for column in owned_columns}
+                matches = preserved_by_ticker.get(ticker, [])
+                if matches:
+                    record.update(matches.pop(0))
+                columns = list(record)
+                quoted_columns = ", ".join('"' + column.replace('"', '""') + '"' for column in columns)
+                placeholders = ", ".join("?" for _ in columns)
+                values = [None if pd.isna(record[column]) else record[column] for column in columns]
+                conn.execute(
+                    f"INSERT INTO {quoted_table} ({quoted_columns}) VALUES ({placeholders})",
+                    values,
+                )
     SupplementalResearchService(DEFAULT_DB_PATH).sync_holdings(normalized["ticker"].tolist())
     log_event(LOGGER, "holdings_saved", "Holdings saved", active_holdings_count=len(normalized))
 
