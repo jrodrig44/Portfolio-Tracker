@@ -464,7 +464,7 @@ async def index() -> None:
     with ui.left_drawer(value=False, bordered=True).classes("w-[min(86vw,20rem)]") as navigation_drawer:
         with ui.row().classes("w-full items-center justify-between gap-2 px-1"):
             ui.label("More sections").classes("text-lg font-semibold")
-            ui.button(icon="close", on_click=navigation_drawer.close).props("flat round aria-label='Close navigation menu'")
+            ui.button(icon="close", on_click=lambda: navigation_drawer.set_value(False)).props("flat round aria-label='Close navigation menu'")
         ui.separator()
         drawer_buttons = {
             name: ui.button(name).props("flat no-caps align=left").classes("w-full min-h-11 justify-start")
@@ -1525,7 +1525,7 @@ async def index() -> None:
         primary_tabs.value = primary_navigation_value(name)
         secondary_active_label.set_text(name if name not in PRIMARY_NAVIGATION_AREAS else "")
         secondary_active_label.set_visibility(name not in PRIMARY_NAVIGATION_AREAS)
-        navigation_drawer.close()
+        navigation_drawer.set_value(False)
         await refresh_section(name)
 
     async def navigate_primary(event: Any) -> None:

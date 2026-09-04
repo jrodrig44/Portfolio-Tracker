@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
+from nicegui.elements.drawer import Drawer
+
 from nicegui_app.services.ui_state import (
     NAVIGATION_AREAS,
     PRIMARY_NAVIGATION_AREAS,
@@ -52,7 +54,9 @@ class NavigationDrawerTests(unittest.TestCase):
 
     def test_drawer_selection_closes_and_deep_sections_remain_reachable(self) -> None:
         selection = MAIN.split("async def select_navigation", 1)[1].split("async def navigate_primary", 1)[0]
-        self.assertIn("navigation_drawer.close()", selection)
+        self.assertIn("navigation_drawer.set_value(False)", selection)
+        self.assertTrue(hasattr(Drawer, "set_value"))
+        self.assertNotIn("navigation_drawer.close", MAIN)
         for name in ("History", "HD / ESPP History", "Supplemental Research", "AI Analysis", "Statement History"):
             self.assertIn(name, SECONDARY_NAVIGATION_AREAS)
             self.assertEqual(canonical_navigation(name), name)
