@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from nicegui.elements.drawer import Drawer
+from nicegui_app.services.formatting import HEADER_FOREGROUND, HEADER_ICON_CONTROL, HEADER_PRIMARY_TAB
 
 from nicegui_app.services.ui_state import (
     NAVIGATION_AREAS,
@@ -19,6 +20,21 @@ MAIN = (Path(__file__).resolve().parents[1] / "nicegui_app" / "main.py").read_te
 
 
 class NavigationDrawerTests(unittest.TestCase):
+    def test_header_navigation_has_explicit_high_contrast_foregrounds(self) -> None:
+        header = MAIN.split("with ui.header()", 1)[1].split("with ui.column().classes", 1)[0]
+        self.assertIn("text-white", HEADER_FOREGROUND)
+        self.assertIn("text-white", HEADER_ICON_CONTROL)
+        self.assertIn("hover:bg-white/10", HEADER_ICON_CONTROL)
+        self.assertIn("focus-visible:ring", HEADER_ICON_CONTROL)
+        self.assertIn("text-white", HEADER_PRIMARY_TAB)
+        self.assertIn("focus-visible:ring", HEADER_PRIMARY_TAB)
+        self.assertIn("HEADER_FOREGROUND", header)
+        self.assertIn("HEADER_PRIMARY_TAB", header)
+        self.assertEqual(header.count("HEADER_ICON_CONTROL"), 2)
+        self.assertGreaterEqual(header.count("color=white"), 2)
+        self.assertIn("active-color=white", header)
+        self.assertIn("indicator-color=accent", header)
+
     def test_navigation_groups_cover_every_area_once_and_exclude_system_from_tabs_and_drawer(self) -> None:
         self.assertEqual(PRIMARY_NAVIGATION_AREAS, (
             "Holdings", "Portfolio Analysis", "Portfolio Insights", "Portfolio Health",

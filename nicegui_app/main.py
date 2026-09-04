@@ -28,7 +28,7 @@ from nicegui_app.services.appearance import APPEARANCE_OPTIONS, APPEARANCE_STORA
 from nicegui_app.services.analysis import analysis_package
 from nicegui_app.services.configuration import DB_REFRESH_INTERVAL_SECONDS
 from nicegui_app.services.exports import YahooExportEnrichmentState,export_package
-from nicegui_app.services.formatting import CONFIRM_DIALOG_CARD, DIALOG_CARD, EMPTY_STATE, FULL_WIDTH_CONTROL, RESPONSIVE_ACTIONS, RESPONSIVE_CARD_GRID, RICH_OUTPUT_CSS, SAFE_RICH_OUTPUT, SCROLL_TABLE, SNAPSHOT_RICH_OUTPUT, SNAPSHOT_VIEWER_BODY, SNAPSHOT_VIEWER_CARD, SYSTEM_CARD, SYSTEM_CARD_GRID, SYSTEM_LABEL, SYSTEM_PATH_VALUE, SYSTEM_VALUE, TICKER_CHART_BODY, TICKER_CHART_CARD, dividend_seasonality_chart_options, format_count, format_currency, format_field_value, format_percentage, format_score, format_status, format_table_records, human_label
+from nicegui_app.services.formatting import CONFIRM_DIALOG_CARD, DIALOG_CARD, EMPTY_STATE, FULL_WIDTH_CONTROL, HEADER_FOREGROUND, HEADER_ICON_CONTROL, HEADER_PRIMARY_TAB, RESPONSIVE_ACTIONS, RESPONSIVE_CARD_GRID, RICH_OUTPUT_CSS, SAFE_RICH_OUTPUT, SCROLL_TABLE, SNAPSHOT_RICH_OUTPUT, SNAPSHOT_VIEWER_BODY, SNAPSHOT_VIEWER_CARD, SYSTEM_CARD, SYSTEM_CARD_GRID, SYSTEM_LABEL, SYSTEM_PATH_VALUE, SYSTEM_VALUE, TICKER_CHART_BODY, TICKER_CHART_CARD, dividend_seasonality_chart_options, format_count, format_currency, format_field_value, format_percentage, format_score, format_status, format_table_records, human_label
 from nicegui_app.services.health import health_package
 from nicegui_app.services.history import history_package
 from nicegui_app.services.insights import insights_package
@@ -473,10 +473,10 @@ async def index() -> None:
 
     with ui.header().classes("flex-wrap items-center gap-2 shadow-sm px-2 sm:px-4"):
         with ui.row().classes("items-center gap-1 shrink-0"):
-            menu_button = ui.button(icon="menu", on_click=navigation_drawer.toggle).props("flat round aria-label='More sections'")
+            menu_button = ui.button(icon="menu", on_click=navigation_drawer.toggle).props("flat round color=white aria-label='More sections'").classes(HEADER_ICON_CONTROL)
             menu_button.tooltip("More sections")
-            ui.label("Portfolio Tracker").classes("text-base sm:text-xl font-semibold whitespace-nowrap")
-        primary_tabs = ui.tabs(value=primary_navigation_value(ui_state.selected_navigation)).classes("order-3 md:order-none w-full md:w-auto md:flex-1 min-w-0").props("dense no-caps align=justify")
+            ui.label("Portfolio Tracker").classes(f"{HEADER_FOREGROUND} text-base sm:text-xl font-semibold whitespace-nowrap")
+        primary_tabs = ui.tabs(value=primary_navigation_value(ui_state.selected_navigation)).classes(f"{HEADER_FOREGROUND} order-3 md:order-none w-full md:w-auto md:flex-1 min-w-0").props("dense no-caps align=justify active-color=white indicator-color=accent")
         primary_labels = {
             "Holdings": "Holdings",
             "Portfolio Analysis": "Analysis",
@@ -485,11 +485,11 @@ async def index() -> None:
         }
         with primary_tabs:
             primary_tab_objects = {
-                name: ui.tab(name=name, label=primary_labels[name]).classes("min-w-0 px-1 sm:px-3 text-xs sm:text-sm")
+                name: ui.tab(name=name, label=primary_labels[name]).classes(f"{HEADER_PRIMARY_TAB} min-w-0 px-1 sm:px-3 text-xs sm:text-sm")
                 for name in PRIMARY_NAVIGATION_AREAS
             }
-        secondary_active_label = ui.label("").classes("hidden lg:block text-xs rounded bg-white/20 px-2 py-1")
-        system_button = ui.button(icon="settings").props("flat round aria-label='System status and settings'")
+        secondary_active_label = ui.label("").classes(f"{HEADER_FOREGROUND} hidden lg:block text-xs rounded bg-white/20 px-2 py-1")
+        system_button = ui.button(icon="settings").props("flat round color=white aria-label='System status and settings'").classes(HEADER_ICON_CONTROL)
         system_button.tooltip("System status and settings")
     with ui.column().classes("w-full max-w-screen-2xl mx-auto p-2 sm:p-4 gap-4"):
         with ui.row().classes("w-full flex-wrap items-center gap-2"):
