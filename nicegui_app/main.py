@@ -1056,6 +1056,7 @@ async def index() -> None:
                     ui.label(snapshot["projection_contribution_note"]).classes("text-gray-500 dark:text-gray-400")
                     snowball = package["snowball"]
                     ui.label("Snowball Tracker").classes("text-xl font-semibold mt-3")
+                    ui.label("Snowball calculations exclude HD employer stock and ESPP activity. Regular portfolio contributions are used; ESPP and special contributions are excluded.").classes("text-sm text-gray-500 dark:text-gray-400")
                     metric_cards([
                         ("Annual Contributions", currency(snowball["annual_contribution"])),
                         ("Current Annual Income", currency(snowball["current_annual_income"])),

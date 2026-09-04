@@ -71,21 +71,35 @@ def years_to_income_target(current_income: float, target_income: float, annual_i
 
 
 def snowball_tracker(
-    current_annual_income: float,
-    weighted_yield_pct: float,
+    current_annual_income: float | pd.DataFrame,
+    weighted_yield_pct: float | None = None,
     regular_biweekly_contribution: float = 280.0,
 ) -> dict[str, Any]:
     """Build the portfolio-income snowball model used by Portfolio Analysis.
 
-    Targets are multiples of the regular Portfolio Analysis contribution
-    assumption. ESPP payroll and special contributions—including HD ESPP—are
-    excluded, matching Streamlit. Estimated years intentionally assume linear
+    DataFrame inputs are normalized and filtered so every HD row is excluded
+    from Snowball income, value, and yield. Targets are multiples of the regular
+    Portfolio Analysis contribution assumption. ESPP payroll and special
+    contributions—including HD ESPP—are excluded, matching Streamlit.
+    Estimated years intentionally assume linear
     income growth from one year's contribution at today's weighted yield; this
     is not a DRIP or compound-growth simulation.
     """
-    income = finite(current_annual_income)
+    snowball_value: float | None = None
+    if isinstance(current_annual_income, pd.DataFrame):
+        source = current_annual_income.copy()
+        tickers = source.get("ticker", pd.Series("", index=source.index, dtype=str))
+        # Snowball models the regular dividend portfolio; all HD custody and
+        # beneficial-exposure representations are intentionally out of scope.
+        source = source[~tickers.astype(str).str.strip().str.upper().eq("HD")]
+        income = float(pd.to_numeric(source.get("annual_income", pd.Series(dtype=float)), errors="coerce").fillna(0.0).sum())
+        snowball_value = float(pd.to_numeric(source.get("market_value", pd.Series(dtype=float)), errors="coerce").fillna(0.0).sum())
+        yield_pct = income / snowball_value * 100 if snowball_value else 0.0
+    else:
+        income = finite(current_annual_income)
+        yield_pct = finite(weighted_yield_pct)
     annual_contribution = finite(regular_biweekly_contribution) * 26
-    annual_income_growth = annual_contribution * (finite(weighted_yield_pct) / 100)
+    annual_income_growth = annual_contribution * (yield_pct / 100)
     milestones = []
     for name, multiple in SNOWBALL_MILESTONES:
         target = annual_contribution * multiple
@@ -106,6 +120,9 @@ def snowball_tracker(
     return {
         "annual_contribution": annual_contribution,
         "current_annual_income": income,
+        "current_monthly_income": income / 12,
+        "snowball_portfolio_value": snowball_value,
+        "weighted_yield_pct": yield_pct,
         "income_vs_contribution_pct": income / annual_contribution * 100 if annual_contribution > 0 else 0.0,
         "annual_income_growth": annual_income_growth,
         "milestones": milestones,
@@ -168,7 +185,7 @@ def build_analysis(metrics: pd.DataFrame, fund_weights: dict[str,dict[str,float]
     # Analysis describes economic exposure, so reconciled Equate HD supplements
     # (and never replaces or duplicates) the Merrill custody row.
     df=beneficial_metrics_frame(metrics, hd_historical_context)
-    if df.empty:return {"totals":{},"summary":{},"snapshot":{},"snowball":snowball_tracker(0.0,0.0,projection_biweekly),"concentration":{},"asset_allocation":[],"direct_sector":[],"income_quality":[],"income_quality_summary":compute_income_quality(df,{},{}),"contributions":contribution_context(df),"fund_lookthrough":resolve_fund_lookthrough(df,fund_weights)}
+    if df.empty:return {"totals":{},"summary":{},"snapshot":{},"snowball":snowball_tracker(df,regular_biweekly_contribution=projection_biweekly),"concentration":{},"asset_allocation":[],"direct_sector":[],"income_quality":[],"income_quality_summary":compute_income_quality(df,{},{}),"contributions":contribution_context(df),"fund_lookthrough":resolve_fund_lookthrough(df,fund_weights)}
     asset_types=df["asset_type"] if "asset_type" in df else pd.Series("Stock",index=df.index)
     sectors=df["sector"] if "sector" in df else pd.Series("",index=df.index)
     df["asset_type"]=asset_types.map(canonical_asset_type);df["sector"]=sectors.map(normalize_sector)
@@ -191,4 +208,4 @@ def build_analysis(metrics: pd.DataFrame, fund_weights: dict[str,dict[str,float]
     overall_coverage=(direct_resolved+lookthrough["resolved_value"])/value*100 if value else 0
     completeness={"direct_sector_classification_coverage_pct":direct_resolved/direct_total*100 if direct_total else 100,"fund_lookthrough_coverage_pct":lookthrough["fund_lookthrough_completeness_pct"],"overall_resolved_exposure_coverage_pct":max(0.0,min(overall_coverage,100.0))}
     totals={"total_portfolio_value":value,"total_cost_basis":cost,"total_unrealized_gain":unrealized,"unrealized_gain_basis_scope":df.attrs.get("unrealized_gain_basis_scope","custody_only_known_basis"),"total_estimated_annual_income":income,"weighted_portfolio_yield":income/value*100 if value else 0,"largest_holding":top.ticker,"largest_holding_weight":finite(top.market_value)/value*100 if value else 0,"economic_exposure_allocation":econ.to_dict("records"),"income_allocation_by_asset_type":assets.to_dict("records")}
-    return {"totals":totals,"summary":{"active_contributors":sum(r["total_contribution"]>0 for r in contributions["holdings"])},"snapshot":{"projected_10y_value":future_value(value,expected_return,projection_biweekly,10),"projected_20y_value":future_value(value,expected_return,projection_biweekly,20),"projection_contribution_note":"Projection calculations use the regular $280 biweekly contribution assumption and do not include ESPP contributions unless otherwise stated."},"snowball":snowball_tracker(income,totals["weighted_portfolio_yield"],projection_biweekly),"concentration":concentration,"hd_historical_context":historical or {"available":False},"asset_allocation":assets.to_dict("records"),"direct_sector":direct.to_dict("records"),"income_quality":quality_rows,"income_quality_summary":quality,"contributions":contributions,"fund_lookthrough":lookthrough,"data_completeness":completeness}
+    return {"totals":totals,"summary":{"active_contributors":sum(r["total_contribution"]>0 for r in contributions["holdings"])},"snapshot":{"projected_10y_value":future_value(value,expected_return,projection_biweekly,10),"projected_20y_value":future_value(value,expected_return,projection_biweekly,20),"projection_contribution_note":"Projection calculations use the regular $280 biweekly contribution assumption and do not include ESPP contributions unless otherwise stated."},"snowball":snowball_tracker(df,regular_biweekly_contribution=projection_biweekly),"concentration":concentration,"hd_historical_context":historical or {"available":False},"asset_allocation":assets.to_dict("records"),"direct_sector":direct.to_dict("records"),"income_quality":quality_rows,"income_quality_summary":quality,"contributions":contributions,"fund_lookthrough":lookthrough,"data_completeness":completeness}

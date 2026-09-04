@@ -6091,7 +6091,8 @@ def _render_analysis_tab(metrics: pd.DataFrame, mobile_mode: bool = False, hd_hi
     st.dataframe(pd.DataFrame(growth_rows), width="stretch", hide_index=True)
 
     st.markdown("#### Snowball Tracker")
-    snowball = shared_snowball_tracker(total_income, weighted_yield_pct, biweekly_contribution)
+    st.caption("Snowball calculations exclude HD employer stock and ESPP activity. Regular portfolio contributions are used; ESPP and special contributions are excluded.")
+    snowball = shared_snowball_tracker(analysis_df, regular_biweekly_contribution=biweekly_contribution)
     snowball_rows = [
         {"Metric": "Annual Contributions", "Value": _format_currency(snowball["annual_contribution"])},
         {"Metric": "Current Annual Income", "Value": _format_currency(snowball["current_annual_income"])},

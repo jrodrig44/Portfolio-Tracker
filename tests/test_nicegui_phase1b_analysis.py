@@ -40,20 +40,20 @@ class NiceGuiPhase1BAnalysisTests(unittest.TestCase):
         # Streamlit's Snowball Tracker uses its regular $280 analysis assumption;
         # holdings, HD ESPP, and special contributions do not alter this value.
         self.assertEqual(snowball["annual_contribution"], 280 * 26)
-        self.assertEqual(snowball["current_annual_income"], 52.0)
-        self.assertAlmostEqual(snowball["income_vs_contribution_pct"], 52 / 7280 * 100)
+        self.assertEqual(snowball["current_annual_income"], 36.0)
+        self.assertAlmostEqual(snowball["income_vs_contribution_pct"], 36 / 7280 * 100)
         self.assertEqual(
             [row["target_annual_income"] for row in snowball["milestones"]],
             [1820.0, 3640.0, 7280.0, 14560.0],
         )
-        growth = 7280 * 0.052
+        growth = 7280 * 0.06
         for row in snowball["milestones"]:
-            self.assertAlmostEqual(row["progress_pct"], 52 / row["target_annual_income"] * 100)
-            self.assertAlmostEqual(row["years_to_reach"], (row["target_annual_income"] - 52) / growth)
+            self.assertAlmostEqual(row["progress_pct"], 36 / row["target_annual_income"] * 100)
+            self.assertAlmostEqual(row["years_to_reach"], (row["target_annual_income"] - 36) / growth)
         next_target = snowball["next_milestone"]
         self.assertEqual(next_target["name"], "Early Snowball (25%)")
-        self.assertEqual(next_target["amount_still_needed"], 1768.0)
-        self.assertEqual(next_target["estimated_months_away"], round((1768 / growth) * 12))
+        self.assertEqual(next_target["amount_still_needed"], 1784.0)
+        self.assertEqual(next_target["estimated_months_away"], round((1784 / growth) * 12))
 
     def test_snowball_progress_reached_unreachable_and_final_milestone_parity(self):
         reached = snowball_tracker(20_000, 5.0)
@@ -85,6 +85,7 @@ class NiceGuiPhase1BAnalysisTests(unittest.TestCase):
         analysis_renderer = source[source.index("    async def render_analysis()") : source.index("    def render_ai()")]
         self.assertIn('snowball = package["snowball"]', analysis_renderer)
         self.assertIn('ui.label("Snowball Tracker")', analysis_renderer)
+        self.assertIn("Snowball calculations exclude HD employer stock and ESPP activity", analysis_renderer)
         self.assertIn('ui.linear_progress(value=milestone["display_progress_pct"] / 100)', analysis_renderer)
         self.assertIn('next_milestone = snowball["next_milestone"]', analysis_renderer)
 
