@@ -38,14 +38,63 @@ class NetworkDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(WindowsResetObserver().filter(record))
 
     def test_disabled_diagnostics_do_not_configure_logging_or_hooks(self):
-        with patch.dict("os.environ", {"PORTFOLIO_NETWORK_DIAGNOSTICS": "0"}), patch("network_diagnostics.configure_structured_logging") as configure:
+        with patch.dict("os.environ", {"PORTFOLIO_NETWORK_DIAGNOSTICS": "0"}), patch("network_diagnostics.configure_structured_logging") as configure, patch("network_diagnostics.logging.getLogger") as get_logger:
             app = Mock()
+            original_attributes = vars(app).copy()
             diagnostic("test")
+            install_client_diagnostics(app)
             install_client_diagnostics(app)
             with network_operation("test"):
                 pass
             configure.assert_not_called()
+            get_logger.assert_not_called()
             self.assertEqual(app.mock_calls, [])
+            self.assertEqual(vars(app), original_attributes)
+
+    def test_enabled_installation_is_idempotent_and_preserves_other_filters(self):
+        logger = logging.getLogger("asyncio")
+        unrelated_filter = logging.Filter()
+        app = Mock()
+        with patch.dict("os.environ", {"PORTFOLIO_NETWORK_DIAGNOSTICS": "1"}), patch.object(logger, "filters", [unrelated_filter]), patch("network_diagnostics.diagnostic") as event:
+            install_client_diagnostics(app)
+            install_client_diagnostics(app)
+            app.add_middleware.assert_called_once_with(ConnectionDiagnosticsMiddleware)
+            for hook in (app.on_connect, app.on_disconnect, app.on_startup, app.on_shutdown):
+                hook.assert_called_once()
+            self.assertEqual(sum(isinstance(item, WindowsResetObserver) for item in logger.filters), 1)
+            self.assertIn(unrelated_filter, logger.filters)
+            client = SimpleNamespace(id="client-id")
+            app.on_connect.call_args.args[0](client)
+            app.on_disconnect.call_args.args[0](client)
+            app.on_startup.call_args.args[0]()
+            app.on_shutdown.call_args.args[0]()
+            self.assertEqual([call.args[0] for call in event.call_args_list], [
+                "nicegui_client_connected", "nicegui_client_disconnected", "nicegui_startup", "nicegui_shutdown",
+            ])
+
+    def test_distinct_apps_each_receive_diagnostics(self):
+        logger = logging.getLogger("asyncio")
+        apps = [Mock(), Mock()]
+        with patch.dict("os.environ", {"PORTFOLIO_NETWORK_DIAGNOSTICS": "1"}), patch.object(logger, "filters", []):
+            for app in apps:
+                install_client_diagnostics(app)
+                install_client_diagnostics(app)
+                app.add_middleware.assert_called_once_with(ConnectionDiagnosticsMiddleware)
+                for hook in (app.on_connect, app.on_disconnect, app.on_startup, app.on_shutdown):
+                    hook.assert_called_once()
+            self.assertEqual(sum(isinstance(item, WindowsResetObserver) for item in logger.filters), 1)
+
+    def test_setup_failure_propagates_without_completion_marker(self):
+        logger = logging.getLogger("asyncio")
+        for failing_step in ("add_middleware", "on_connect", "on_disconnect", "on_startup", "on_shutdown"):
+            with self.subTest(failing_step=failing_step), patch.dict("os.environ", {"PORTFOLIO_NETWORK_DIAGNOSTICS": "1"}), patch.object(logger, "filters", []):
+                app = Mock()
+                error = RuntimeError("registration failed")
+                getattr(app, failing_step).side_effect = error
+                with self.assertRaises(RuntimeError) as caught:
+                    install_client_diagnostics(app)
+                self.assertIs(caught.exception, error)
+                self.assertIsNot(vars(app).get("_portfolio_tracker_network_diagnostics_installed"), True)
 
     def test_network_failure_is_reraised_without_private_exception_text(self):
         error = ConnectionResetError("private request payload")

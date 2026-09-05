@@ -12,6 +12,8 @@ import uuid
 from logging_setup import configure_structured_logging, log_event
 
 _LOGGER_LOCK = threading.Lock()
+_INSTALLATION_LOCK = threading.Lock()
+_INSTALLATION_MARKER = "_portfolio_tracker_network_diagnostics_installed"
 
 
 class WindowsResetObserver(logging.Filter):
@@ -108,13 +110,18 @@ class ConnectionDiagnosticsMiddleware:
 
 
 def install_client_diagnostics(app) -> None:
+    """Install once per app; propagate setup failures without marking completion."""
     if os.environ.get("PORTFOLIO_NETWORK_DIAGNOSTICS") != "1":
         return
-    asyncio_logger = logging.getLogger("asyncio")
-    if not any(isinstance(item, WindowsResetObserver) for item in asyncio_logger.filters):
-        asyncio_logger.addFilter(WindowsResetObserver())
-    app.add_middleware(ConnectionDiagnosticsMiddleware)
-    app.on_connect(lambda client: diagnostic("nicegui_client_connected", client_id=client.id))
-    app.on_disconnect(lambda client: diagnostic("nicegui_client_disconnected", client_id=client.id))
-    app.on_startup(lambda: diagnostic("nicegui_startup", parent_pid=os.getppid()))
-    app.on_shutdown(lambda: diagnostic("nicegui_shutdown"))
+    with _INSTALLATION_LOCK:
+        if getattr(app, _INSTALLATION_MARKER, False) is True:
+            return
+        asyncio_logger = logging.getLogger("asyncio")
+        if not any(isinstance(item, WindowsResetObserver) for item in asyncio_logger.filters):
+            asyncio_logger.addFilter(WindowsResetObserver())
+        app.add_middleware(ConnectionDiagnosticsMiddleware)
+        app.on_connect(lambda client: diagnostic("nicegui_client_connected", client_id=client.id))
+        app.on_disconnect(lambda client: diagnostic("nicegui_client_disconnected", client_id=client.id))
+        app.on_startup(lambda: diagnostic("nicegui_startup", parent_pid=os.getppid()))
+        app.on_shutdown(lambda: diagnostic("nicegui_shutdown"))
+        setattr(app, _INSTALLATION_MARKER, True)
