@@ -36,7 +36,9 @@ def _safe_value(key: str, value: object) -> object:
 class StructuredJsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         fields: dict[str, Any] = {
-            "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "timestamp": datetime.fromtimestamp(record.created).astimezone().isoformat(timespec="milliseconds"),
+            "pid": record.process,
+            "thread": record.threadName,
             "level": record.levelname,
             "process": getattr(record, "process_name", "unknown"),
             "logger": record.name,

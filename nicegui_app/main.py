@@ -19,6 +19,7 @@ from project_environment import ai_provider_status, initialize_project_environme
 ENVIRONMENT_STATUS = initialize_project_environment(PROJECT_ROOT)
 
 from nicegui import app, run, ui
+from network_diagnostics import install_client_diagnostics
 from nicegui_app.process_lifecycle import ShutdownInProgress, lifecycle, start_launcher_watchdog, start_shutdown_request_watcher
 from nicegui_app.research_worker_lifecycle import start_research_worker, stop_research_worker
 from nicegui_app.market_refresh_worker import start_market_refresh_worker, stop_market_refresh_worker
@@ -101,6 +102,7 @@ HOLDING_NUMERIC_VALUE_PARSER = (
     "const parsed = Number(input); return input !== '' && Number.isFinite(parsed) ? parsed : params.oldValue; }"
 )
 
+install_client_diagnostics(app)
 app.on_startup(start_research_worker)
 app.on_shutdown(stop_research_worker)
 app.on_startup(start_market_refresh_worker)

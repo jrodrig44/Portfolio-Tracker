@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 import exchange_calendars as xcals
 import pandas as pd
+from network_diagnostics import network_operation, diagnostic
 
 from nicegui_app.services.configuration import (
     MARKET_BACKGROUND_CHECK_INTERVAL_SECONDS,
@@ -125,7 +126,8 @@ class MarketRefreshWorker:
         try:
             if closing:
                 self.price_cache_clearer()
-            result = self.coordinator.refresh(force=True)
+            with network_operation("market_refresh"):
+                result = self.coordinator.refresh(force=True)
         except Exception:
             LOGGER.exception("Background market refresh temporarily failed; a later check will retry.")
             return None
@@ -153,6 +155,7 @@ class MarketRefreshWorker:
             self._thread = threading.Thread(target=self._run, name="market-refresh-worker", daemon=True)
             self._thread.start()
         LOGGER.info("Background market refresh worker started.")
+        diagnostic("market_worker_started")
 
     def stop(self) -> None:
         with self._lifecycle_lock:
@@ -163,6 +166,7 @@ class MarketRefreshWorker:
             thread.join(timeout=max(self.check_interval_seconds + 1.0, 2.0))
         if thread is not None:
             LOGGER.info("Background market refresh worker stopped.")
+            diagnostic("market_worker_stopped")
 
 
 _worker = MarketRefreshWorker()

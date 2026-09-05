@@ -6,6 +6,7 @@ from typing import Any
 import pandas as pd
 import yfinance as yf
 from yfinance.exceptions import YFDataException
+from network_diagnostics import diagnostic, network_operation
 
 from nicegui_app.services.configuration import (
     DIVIDEND_TIMING_CACHE_TTL_SECONDS,
@@ -27,8 +28,12 @@ LOGGER = logging.getLogger("portfolio_tracker")
 
 def _cached(key:tuple[str,str],loader,ttl:float):
     now=time.monotonic(); existing=_cache.get(key)
-    if existing and now-existing[0]<ttl:return existing[1]
-    value=loader();_cache[key]=(now,value);return value
+    if existing and now-existing[0]<ttl:
+        diagnostic("yahoo_cache_hit", cache_family=key[1])
+        return existing[1]
+    with network_operation("yahoo_" + key[1]):
+        value=loader()
+    _cache[key]=(now,value);return value
 
 
 def clear_market_data_cache() -> None:
@@ -78,8 +83,10 @@ def current_market_data(tickers:list[str]|tuple[str,...])->tuple[dict[str,float]
                 elif len(normalized)==1 and "Close" in history:
                     values=pd.to_numeric(history["Close"],errors="coerce").dropna()
                     if not values.empty:output[normalized[0]]=float(values.iloc[-1])
-        except Exception:
-            pass
+        except Exception as exc:
+            diagnostic("yahoo_prices_failed", error_type=type(exc).__name__)
+        diagnostic("yahoo_prices_result", requested_count=len(normalized),
+                   valid_count=sum(value > 0 for value in output.values()))
         return output
     prices=_cached(("|".join(normalized),"prices"),prices_loader,PRICE_CACHE_TTL_SECONDS)
     yields={}

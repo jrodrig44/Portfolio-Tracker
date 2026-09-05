@@ -7,6 +7,7 @@ import os
 from typing import Any
 
 import httpx
+from network_diagnostics import diagnostic, network_operation
 
 ONEMIN_AI_DEFAULT_BASE_URL = "https://api.1min.ai"
 ONEMIN_AI_DEFAULT_MODEL = "gpt-5.6-sol"
@@ -119,12 +120,14 @@ class OneMinAIClient:
             write=self.timeout_seconds,
         )
         try:
-            response = httpx.post(
-                self.chat_url,
-                headers={"Content-Type": "application/json", "API-KEY": str(self.api_key)},
-                json=payload,
-                timeout=timeout,
-            )
+            with network_operation("onemin_ai_http"):
+                response = httpx.post(
+                    self.chat_url,
+                    headers={"Content-Type": "application/json", "API-KEY": str(self.api_key)},
+                    json=payload,
+                    timeout=timeout,
+                )
+                diagnostic("onemin_ai_http_status", http_status=response.status_code)
         except httpx.TimeoutException as exc:
             raise OneMinAITimeoutError("1min.AI request timed out.") from exc
         except httpx.RequestError as exc:
