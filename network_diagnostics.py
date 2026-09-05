@@ -110,18 +110,33 @@ class ConnectionDiagnosticsMiddleware:
 
 
 def install_client_diagnostics(app) -> None:
-    """Install once per app; propagate setup failures without marking completion."""
+    """Install opt-in diagnostics per app under a lock, resuming partial setup.
+
+    Setup errors propagate; neither installation nor retries suppress errors.
+    """
     if os.environ.get("PORTFOLIO_NETWORK_DIAGNOSTICS") != "1":
         return
     with _INSTALLATION_LOCK:
         if getattr(app, _INSTALLATION_MARKER, False) is True:
             return
+        # The observer belongs to the process logger; NiceGUI registrations
+        # belong to each app and must not share a process-wide completion flag.
         asyncio_logger = logging.getLogger("asyncio")
         if not any(isinstance(item, WindowsResetObserver) for item in asyncio_logger.filters):
             asyncio_logger.addFilter(WindowsResetObserver())
-        app.add_middleware(ConnectionDiagnosticsMiddleware)
-        app.on_connect(lambda client: diagnostic("nicegui_client_connected", client_id=client.id))
-        app.on_disconnect(lambda client: diagnostic("nicegui_client_disconnected", client_id=client.id))
-        app.on_startup(lambda: diagnostic("nicegui_startup", parent_pid=os.getppid()))
-        app.on_shutdown(lambda: diagnostic("nicegui_shutdown"))
+        registrations = (
+            ("middleware", app.add_middleware, ConnectionDiagnosticsMiddleware),
+            ("connect_hook", app.on_connect, lambda client: diagnostic("nicegui_client_connected", client_id=client.id)),
+            ("disconnect_hook", app.on_disconnect, lambda client: diagnostic("nicegui_client_disconnected", client_id=client.id)),
+            ("startup_hook", app.on_startup, lambda: diagnostic("nicegui_startup", parent_pid=os.getppid())),
+            ("shutdown_hook", app.on_shutdown, lambda: diagnostic("nicegui_shutdown")),
+        )
+        # Successful registrations survive a later failure. Record each one so
+        # retries resume without duplicating hooks or relying on framework rollback.
+        for component, register, argument in registrations:
+            marker = f"_portfolio_tracker_network_diagnostics_{component}_installed"
+            if getattr(app, marker, False) is not True:
+                register(argument)
+                setattr(app, marker, True)
+        # Only a fully registered app may take the completion fast path.
         setattr(app, _INSTALLATION_MARKER, True)

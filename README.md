@@ -180,6 +180,24 @@ $streamlitLog = Get-ChildItem ".\logs\streamlit.*.jsonl" | Sort-Object LastWrite
 Get-Content $streamlitLog.FullName -Wait
 ```
 
+### Optional network diagnostics
+
+Network diagnostics are disabled by default. Enable them to correlate rare
+Windows/NiceGUI/network connection-reset events without suppressing `WinError 10054`
+or other network errors:
+
+```powershell
+$env:PORTFOLIO_NETWORK_DIAGNOSTICS = '1'
+.\run_nicegui.ps1
+```
+
+Logs are written to `logs/network_diagnostics.YYYY-MM-DD.PID.jsonl`. Diagnostics
+intentionally omit API keys, authorization headers, cookies, request/response
+bodies, holdings, and statement contents. Installation is idempotent per app,
+including retries after a partial setup failure: successfully registered
+middleware and hooks are retained and skipped on retry. See the
+[Windows network investigation](docs/windows-network-investigation.md) for details.
+
 ## Notes
 
 - Yahoo price and supplemental-data lookups require internet access and may be incomplete for some holdings.

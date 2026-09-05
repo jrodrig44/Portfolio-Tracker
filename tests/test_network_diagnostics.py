@@ -96,6 +96,42 @@ class NetworkDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(caught.exception, error)
                 self.assertIsNot(vars(app).get("_portfolio_tracker_network_diagnostics_installed"), True)
 
+    def test_partial_setup_retry_registers_each_component_successfully_once(self):
+        logger = logging.getLogger("asyncio")
+        steps = ("add_middleware", "on_connect", "on_disconnect", "on_startup", "on_shutdown")
+        for failing_step in steps:
+            with self.subTest(failing_step=failing_step), patch.dict("os.environ", {"PORTFOLIO_NETWORK_DIAGNOSTICS": "1"}), patch.object(logger, "filters", [logging.Filter()]):
+                unrelated_filter = logger.filters[0]
+                successful_registrations = {step: [] for step in steps}
+                app = Mock()
+                error = RuntimeError("registration failed")
+                failure_enabled = True
+
+                def register(step, argument):
+                    if step == failing_step and failure_enabled:
+                        raise error
+                    successful_registrations[step].append(argument)
+
+                for step in steps:
+                    getattr(app, step).side_effect = lambda argument, step=step: register(step, argument)
+                with self.assertRaises(RuntimeError) as caught:
+                    install_client_diagnostics(app)
+                self.assertIs(caught.exception, error)
+                self.assertIsNot(vars(app).get("_portfolio_tracker_network_diagnostics_installed"), True)
+                for index, step in enumerate(steps):
+                    self.assertEqual(len(successful_registrations[step]), int(index < steps.index(failing_step)))
+
+                failure_enabled = False
+                install_client_diagnostics(app)
+                install_client_diagnostics(app)
+                for step in steps:
+                    self.assertEqual(len(successful_registrations[step]), 1, step)
+                    self.assertEqual(getattr(app, step).call_count, 2 if step == failing_step else 1)
+                self.assertIs(successful_registrations["add_middleware"][0], ConnectionDiagnosticsMiddleware)
+                self.assertIs(vars(app).get("_portfolio_tracker_network_diagnostics_installed"), True)
+                self.assertIn(unrelated_filter, logger.filters)
+                self.assertEqual(sum(isinstance(item, WindowsResetObserver) for item in logger.filters), 1)
+
     def test_network_failure_is_reraised_without_private_exception_text(self):
         error = ConnectionResetError("private request payload")
         with patch.dict("os.environ", {"PORTFOLIO_NETWORK_DIAGNOSTICS": "1"}), patch("network_diagnostics.diagnostic") as event:
