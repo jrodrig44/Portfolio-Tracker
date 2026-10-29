@@ -110,7 +110,7 @@ class NiceGuiStartupTests(unittest.TestCase):
 
     def test_launcher_rejects_duplicate_port_and_tracks_its_child_lifecycle(self) -> None:
         self.assertIn("$productionPort = 8501", self.script)
-        self.assertIn('$readinessUrl = "$productionUrl/healthz"', self.script)
+        self.assertIn('$readinessUrl = "http://127.0.0.1:$productionPort/healthz"', self.script)
         self.assertIn("Get-NetTCPConnection -LocalPort $productionPort", self.script)
         self.assertIn("Port $productionPort is already in use", self.script)
         self.assertIn("Invoke-WebRequest -Uri $readinessUrl", self.script)

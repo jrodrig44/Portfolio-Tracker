@@ -27,7 +27,7 @@ $requirementsFingerprintPath = Join-Path $runtimeDataPath ".requirements.sha256"
 $niceGuiMain = Join-Path $projectRoot "nicegui_app\main.py"
 $productionPort = 8501
 $productionUrl = "http://localhost:$productionPort"
-$readinessUrl = "$productionUrl/healthz"
+$readinessUrl = "http://127.0.0.1:$productionPort/healthz"
 $environmentCreated = $false
 
 function Test-PythonCommand {
@@ -326,6 +326,7 @@ try {
     $quotedNiceGuiMain = '"' + $niceGuiMain + '"'
     $child = Start-Process -FilePath $venvPython -ArgumentList @($quotedNiceGuiMain) -WorkingDirectory $projectRoot -NoNewWindow -PassThru
     $ready = $false
+    $readinessError = $null
     $readyDeadline = [DateTime]::UtcNow.AddSeconds(30)
     while (-not $child.HasExited -and -not $ready -and [DateTime]::UtcNow -lt $readyDeadline) {
         try {
@@ -333,6 +334,7 @@ try {
             $ready = $response.StatusCode -ge 200 -and $response.StatusCode -lt 500
         }
         catch {
+            $readinessError = $_.Exception.Message
             Start-Sleep -Milliseconds 200
             $child.Refresh()
         }
@@ -341,7 +343,10 @@ try {
         if (-not $child.HasExited) {
             & taskkill.exe /PID $child.Id /T /F | Out-Null
         }
-        throw "Portfolio Tracker did not become ready on $productionUrl within 30 seconds."
+        if ($readinessError) {
+            throw "Portfolio Tracker did not become ready on $readinessUrl within 30 seconds. Last readiness error: $readinessError"
+        }
+        throw "Portfolio Tracker did not become ready on $readinessUrl within 30 seconds."
     }
     Write-Host "NiceGUI ready to go on $productionUrl"
     $oldTreatControlCAsInput = [Console]::TreatControlCAsInput

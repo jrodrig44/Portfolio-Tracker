@@ -6,7 +6,7 @@ NiceGUI is the production Portfolio Tracker interface. Normal Windows startup is
 Start Portfolio Tracker.bat -> run_nicegui.ps1 -> nicegui_app/main.py
 ```
 
-The server binds to `0.0.0.0:8501`, so it is available at `http://localhost:8501` and over the LAN when local firewall/network policy allows it. Browser auto-open is disabled. The launcher rejects an occupied production port, checks the lightweight `/healthz` endpoint for readiness without waiting for the portfolio page's market-data fetch, keeps the server attached, and provides graceful shutdown with a 15-second drain before exact-child-process-tree fallback.
+The server binds to `0.0.0.0:8501`, so it is available at `http://localhost:8501` and over the LAN when local firewall/network policy allows it. Browser auto-open is disabled. The launcher rejects an occupied production port, checks the lightweight `/healthz` endpoint over IPv4 loopback for readiness without waiting for the portfolio page's market-data fetch, keeps the server attached, and provides graceful shutdown with a 15-second drain before exact-child-process-tree fallback.
 
 NiceGUI owns two browser-independent background lifecycles:
 
