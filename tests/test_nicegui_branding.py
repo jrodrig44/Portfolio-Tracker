@@ -70,6 +70,8 @@ class NiceGuiBrandingTests(unittest.TestCase):
         registered_routes = {route.path for route in app.routes}
         self.assertTrue(set(APPLE_TOUCH_ICON_ROUTES).issubset(registered_routes))
         self.assertIn("/favicon.ico", registered_routes)
+        health_route = next(route for route in app.routes if route.path == "/healthz")
+        self.assertEqual(health_route.endpoint(), {"status": "ok"})
 
     def test_head_metadata_and_clean_production_title(self) -> None:
         self.assertIn('rel="icon" href="/favicon.ico" sizes="any"', MAIN_SOURCE)

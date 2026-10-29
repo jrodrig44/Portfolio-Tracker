@@ -113,6 +113,11 @@ for icon_route in APPLE_TOUCH_ICON_ROUTES:
     app.add_static_file(local_file=APPLE_TOUCH_ICON_PATH, url_path=icon_route)
 
 
+@app.get("/healthz", include_in_schema=False)
+def health_check() -> dict[str, str]:
+    return {"status": "ok"}
+
+
 def currency(value: Any) -> str:
     return format_currency(value)
 

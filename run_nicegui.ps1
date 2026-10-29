@@ -27,6 +27,7 @@ $requirementsFingerprintPath = Join-Path $runtimeDataPath ".requirements.sha256"
 $niceGuiMain = Join-Path $projectRoot "nicegui_app\main.py"
 $productionPort = 8501
 $productionUrl = "http://localhost:$productionPort"
+$readinessUrl = "$productionUrl/healthz"
 $environmentCreated = $false
 
 function Test-PythonCommand {
@@ -328,7 +329,7 @@ try {
     $readyDeadline = [DateTime]::UtcNow.AddSeconds(30)
     while (-not $child.HasExited -and -not $ready -and [DateTime]::UtcNow -lt $readyDeadline) {
         try {
-            $response = Invoke-WebRequest -Uri $productionUrl -UseBasicParsing -TimeoutSec 1 -ErrorAction Stop
+            $response = Invoke-WebRequest -Uri $readinessUrl -UseBasicParsing -TimeoutSec 1 -ErrorAction Stop
             $ready = $response.StatusCode -ge 200 -and $response.StatusCode -lt 500
         }
         catch {
