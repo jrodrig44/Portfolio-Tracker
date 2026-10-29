@@ -136,12 +136,12 @@ On Windows, double-click [Start Portfolio Tracker.bat](Start%20Portfolio%20Track
 The launcher:
 
 1. Resolves the project directory and runs `run_nicegui.ps1` without detaching the server.
-2. Finds a usable Python 3 installation and creates or repairs `.venv` when needed.
+2. Finds a usable Python 3 installation, or installs Python 3.12 for the current Windows user with `winget` if none is available. It creates or repairs a machine-local virtual environment under `%LOCALAPPDATA%\PortfolioTracker\venvs` so a synced project folder never shares a machine-specific `.venv`.
 3. Installs dependencies whenever `.venv` is new or `requirements.txt` changes, using a local requirements fingerprint otherwise. This includes `exchange-calendars>=4.5`; normal launcher use does not require installing it separately.
 4. Refuses to replace another listener on production port 8501.
 5. Starts NiceGUI, checks `http://localhost:8501` readiness, and starts one Supplemental Research child plus one in-process Market Refresh worker through the NiceGUI lifecycle.
 
-A usable Python 3 installation must exist on a new machine before the launcher can build `.venv`. Keep the PowerShell window/server process running. Browser auto-open is disabled, and the browser may remain closed after readiness while both background systems continue. Press Ctrl+C for graceful shutdown; protected writes drain before an exact-process-tree forced stop is used only if the 15-second grace period expires.
+First-time setup requires internet access to install Python (when needed) and the project dependencies. If `winget` is unavailable or blocked by device policy, install Python 3.12 manually and start the launcher again. Keep the PowerShell window/server process running. Browser auto-open is disabled, and the browser may remain closed after readiness while both background systems continue. Press Ctrl+C for graceful shutdown; protected writes drain before an exact-process-tree forced stop is used only if the 15-second grace period expires.
 
 PowerShell alternative:
 

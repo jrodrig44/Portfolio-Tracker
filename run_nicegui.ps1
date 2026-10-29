@@ -3,7 +3,23 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $projectRoot
 
-$venvPath = Join-Path $projectRoot ".venv"
+$localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+if ([string]::IsNullOrWhiteSpace($localAppData)) {
+    throw "Unable to locate the current user's local application data folder. NiceGUI was not started."
+}
+$resolvedProjectRoot = [System.IO.Path]::GetFullPath($projectRoot).TrimEnd('\')
+$pathHasher = [System.Security.Cryptography.SHA256]::Create()
+try {
+    $projectHash = [BitConverter]::ToString(
+        $pathHasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($resolvedProjectRoot.ToUpperInvariant()))
+    ).Replace("-", "").ToLowerInvariant().Substring(0, 16)
+}
+finally {
+    $pathHasher.Dispose()
+}
+$venvRoot = Join-Path $localAppData "PortfolioTracker\venvs"
+$environmentName = "portfolio-tracker-$projectHash"
+$venvPath = Join-Path $venvRoot $environmentName
 $venvPython = Join-Path $venvPath "Scripts\python.exe"
 $requirementsPath = Join-Path $projectRoot "requirements.txt"
 $runtimeDataPath = Join-Path $projectRoot "data"
@@ -166,21 +182,36 @@ if (-not (Test-PythonCommand -PythonPath $venvPython)) {
     $basePython = Find-BasePython -VirtualEnvironmentPath $venvPath -ConfigurationPath $pyvenvConfiguration
     if ($null -eq $basePython) {
         $candidateSummary = if ($script:BasePythonDiagnostics.Count) { $script:BasePythonDiagnostics -join '; ' } else { 'No candidates were discovered.' }
-        throw "The shared .venv is missing or broken, and no usable Python 3 interpreter with venv support was found. Candidates: $candidateSummary Install or repair Python 3, then retry. NiceGUI was not started."
+        $wingetCommand = Get-Command winget.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -eq $wingetCommand) {
+            throw "No usable Python 3 interpreter with venv support was found, and Windows Package Manager (winget) is unavailable. Candidates: $candidateSummary Install Python 3.12 and retry. NiceGUI was not started."
+        }
+
+        Write-Host "No usable Python 3 installation found; installing Python 3.12 for the current Windows user..."
+        & $wingetCommand.Source install --id Python.Python.3.12 --exact --scope user --silent --accept-package-agreements --accept-source-agreements
+        $installExitCode = $LASTEXITCODE
+        if ($installExitCode -ne 0) {
+            throw "Python installation through winget failed with exit code $installExitCode. Candidates: $candidateSummary Install Python 3.12 and retry. NiceGUI was not started."
+        }
+
+        $basePython = Find-BasePython -VirtualEnvironmentPath $venvPath -ConfigurationPath $pyvenvConfiguration
+        if ($null -eq $basePython) {
+            $candidateSummary = if ($script:BasePythonDiagnostics.Count) { $script:BasePythonDiagnostics -join '; ' } else { 'No candidates were discovered.' }
+            throw "Python 3.12 installation completed, but no usable interpreter with venv support was detected. Candidates: $candidateSummary NiceGUI was not started."
+        }
     }
 
     if (Test-Path -LiteralPath $venvPath) {
-        $resolvedProject = (Resolve-Path -LiteralPath $projectRoot).Path.TrimEnd('\')
         $resolvedVenv = (Resolve-Path -LiteralPath $venvPath).Path.TrimEnd('\')
-        $expectedVenv = Join-Path $resolvedProject ".venv"
+        $expectedVenv = [System.IO.Path]::GetFullPath((Join-Path $venvRoot $environmentName)).TrimEnd('\')
         if (-not $resolvedVenv.Equals($expectedVenv, [System.StringComparison]::OrdinalIgnoreCase)) {
             throw "Refusing to remove an unexpected virtual-environment path: $resolvedVenv"
         }
-        Write-Host "Removing broken shared virtual environment..."
+        Write-Host "Removing broken machine-local virtual environment..."
         Remove-Item -LiteralPath $resolvedVenv -Recurse -Force
     }
 
-    Write-Host "Creating shared virtual environment..."
+    Write-Host "Creating machine-local virtual environment..."
     Write-Host "Using Python from $($basePython.Source): $($basePython.Path)"
     try {
         & $basePython.Path @($basePython.Arguments) -m venv $venvPath
@@ -208,7 +239,7 @@ if (-not (Test-PythonCommand -PythonPath $venvPython)) {
 if ($LASTEXITCODE -ne 0) {
     & $venvPython -m ensurepip --upgrade
     if ($LASTEXITCODE -ne 0) {
-        throw "pip is unavailable in the shared .venv and ensurepip could not repair it. NiceGUI was not started."
+        throw "pip is unavailable in the machine-local environment and ensurepip could not repair it. NiceGUI was not started."
     }
 }
 

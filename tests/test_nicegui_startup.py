@@ -31,13 +31,30 @@ class NiceGuiStartupTests(unittest.TestCase):
         for forbidden in ("start_streamlit.py", "supplemental_research_worker.py"):
             self.assertNotIn(forbidden, self.script)
 
-    def test_shared_environment_and_executable_health_probe_are_used(self) -> None:
-        self.assertIn('Join-Path $projectRoot ".venv"', self.script)
+    def test_machine_local_environment_and_executable_health_probe_are_used(self) -> None:
+        self.assertIn('Join-Path $localAppData "PortfolioTracker\\venvs"', self.script)
+        self.assertIn('$venvPath = Join-Path $venvRoot $environmentName', self.script)
+        self.assertIn("SHA256]::Create()", self.script)
+        self.assertIn('$venvPath = Join-Path $venvRoot $environmentName', self.rollback_script)
+        self.assertIn("SHA256]::Create()", self.rollback_script)
         self.assertIn("function Test-PythonCommand", self.script)
         self.assertRegex(self.script, r'& \$PythonPath @PrefixArguments -c "import sys;')
         self.assertIn("Test-PythonCommand -PythonPath $venvPython", self.script)
         self.assertIn("Remove-Item -LiteralPath $resolvedVenv -Recurse -Force", self.script)
         self.assertIn("& $basePython.Path @($basePython.Arguments) -m venv $venvPath", self.script)
+
+    def test_missing_python_is_installed_for_the_current_user_and_rediscovered(self) -> None:
+        install_position = self.script.index("--id Python.Python.3.12")
+        rediscovery_position = self.script.index(
+            "$basePython = Find-BasePython -VirtualEnvironmentPath $venvPath",
+            install_position,
+        )
+        self.assertIn("Get-Command winget.exe", self.script)
+        self.assertIn("--scope user --silent", self.script)
+        self.assertIn("--accept-package-agreements --accept-source-agreements", self.script)
+        self.assertLess(install_position, rediscovery_position)
+        self.assertIn("Python installation through winget failed", self.script)
+        self.assertIn("Windows Package Manager (winget) is unavailable", self.script)
 
     def test_base_python_discovery_does_not_require_py_launcher(self) -> None:
         self.assertIn("function Find-BasePython", self.script)
@@ -55,7 +72,7 @@ class NiceGuiStartupTests(unittest.TestCase):
 
     def test_invalid_candidates_are_skipped_and_missing_python_error_is_actionable(self) -> None:
         self.assertIn("Rejected $($candidate.Source)", self.script)
-        self.assertIn("no usable Python 3 interpreter with venv support", self.script)
+        self.assertIn("No usable Python 3 interpreter with venv support", self.script)
         self.assertIn("Candidates: $candidateSummary", self.script)
 
     def test_repair_is_scoped_and_partial_environment_is_removed_on_failure(self) -> None:

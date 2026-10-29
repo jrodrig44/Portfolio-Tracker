@@ -3,7 +3,23 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $projectRoot
 
-$venvPath = Join-Path $projectRoot ".venv"
+$localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+if ([string]::IsNullOrWhiteSpace($localAppData)) {
+    throw "Unable to locate the current user's local application data folder. Streamlit rollback was not started."
+}
+$resolvedProjectRoot = [System.IO.Path]::GetFullPath($projectRoot).TrimEnd('\')
+$pathHasher = [System.Security.Cryptography.SHA256]::Create()
+try {
+    $projectHash = [BitConverter]::ToString(
+        $pathHasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($resolvedProjectRoot.ToUpperInvariant()))
+    ).Replace("-", "").ToLowerInvariant().Substring(0, 16)
+}
+finally {
+    $pathHasher.Dispose()
+}
+$venvRoot = Join-Path $localAppData "PortfolioTracker\venvs"
+$environmentName = "portfolio-tracker-$projectHash"
+$venvPath = Join-Path $venvRoot $environmentName
 $venvPython = Join-Path $venvPath "Scripts\python.exe"
 $requirementsPath = Join-Path $projectRoot "requirements.txt"
 $runtimeDataPath = Join-Path $projectRoot "data"
@@ -31,7 +47,7 @@ function Test-PythonCommand {
 if (-not (Test-PythonCommand -PythonPath $venvPython)) {
     $uvCommand = Get-Command uv.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($null -eq $uvCommand) {
-        throw "The shared .venv is missing or broken and uv.exe is unavailable. Repair Python or run the NiceGUI launcher once to rebuild the shared environment. Streamlit rollback was not started."
+        throw "The machine-local Python environment is missing or broken and uv.exe is unavailable. Repair Python or run the NiceGUI launcher once to build the environment. Streamlit rollback was not started."
     }
     Write-Host "Shared virtual environment is unavailable; using an isolated uv rollback environment."
     $managedPython = Get-ChildItem -LiteralPath $projectRoot -Directory -Force -ErrorAction SilentlyContinue |
