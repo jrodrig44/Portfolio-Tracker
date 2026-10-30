@@ -22,6 +22,7 @@ $environmentName = "portfolio-tracker-$projectHash"
 $venvPath = Join-Path $venvRoot $environmentName
 $venvPython = Join-Path $venvPath "Scripts\python.exe"
 $requirementsPath = Join-Path $projectRoot "requirements.txt"
+$requirementsLockPath = Join-Path $projectRoot "requirements-lock.txt"
 $runtimeDataPath = Join-Path $projectRoot "data"
 $requirementsFingerprintPath = Join-Path $runtimeDataPath ".requirements.sha256"
 $niceGuiMain = Join-Path $projectRoot "nicegui_app\main.py"
@@ -68,10 +69,14 @@ function Test-BasePythonCommand {
 }
 
 function Test-ProjectDependencies {
-    param([Parameter(Mandatory = $true)][string]$PythonPath)
+    param(
+        [Parameter(Mandatory = $true)][string]$PythonPath,
+        [Parameter(Mandatory = $true)][string]$RequirementsFile,
+        [Parameter(Mandatory = $true)][string]$LockFile
+    )
 
     try {
-        & $PythonPath -c "import nicegui, pandas, yfinance, exchange_calendars" 2>$null
+        & $PythonPath -m dependency_validation --requirements $RequirementsFile --lock $LockFile
         return $LASTEXITCODE -eq 0
     }
     catch {
@@ -247,15 +252,27 @@ if ($LASTEXITCODE -ne 0) {
 if (-not (Test-Path -LiteralPath $requirementsPath -PathType Leaf)) {
     throw "requirements.txt was not found. NiceGUI was not started."
 }
+if (-not (Test-Path -LiteralPath $requirementsLockPath -PathType Leaf)) {
+    throw "requirements-lock.txt was not found. NiceGUI was not started."
+}
 if (-not (Test-Path -LiteralPath $niceGuiMain -PathType Leaf)) {
     throw "nicegui_app\main.py was not found. NiceGUI was not started."
 }
 
 try {
-    $requirementsHash = (Get-FileHash -LiteralPath $requirementsPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+    $requirementsFileHash = (Get-FileHash -LiteralPath $requirementsPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+    $requirementsLockHash = (Get-FileHash -LiteralPath $requirementsLockPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+    $hashPayload = [Text.Encoding]::UTF8.GetBytes("$requirementsFileHash`n$requirementsLockHash")
+    $fingerprintHasher = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $requirementsHash = [BitConverter]::ToString($fingerprintHasher.ComputeHash($hashPayload)).Replace("-", "").ToLowerInvariant()
+    }
+    finally {
+        $fingerprintHasher.Dispose()
+    }
 }
 catch {
-    throw "Unable to read or hash requirements.txt. NiceGUI was not started. $($_.Exception.Message)"
+    throw "Unable to read or hash requirements.txt and requirements-lock.txt. NiceGUI was not started. $($_.Exception.Message)"
 }
 
 $installedHash = ""
@@ -271,15 +288,17 @@ if (Test-Path -LiteralPath $requirementsFingerprintPath -PathType Leaf) {
 # The fingerprint avoids routine reinstalls, but it is not proof that the shared
 # environment is healthy. A recreated environment or failed core-import probe
 # forces installation, and the hash is written only after validation succeeds.
-$dependenciesNeedInstall = $environmentCreated -or ($installedHash -ne $requirementsHash) -or -not (Test-ProjectDependencies -PythonPath $venvPython)
+$dependenciesNeedInstall = $environmentCreated -or ($installedHash -ne $requirementsHash) -or -not (
+    Test-ProjectDependencies -PythonPath $venvPython -RequirementsFile $requirementsPath -LockFile $requirementsLockPath
+)
 if ($dependenciesNeedInstall) {
-    Write-Host "Installing/updating shared dependencies..."
-    & $venvPython -m pip install -r $requirementsPath
+    Write-Host "Installing/reconciling machine-local dependencies from the tested lock..."
+    & $venvPython -m pip install --disable-pip-version-check -r $requirementsPath -r $requirementsLockPath
     $pipExitCode = $LASTEXITCODE
     if ($pipExitCode -ne 0) {
         throw "Dependency installation failed with exit code $pipExitCode. The dependency fingerprint was not updated, and NiceGUI was not started."
     }
-    if (-not (Test-ProjectDependencies -PythonPath $venvPython)) {
+    if (-not (Test-ProjectDependencies -PythonPath $venvPython -RequirementsFile $requirementsPath -LockFile $requirementsLockPath)) {
         throw "Dependency validation failed after installation. The dependency fingerprint was not updated, and NiceGUI was not started."
     }
 

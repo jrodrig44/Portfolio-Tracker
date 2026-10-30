@@ -86,10 +86,12 @@ class NiceGuiStartupTests(unittest.TestCase):
         self.assertIn("$dependenciesNeedInstall = $environmentCreated -or", self.script)
         self.assertIn('Write-Host "Dependencies unchanged; skipping installation."', self.script)
 
-    def test_pip_and_required_runtime_imports_are_validated(self) -> None:
+    def test_all_declared_and_locked_dependencies_are_validated(self) -> None:
         self.assertIn("$venvPython -m pip --version", self.script)
         self.assertIn("$venvPython -m ensurepip --upgrade", self.script)
-        self.assertIn("import nicegui, pandas, yfinance, exchange_calendars", self.script)
+        self.assertIn("dependency_validation --requirements $RequirementsFile --lock $LockFile", self.script)
+        self.assertIn("Test-ProjectDependencies -PythonPath $venvPython -RequirementsFile $requirementsPath -LockFile $requirementsLockPath", self.script)
+        self.assertIn("& $venvPython -m pip install --disable-pip-version-check -r $requirementsPath -r $requirementsLockPath", self.script)
         validation_position = self.script.index("Dependency validation failed after installation")
         fingerprint_position = self.script.index("Set-Content -LiteralPath $requirementsFingerprintPath")
         self.assertLess(validation_position, fingerprint_position)
@@ -97,8 +99,10 @@ class NiceGuiStartupTests(unittest.TestCase):
     def test_dependency_fingerprint_is_compared_and_written_after_pip_success(self) -> None:
         self.assertIn('Join-Path $runtimeDataPath ".requirements.sha256"', self.script)
         self.assertIn("Get-FileHash -LiteralPath $requirementsPath -Algorithm SHA256", self.script)
+        self.assertIn("Get-FileHash -LiteralPath $requirementsLockPath -Algorithm SHA256", self.script)
+        self.assertIn('Join-Path $projectRoot "requirements-lock.txt"', self.script)
         self.assertIn("$installedHash -ne $requirementsHash", self.script)
-        pip_position = self.script.index("& $venvPython -m pip install -r $requirementsPath")
+        pip_position = self.script.index("& $venvPython -m pip install --disable-pip-version-check -r $requirementsPath -r $requirementsLockPath")
         failure_position = self.script.index("if ($pipExitCode -ne 0)", pip_position)
         fingerprint_write_position = self.script.index("Set-Content -LiteralPath $requirementsFingerprintPath", failure_position)
         self.assertLess(pip_position, failure_position)
@@ -164,6 +168,11 @@ class NiceGuiStartupTests(unittest.TestCase):
         self.assertIn("$rollbackPort = 8502", self.rollback_script)
         self.assertIn("STREAMLIT_SERVER_PORT", self.rollback_script)
         self.assertIn("Get-NetTCPConnection -LocalPort $rollbackPort", self.rollback_script)
+        self.assertIn('Join-Path $projectRoot "requirements-lock.txt"', self.rollback_script)
+        self.assertIn("dependency_validation --requirements $RequirementsFile --lock $LockFile", self.rollback_script)
+        self.assertIn("& $venvPython -m pip install --disable-pip-version-check -r $requirementsPath -r $requirementsLockPath", self.rollback_script)
+        self.assertIn("--with pip --with-requirements $requirementsPath --with-requirements $requirementsLockPath", self.rollback_script)
+        self.assertIn("Get-FileHash -LiteralPath $requirementsLockPath -Algorithm SHA256", self.rollback_script)
 
     def test_production_starts_one_tracked_research_worker_child(self) -> None:
         worker_lifecycle = (ROOT / "nicegui_app" / "research_worker_lifecycle.py").read_text(encoding="utf-8")

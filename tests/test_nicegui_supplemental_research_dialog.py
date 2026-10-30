@@ -15,8 +15,7 @@ class SupplementalResearchDialogTests(unittest.TestCase):
         notify_helper = MAIN.split("def notify_page", 1)[1].split("ui.add_head_html", 1)[0]
         research_handlers = MAIN.split("async def render_supplemental_research", 1)[1].split("def open_existing_research", 1)[0]
 
-        self.assertIn("client_is_alive(page_client, lifecycle)", notify_helper)
-        self.assertIn("with page_client:", notify_helper)
+        self.assertIn("notify_live_page(", notify_helper)
         self.assertIn("notify_page(", research_handlers)
         self.assertNotIn("ui.notify(", research_handlers)
 

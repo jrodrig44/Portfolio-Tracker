@@ -137,7 +137,7 @@ The launcher:
 
 1. Resolves the project directory and runs `run_nicegui.ps1` without detaching the server.
 2. Finds a usable Python 3 installation, or installs Python 3.12 for the current Windows user with `winget` if none is available. It creates or repairs a machine-local virtual environment under `%LOCALAPPDATA%\PortfolioTracker\venvs` so a synced project folder never shares a machine-specific `.venv`.
-3. Installs dependencies whenever `.venv` is new or `requirements.txt` changes, using a local requirements fingerprint otherwise. This includes `exchange-calendars>=4.5`; normal launcher use does not require installing it separately.
+3. Checks every declared and locked package version, import name, and dependency conflict before startup. It installs or repairs packages only when the machine-local environment is new, the dependency fingerprint changes, or validation fails. The fingerprint covers both `requirements.txt` and `requirements-lock.txt`; successful validation is required before it is updated. The tested Windows/Python 3.12 lock pins pandas 2.3.3 with yfinance 1.7.0 to avoid pandas 3.x `Pandas4Warning` output. This includes `exchange-calendars`; normal launcher use does not require installing it separately.
 4. Refuses to replace another listener on production port 8501.
 5. Starts NiceGUI, checks `http://localhost:8501` readiness, and starts one Supplemental Research child plus one in-process Market Refresh worker through the NiceGUI lifecycle.
 
@@ -149,7 +149,7 @@ PowerShell alternative:
 .\run_nicegui.ps1
 ```
 
-Manual startup remains available with `pip install -r requirements.txt` followed by `python nicegui_app\main.py`.
+Manual startup remains available with `pip install -r requirements.txt -r requirements-lock.txt` followed by `python nicegui_app\main.py`. The Streamlit rollback launcher uses the same tested lock and validation. When changing dependency declarations, regenerate and test the complete `requirements-lock.txt` against the supported Windows/Python runtime before committing.
 
 ## Shared Data and Temporary Streamlit Rollback
 

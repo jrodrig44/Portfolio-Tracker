@@ -22,6 +22,7 @@ $environmentName = "portfolio-tracker-$projectHash"
 $venvPath = Join-Path $venvRoot $environmentName
 $venvPython = Join-Path $venvPath "Scripts\python.exe"
 $requirementsPath = Join-Path $projectRoot "requirements.txt"
+$requirementsLockPath = Join-Path $projectRoot "requirements-lock.txt"
 $runtimeDataPath = Join-Path $projectRoot "data"
 $requirementsFingerprintPath = Join-Path $runtimeDataPath ".requirements.sha256"
 $rollbackPort = 8502
@@ -37,6 +38,22 @@ function Test-PythonCommand {
     }
     try {
         & $PythonPath -c "import sys; raise SystemExit(0 if sys.version_info.major == 3 else 1)" 2>$null
+        return $LASTEXITCODE -eq 0
+    }
+    catch {
+        return $false
+    }
+}
+
+function Test-ProjectDependencies {
+    param(
+        [Parameter(Mandatory = $true)][string]$PythonPath,
+        [Parameter(Mandatory = $true)][string]$RequirementsFile,
+        [Parameter(Mandatory = $true)][string]$LockFile
+    )
+
+    try {
+        & $PythonPath -m dependency_validation --requirements $RequirementsFile --lock $LockFile
         return $LASTEXITCODE -eq 0
     }
     catch {
@@ -61,11 +78,37 @@ if (-not (Test-PythonCommand -PythonPath $venvPython)) {
     $useUvEnvironment = $true
 }
 
+if (-not (Test-Path -LiteralPath $requirementsPath -PathType Leaf)) {
+    throw "requirements.txt was not found. Portfolio Tracker was not started."
+}
+if (-not (Test-Path -LiteralPath $requirementsLockPath -PathType Leaf)) {
+    throw "requirements-lock.txt was not found. Portfolio Tracker was not started."
+}
+
+if (-not $useUvEnvironment) {
+    & $venvPython -m pip --version *> $null
+    if ($LASTEXITCODE -ne 0) {
+        & $venvPython -m ensurepip --upgrade
+        if ($LASTEXITCODE -ne 0) {
+            throw "pip is unavailable in the machine-local environment and ensurepip could not repair it. Streamlit rollback was not started."
+        }
+    }
+}
+
 try {
-    $requirementsHash = (Get-FileHash -LiteralPath $requirementsPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+    $requirementsFileHash = (Get-FileHash -LiteralPath $requirementsPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+    $requirementsLockHash = (Get-FileHash -LiteralPath $requirementsLockPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+    $hashPayload = [Text.Encoding]::UTF8.GetBytes("$requirementsFileHash`n$requirementsLockHash")
+    $fingerprintHasher = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $requirementsHash = [BitConverter]::ToString($fingerprintHasher.ComputeHash($hashPayload)).Replace("-", "").ToLowerInvariant()
+    }
+    finally {
+        $fingerprintHasher.Dispose()
+    }
 }
 catch {
-    throw "Unable to read or hash requirements.txt. Portfolio Tracker was not started. $($_.Exception.Message)"
+    throw "Unable to read or hash requirements.txt and requirements-lock.txt. Portfolio Tracker was not started. $($_.Exception.Message)"
 }
 
 $installedHash = ""
@@ -78,13 +121,20 @@ if (Test-Path -LiteralPath $requirementsFingerprintPath) {
     }
 }
 
-$dependenciesNeedInstall = -not $useUvEnvironment -and ($environmentCreated -or ($installedHash -ne $requirementsHash))
+$dependenciesNeedInstall = -not $useUvEnvironment -and (
+    $environmentCreated -or
+    ($installedHash -ne $requirementsHash) -or
+    -not (Test-ProjectDependencies -PythonPath $venvPython -RequirementsFile $requirementsPath -LockFile $requirementsLockPath)
+)
 if ($dependenciesNeedInstall) {
-    Write-Host "Installing/updating dependencies..."
-    & $venvPython -m pip install -r $requirementsPath
+    Write-Host "Installing/reconciling machine-local dependencies from the tested lock..."
+    & $venvPython -m pip install --disable-pip-version-check -r $requirementsPath -r $requirementsLockPath
     $pipExitCode = $LASTEXITCODE
     if ($pipExitCode -ne 0) {
         throw "Dependency installation failed with exit code $pipExitCode. The dependency fingerprint was not updated, and Portfolio Tracker was not started."
+    }
+    if (-not (Test-ProjectDependencies -PythonPath $venvPython -RequirementsFile $requirementsPath -LockFile $requirementsLockPath)) {
+        throw "Dependency validation failed after installation. The dependency fingerprint was not updated, and Portfolio Tracker was not started."
     }
 
     New-Item -ItemType Directory -Path $runtimeDataPath -Force | Out-Null
@@ -92,7 +142,7 @@ if ($dependenciesNeedInstall) {
 }
 else {
     if ($useUvEnvironment) {
-        Write-Host "Dependencies will be validated by the isolated uv environment."
+        Write-Host "Dependencies will be validated by uv using the tested requirements lock."
     }
     else {
         Write-Host "Dependencies unchanged; skipping installation."
@@ -111,7 +161,11 @@ try {
     if ($useUvEnvironment) {
         $env:UV_CACHE_DIR = Join-Path $projectRoot ".uv-cache"
         $env:UV_PYTHON_INSTALL_DIR = Join-Path $projectRoot ".uv-python-ai"
-        & $uvCommand.Source run --python $uvPythonSelector --with-requirements $requirementsPath python (Join-Path $projectRoot "start_streamlit.py")
+        & $uvCommand.Source run --python $uvPythonSelector --with pip --with-requirements $requirementsPath --with-requirements $requirementsLockPath python -m dependency_validation --requirements $requirementsPath --lock $requirementsLockPath
+        if ($LASTEXITCODE -ne 0) {
+            throw "Dependency validation failed in the isolated uv environment with exit code $LASTEXITCODE. Streamlit rollback was not started."
+        }
+        & $uvCommand.Source run --python $uvPythonSelector --with pip --with-requirements $requirementsPath --with-requirements $requirementsLockPath python (Join-Path $projectRoot "start_streamlit.py")
         if ($LASTEXITCODE -ne 0) {
             throw "The isolated uv Streamlit process exited with code $LASTEXITCODE. Streamlit rollback failed."
         }

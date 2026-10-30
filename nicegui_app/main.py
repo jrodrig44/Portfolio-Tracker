@@ -34,7 +34,7 @@ from nicegui_app.services.health import health_package
 from nicegui_app.services.history import history_package
 from nicegui_app.services.insights import insights_package
 from nicegui_app.services.portfolio_data import DEFAULT_HISTORY_RANGE,HISTORY_RANGE_OPTIONS,portfolio_summary
-from nicegui_app.services.page_runtime import PageRefreshGuard, client_is_alive
+from nicegui_app.services.page_runtime import PageRefreshGuard, client_is_alive, notify_live_page
 from nicegui_app.services.refresh import ReadOnlyRefreshCoordinator
 from nicegui_app.services.ui_state import (
     NAVIGATION_AREAS,
@@ -281,13 +281,13 @@ async def index() -> None:
         notification_type: Literal["positive", "negative", "warning", "info", "ongoing"],
         timeout: int | None = None,
     ) -> None:
-        if not client_is_alive(page_client, lifecycle):
-            return
-        with page_client:
-            if timeout is None:
-                ui.notify(message, type=notification_type)
-            else:
-                ui.notify(message, type=notification_type, timeout=timeout)
+        notify_live_page(
+            page_client,
+            lifecycle,
+            message,
+            notification_type=notification_type,
+            timeout=timeout,
+        )
 
     ui.add_head_html(
         '<link rel="icon" href="/favicon.ico" sizes="any">'
