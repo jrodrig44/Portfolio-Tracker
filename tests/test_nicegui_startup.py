@@ -117,6 +117,13 @@ class NiceGuiStartupTests(unittest.TestCase):
         self.assertIn('$readinessUrl = "http://127.0.0.1:$productionPort/healthz"', self.script)
         self.assertIn("Get-NetTCPConnection -LocalPort $productionPort", self.script)
         self.assertIn("Port $productionPort is already in use", self.script)
+        listener_check = self.script.index("$existingListener = Get-NetTCPConnection -LocalPort $productionPort")
+        for repair_step in (
+            "& $venvPython -m ensurepip --upgrade",
+            "Remove-Item -LiteralPath $resolvedVenv -Recurse -Force",
+            "& $venvPython -m pip install --disable-pip-version-check",
+        ):
+            self.assertLess(listener_check, self.script.index(repair_step))
         self.assertIn("Invoke-WebRequest -Uri $readinessUrl", self.script)
         self.assertIn('@app.get("/healthz", include_in_schema=False)', self.main)
         self.assertIn("NiceGUI ready to go on $productionUrl", self.script)

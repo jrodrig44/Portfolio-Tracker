@@ -31,6 +31,23 @@ $productionUrl = "http://localhost:$productionPort"
 $readinessUrl = "http://127.0.0.1:$productionPort/healthz"
 $environmentCreated = $false
 
+# Do not inspect, repair, or install packages while the production server may be
+# using this shared machine-local environment.
+$existingListener = Get-NetTCPConnection -LocalPort $productionPort -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($null -ne $existingListener) {
+    $listenerDescription = "process ID $($existingListener.OwningProcess)"
+    try {
+        $commandLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($existingListener.OwningProcess)" -ErrorAction Stop).CommandLine
+        if ($commandLine -like '*nicegui_app*main.py*') {
+            $listenerDescription = "an existing Portfolio Tracker NiceGUI process (PID $($existingListener.OwningProcess))"
+        }
+    }
+    catch {
+        # The owner may not be inspectable; never kill or adopt an unknown process.
+    }
+    throw "Port $productionPort is already in use by $listenerDescription. Portfolio Tracker was not started. Close the existing listener or choose the explicitly named Streamlit rollback launcher."
+}
+
 function Test-PythonCommand {
     param(
         [Parameter(Mandatory = $true)][string]$PythonPath,
@@ -311,23 +328,6 @@ else {
 
 if (-not (Test-PythonCommand -PythonPath $venvPython)) {
     throw "Shared virtual-environment Python failed its final validation. NiceGUI was not started."
-}
-
-# Port 8501 is production-owned, but a listener is never automatically adopted
-# or killed. Even an uninspectable owner may be unrelated user work.
-$existingListener = Get-NetTCPConnection -LocalPort $productionPort -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($null -ne $existingListener) {
-    $listenerDescription = "process ID $($existingListener.OwningProcess)"
-    try {
-        $commandLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($existingListener.OwningProcess)" -ErrorAction Stop).CommandLine
-        if ($commandLine -like '*nicegui_app*main.py*') {
-            $listenerDescription = "an existing Portfolio Tracker NiceGUI process (PID $($existingListener.OwningProcess))"
-        }
-    }
-    catch {
-        # The owner may not be inspectable; never kill or adopt an unknown process.
-    }
-    throw "Port $productionPort is already in use by $listenerDescription. Portfolio Tracker was not started. Close the existing listener or choose the explicitly named Streamlit rollback launcher."
 }
 
 Write-Host "Starting Portfolio Tracker on $productionUrl..."
