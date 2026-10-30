@@ -11,6 +11,15 @@ MAIN = (Path(__file__).resolve().parents[1] / "nicegui_app" / "main.py").read_te
 
 
 class SupplementalResearchDialogTests(unittest.TestCase):
+    def test_async_research_notifications_use_live_page_context(self) -> None:
+        notify_helper = MAIN.split("def notify_page", 1)[1].split("ui.add_head_html", 1)[0]
+        research_handlers = MAIN.split("async def render_supplemental_research", 1)[1].split("def open_existing_research", 1)[0]
+
+        self.assertIn("client_is_alive(page_client, lifecycle)", notify_helper)
+        self.assertIn("with page_client:", notify_helper)
+        self.assertIn("notify_page(", research_handlers)
+        self.assertNotIn("ui.notify(", research_handlers)
+
     def test_viewer_record_preserves_clicked_holding_and_persisted_metadata(self) -> None:
         first = research_viewer_record({
             "ticker": "aaa", "research_markdown": "# First research", "last_success_at": "2026-08-01",

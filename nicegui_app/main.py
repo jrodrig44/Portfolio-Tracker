@@ -8,7 +8,7 @@ import json
 import math
 from datetime import date
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -274,6 +274,21 @@ async def remove_selected_aggrid_rows(grid: Any) -> int:
 @ui.page("/")
 async def index() -> None:
     page_client = ui.context.client
+
+    def notify_page(
+        message: Any,
+        *,
+        notification_type: Literal["positive", "negative", "warning", "info", "ongoing"],
+        timeout: int | None = None,
+    ) -> None:
+        if not client_is_alive(page_client, lifecycle):
+            return
+        with page_client:
+            if timeout is None:
+                ui.notify(message, type=notification_type)
+            else:
+                ui.notify(message, type=notification_type, timeout=timeout)
+
     ui.add_head_html(
         '<link rel="icon" href="/favicon.ico" sizes="any">'
         '<link rel="icon" type="image/png" sizes="16x16" href="/branding/favicon-16x16.png">'
@@ -913,11 +928,11 @@ async def index() -> None:
                 async def save_model() -> None:
                     try:
                         await critical_io("research_settings_save", research_service.set_model, str(model.value or ""))
-                        ui.notify("Supplemental research model saved.", type="positive")
+                        notify_page("Supplemental research model saved.", notification_type="positive")
                     except ShutdownInProgress:
                         pass
                     except Exception as exc:
-                        ui.notify(str(exc), type="negative", timeout=0)
+                        notify_page(str(exc), notification_type="negative", timeout=0)
                 ui.button("Save Research Model", icon="save", on_click=save_model).classes("w-full sm:w-auto min-h-11")
 
             async def update_ticker(ticker: str, button: Any) -> None:
@@ -925,16 +940,20 @@ async def index() -> None:
                 try:
                     result = await critical_io("research_update", research_service.update, ticker, contexts[ticker], str(model.value or ""))
                     if result.get("status") == "current":
-                        ui.notify(f"Supplemental research completed for {ticker}.", type="positive")
+                        notify_page(f"Supplemental research completed for {ticker}.", notification_type="positive")
                     elif result.get("reason") == "already running":
-                        ui.notify(f"Research for {ticker} is already running.", type="warning")
+                        notify_page(f"Research for {ticker} is already running.", notification_type="warning")
                     else:
-                        ui.notify(str(result.get("error") or result.get("reason") or "Research did not complete."), type="negative", timeout=0)
+                        notify_page(
+                            str(result.get("error") or result.get("reason") or "Research did not complete."),
+                            notification_type="negative",
+                            timeout=0,
+                        )
                     await render_supplemental_research(True)
                 except ShutdownInProgress:
                     button.enable()
                 except Exception as exc:
-                    ui.notify(str(exc), type="negative", timeout=0)
+                    notify_page(str(exc), notification_type="negative", timeout=0)
                     button.enable()
 
             def open_existing_research(row: dict[str, Any]) -> None:
