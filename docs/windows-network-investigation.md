@@ -2,8 +2,10 @@
 
 The duplicate announcement is explained. The original WinError 10054 socket
 remains unidentified: controlled disconnects did not reproduce the traceback.
-Do not classify it as a benign browser disconnect, Yahoo failure, or lost research
-job on the evidence currently available. No exception is suppressed or downgraded.
+Do not classify it as a browser disconnect, Yahoo failure, or lost research job
+on the evidence currently available. The exact WinError 10054 raised on the
+Proactor socket-shutdown line is now classified as a cleanup-callback logging
+case only; that does not identify or fix the connection's cause.
 
 ## Startup findings
 
@@ -74,13 +76,20 @@ Daily, PID-specific files are written under
   cached peer/local endpoints, WebSocket disconnect codes, NiceGUI client IDs,
   startup/shutdown, and timed operation IDs. HTTP scope completion is not claimed
   to mean that a TCP keep-alive connection closed.
-* Its `WindowsResetObserver` is a logging observer, not an asyncio exception handler.
-  It always returns `True`, retaining the original error record and traceback.
-  It adds endpoint/protocol evidence only for `ConnectionResetError` with
-  `winerror == 10054` and a traceback frame whose module is
-  `asyncio.proactor_events` and function is `_call_connection_lost`.
-  Inspection failure still retains the original record. No event-loop handler,
-  transport method, root logger, or error level is replaced.
+* Its `WindowsResetObserver` is a logger filter, not an asyncio exception handler.
+  It omits only records from the `asyncio` logger containing
+  `ConnectionResetError`, `winerror == 10054`, and the exact
+  `_ProactorBasePipeTransport._call_connection_lost` source line that invokes
+  `self._sock.shutdown(...)` on a Proactor transport. Before omission it records
+  peer/local endpoints, protocol, transport type, and error code as
+  `windows_transport_cleanup_reset`. Other errors, traceback locations, logger
+  names, and inspection failures pass to normal logging unchanged. No event-loop
+  handler, transport method, root logger, or error level is replaced.
+  Match its peer/local endpoints and protocol against ASGI connection events to
+  identify an inbound browser/WebSocket connection. Provider work is synchronous
+  (`yfinance`/`httpx`) and has separate operation records; timing alone does not
+  prove a reset came from a provider. The available diagnostic logs contain no
+  reset event to correlate to the originally reported traceback.
 * `logging_setup.py`: structured timestamps use the LogRecord creation time with
   millisecond precision; PID and thread name are included.
 * `nicegui_app/main.py`: installs diagnostics only when enabled.
@@ -140,7 +149,10 @@ tree was 13536 → 10656 → 22740 (interpreter wrapper plus executing child).
 
 No controlled action reproduced the reported repeated 10054 callback. Successful
 transport closes and Yahoo results do not establish that no job was lost during
-the original, unobserved incident. No benign-disconnect suppression is justified.
+the original, unobserved incident. The narrowly filtered callback is identified
+as transport cleanup by its exact CPython source location, but the peer and
+reason for reset remain unknown. No browser-specific or provider-specific
+classification is justified.
 
 Three older supplemental worker trees (root PIDs 21400, 5180, 23316, created
 August 31, September 1, and September 3) were also present; their recorded server

@@ -164,6 +164,16 @@ Before switching interfaces, use **System → Prepare Shared Data**, wait for **
 
 NiceGUI remains the production interface. Streamlit is a supported maintenance and rollback fallback: keep its launcher, imports, shared-data reads, core analysis, holdings CRUD, history, supplemental research, and exports operational. New product features should be implemented in NiceGUI first and need not be duplicated in Streamlit unless they change shared persisted data or are required for safe rollback compatibility. Streamlit saves must preserve database columns it does not own so newer NiceGUI metadata survives a fallback edit.
 
+## Application Versioning
+
+The current product version is **v2.1.1**, sourced from `application_metadata.py`.
+The 1.x Streamlit generation, 2.0 NiceGUI production generation, and 2.1.0
+pre-patch NiceGUI baseline are historical context adopted in
+[CHANGELOG.md](CHANGELOG.md); they were not previously published GitHub releases.
+Use PATCH for compatible fixes and polish, MINOR for compatible new
+functionality, and MAJOR for a new product generation or breaking compatibility
+changes. Increment once per intentional release, not per commit or startup.
+
 ## Local Logs
 
 Structured application logs use JSONL, switch to new date-and-process-stamped files at local midnight, retain 14 calendar days, and redact sensitive fields. The configured filename patterns are:
@@ -183,8 +193,10 @@ Get-Content $streamlitLog.FullName -Wait
 ### Optional network diagnostics
 
 Network diagnostics are disabled by default. Enable them to correlate rare
-Windows/NiceGUI/network connection-reset events without suppressing `WinError 10054`
-or other network errors:
+Windows/NiceGUI/network connection-reset events. Only the exact Proactor socket
+shutdown callback for `WinError 10054` is recorded with endpoint/protocol details
+and omitted from full traceback logging; other reset and network errors are
+preserved:
 
 ```powershell
 $env:PORTFOLIO_NETWORK_DIAGNOSTICS = '1'

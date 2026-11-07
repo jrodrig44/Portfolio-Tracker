@@ -59,6 +59,7 @@ from supplemental_research import (
     validated_research_model,
 )
 from logging_setup import configure_structured_logging, log_event
+from application_metadata import APPLICATION_NAME, APPLICATION_VERSION
 from project_environment import initialize_project_environment
 from shared_data_preparation import persist_live_snapshot_if_ready, prepare_shared_data
 
@@ -7647,7 +7648,13 @@ def _render_shared_data_preparation() -> None:
 
 def main() -> None:
     if not getattr(LOGGER, "_application_started_logged", False):
-        log_event(LOGGER, "application_started", "Portfolio Tracker started")
+        log_event(
+            LOGGER,
+            "application_started",
+            f"{APPLICATION_NAME} started",
+            application_name=APPLICATION_NAME,
+            application_version=APPLICATION_VERSION,
+        )
         LOGGER._application_started_logged = True
     st.set_page_config(page_title="Dividend Portfolio Tracker", page_icon="📈", layout="wide")
     _initialize_export_state()
@@ -7659,6 +7666,7 @@ def main() -> None:
     _render_last_updated_indicator()
 
     with st.sidebar:
+        st.caption(f"{APPLICATION_NAME} v{APPLICATION_VERSION}")
         st.subheader("Data")
         st.write(f"Storage file: `{DEFAULT_DB_PATH}`")
         statement_count, statement_db_available = _local_statement_status()

@@ -15,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from project_environment import ai_provider_status, initialize_project_environment
+from application_metadata import APPLICATION_NAME, APPLICATION_VERSION
 
 ENVIRONMENT_STATUS = initialize_project_environment(PROJECT_ROOT)
 
@@ -75,6 +76,8 @@ APPLE_TOUCH_ICON_ROUTES = (
     "/apple-touch-icon-precomposed.png",
     "/apple-touch-icon-120x120.png",
     "/apple-touch-icon-120x120-precomposed.png",
+    "/apple-touch-icon-240x240.png",
+    "/apple-touch-icon-240x240-precomposed.png",
     "/apple-touch-icon-152x152.png",
     "/apple-touch-icon-152x152-precomposed.png",
     "/apple-touch-icon-167x167.png",
@@ -494,10 +497,11 @@ async def index() -> None:
         }
 
     with ui.header().classes("flex-wrap items-center gap-2 shadow-sm px-2 sm:px-4"):
-        with ui.row().classes("items-center gap-1 shrink-0"):
+        with ui.row().classes("items-center gap-2 shrink-0"):
             menu_button = ui.button(icon="menu", on_click=navigation_drawer.toggle).props("flat round color=white aria-label='More sections'").classes(HEADER_ICON_CONTROL)
             menu_button.tooltip("More sections")
-            ui.label("Portfolio Tracker").classes(f"{HEADER_FOREGROUND} text-base sm:text-xl font-semibold whitespace-nowrap")
+            ui.label(APPLICATION_NAME).classes(f"{HEADER_FOREGROUND} text-base sm:text-xl font-semibold whitespace-nowrap")
+            ui.label(f"v{APPLICATION_VERSION}").classes(f"{HEADER_FOREGROUND} text-xs opacity-75 whitespace-nowrap")
         primary_tabs = ui.tabs(value=primary_navigation_value(ui_state.selected_navigation)).classes(f"{HEADER_FOREGROUND} order-3 md:order-none w-full md:w-auto md:flex-1 min-w-0").props("dense no-caps align=justify active-color=white indicator-color=accent")
         primary_labels = {
             "Holdings": "Holdings",
@@ -1423,6 +1427,10 @@ async def index() -> None:
         with area:
             ui.label("System").classes("text-2xl font-semibold")
             ui.label("Production application and shared local-storage status. Use the global Refresh Data action to refresh portfolio data.").classes("text-gray-500 dark:text-gray-400")
+            system_detail_cards([
+                ("Application", APPLICATION_NAME, False),
+                ("Version", APPLICATION_VERSION, False),
+            ])
             ui.label("Appearance").classes("text-lg font-semibold mt-2")
             ui.toggle(APPEARANCE_OPTIONS, value=appearance_storage[APPEARANCE_STORAGE_KEY]).bind_value(
                 appearance_storage, APPEARANCE_STORAGE_KEY
@@ -1644,4 +1652,4 @@ async def index() -> None:
 if __name__ in {"__main__", "__mp_main__"}:
     start_launcher_watchdog()
     start_shutdown_request_watcher(app.shutdown)
-    ui.run(host=HOST, port=PORT, title="Portfolio Tracker", favicon=FAVICON_PATH, reload=False, show=False, storage_secret=STORAGE_SECRET)
+    ui.run(host=HOST, port=PORT, title=APPLICATION_NAME, favicon=FAVICON_PATH, reload=False, show=False, storage_secret=STORAGE_SECRET)

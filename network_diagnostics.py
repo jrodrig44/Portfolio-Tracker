@@ -1,14 +1,16 @@
-"""Opt-in, payload-free correlation of application networking; never filters errors."""
+"""Opt-in, payload-free diagnostics for application networking."""
 from __future__ import annotations
 
 from contextlib import contextmanager
 import logging
+import linecache
 import os
 from pathlib import Path
 import time
 import threading
 import uuid
 
+from application_metadata import APPLICATION_NAME, APPLICATION_VERSION
 from logging_setup import configure_structured_logging, log_event
 
 _LOGGER_LOCK = threading.Lock()
@@ -17,15 +19,15 @@ _INSTALLATION_MARKER = "_portfolio_tracker_network_diagnostics_installed"
 
 
 class WindowsResetObserver(logging.Filter):
-    """Observe a precise cleanup traceback, always retaining the original record.
+    """Classify only the exact WinError raised by Proactor socket shutdown.
 
     CPython retains the transport in the traceback frame when shutdown raises.
-    Reading its cached endpoints can identify the socket even after a peer reset.
-    This does not replace the event loop handler or change transport cleanup.
+    The diagnostic event preserves endpoint/protocol evidence before this one
+    confirmed cleanup traceback is omitted; all other records remain untouched.
     """
     def filter(self, record: logging.LogRecord) -> bool:
         try:
-            if not record.exc_info:
+            if record.name != "asyncio" or not record.exc_info:
                 return True
             _, error, traceback = record.exc_info
             if not isinstance(error, ConnectionResetError) or getattr(error, "winerror", None) != 10054:
@@ -33,8 +35,19 @@ class WindowsResetObserver(logging.Filter):
             while traceback is not None:
                 frame = traceback.tb_frame
                 if (frame.f_globals.get("__name__") == "asyncio.proactor_events"
-                        and frame.f_code.co_name == "_call_connection_lost"):
+                        and frame.f_code.co_name == "_call_connection_lost"
+                        and getattr(frame.f_code, "co_qualname", "") == "_ProactorBasePipeTransport._call_connection_lost"
+                        and "self._sock.shutdown(" in linecache.getline(
+                            frame.f_code.co_filename, traceback.tb_lineno
+                        )):
                     transport = frame.f_locals.get("self")
+                    if not any(
+                        base.__module__ == "asyncio.proactor_events"
+                        and base.__name__ == "_ProactorBasePipeTransport"
+                        for base in type(transport).__mro__
+                    ):
+                        traceback = traceback.tb_next
+                        continue
                     protocol = transport.get_protocol()
                     diagnostic("windows_transport_cleanup_reset",
                                peer=transport.get_extra_info("peername"),
@@ -42,11 +55,10 @@ class WindowsResetObserver(logging.Filter):
                                protocol=f"{type(protocol).__module__}.{type(protocol).__name__}",
                                transport_type=type(transport).__name__,
                                winerror=10054)
-                    break
+                    return False
                 traceback = traceback.tb_next
         except Exception:
-            # Diagnostic inspection must never interfere with the original error.
-            pass
+            return True
         return True
 
 
@@ -128,7 +140,16 @@ def install_client_diagnostics(app) -> None:
             ("middleware", app.add_middleware, ConnectionDiagnosticsMiddleware),
             ("connect_hook", app.on_connect, lambda client: diagnostic("nicegui_client_connected", client_id=client.id)),
             ("disconnect_hook", app.on_disconnect, lambda client: diagnostic("nicegui_client_disconnected", client_id=client.id)),
-            ("startup_hook", app.on_startup, lambda: diagnostic("nicegui_startup", parent_pid=os.getppid())),
+            (
+                "startup_hook",
+                app.on_startup,
+                lambda: diagnostic(
+                    "nicegui_startup",
+                    parent_pid=os.getppid(),
+                    application_name=APPLICATION_NAME,
+                    application_version=APPLICATION_VERSION,
+                ),
+            ),
             ("shutdown_hook", app.on_shutdown, lambda: diagnostic("nicegui_shutdown")),
         )
         # Successful registrations survive a later failure. Record each one so

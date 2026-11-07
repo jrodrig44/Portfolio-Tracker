@@ -1,9 +1,13 @@
+import asyncio
 import json
 import mimetypes
 import struct
 import unittest
 from pathlib import Path
 
+import httpx
+
+from application_metadata import APPLICATION_NAME, APPLICATION_VERSION
 from nicegui_app.main import APPLE_TOUCH_ICON_ROUTES, app
 
 
@@ -49,6 +53,8 @@ class NiceGuiBrandingTests(unittest.TestCase):
             "/apple-touch-icon-precomposed.png",
             "/apple-touch-icon-120x120.png",
             "/apple-touch-icon-120x120-precomposed.png",
+            "/apple-touch-icon-240x240.png",
+            "/apple-touch-icon-240x240-precomposed.png",
             "/apple-touch-icon-152x152.png",
             "/apple-touch-icon-152x152-precomposed.png",
             "/apple-touch-icon-167x167.png",
@@ -73,6 +79,36 @@ class NiceGuiBrandingTests(unittest.TestCase):
         health_route = next(route for route in app.routes if route.path == "/healthz")
         self.assertEqual(health_route.endpoint(), {"status": "ok"})
 
+    def test_new_apple_icon_aliases_serve_the_existing_png(self) -> None:
+        expected_content = (STATIC_DIR / "apple-touch-icon.png").read_bytes()
+
+        async def fetch_aliases():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                return [
+                    await client.get(route)
+                    for route in (
+                        "/apple-touch-icon-240x240.png",
+                        "/apple-touch-icon-240x240-precomposed.png",
+                    )
+                ]
+
+        responses = asyncio.run(fetch_aliases())
+        for response in responses:
+            with self.subTest(url=response.url.path):
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.headers["content-type"], "image/png")
+                self.assertEqual(response.content, expected_content)
+
+    def test_shared_product_metadata_is_used_in_nicegui_surfaces(self) -> None:
+        self.assertEqual(APPLICATION_NAME, "Portfolio Tracker")
+        self.assertEqual(APPLICATION_VERSION, "2.1.1")
+        self.assertIn("ui.label(APPLICATION_NAME)", MAIN_SOURCE)
+        self.assertIn('ui.label(f"v{APPLICATION_VERSION}")', MAIN_SOURCE)
+        self.assertIn('("Application", APPLICATION_NAME, False)', MAIN_SOURCE)
+        self.assertIn('("Version", APPLICATION_VERSION, False)', MAIN_SOURCE)
+        self.assertIn("title=APPLICATION_NAME", MAIN_SOURCE)
+
     def test_head_metadata_and_clean_production_title(self) -> None:
         self.assertIn('rel="icon" href="/favicon.ico" sizes="any"', MAIN_SOURCE)
         self.assertIn('sizes="16x16" href="/branding/favicon-16x16.png"', MAIN_SOURCE)
@@ -80,7 +116,7 @@ class NiceGuiBrandingTests(unittest.TestCase):
         self.assertIn('rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"', MAIN_SOURCE)
         self.assertIn('rel="manifest" href="/branding/site.webmanifest"', MAIN_SOURCE)
         self.assertIn('name="theme-color" content="#071f4d"', MAIN_SOURCE)
-        self.assertIn('title="Portfolio Tracker"', MAIN_SOURCE)
+        self.assertIn("title=APPLICATION_NAME", MAIN_SOURCE)
         self.assertNotIn('title="Portfolio Tracker · NiceGUI"', MAIN_SOURCE)
 
     def test_web_manifest_is_valid_and_uses_relative_portfolio_tracker_assets(self) -> None:

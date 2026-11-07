@@ -10,26 +10,88 @@ from network_diagnostics import ConnectionDiagnosticsMiddleware, WindowsResetObs
 
 
 class NetworkDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
-    def test_cleanup_observer_records_endpoints_but_keeps_original_error(self):
+    @staticmethod
+    def make_cleanup_record(error, *, logger_name="asyncio"):
+        base_transport = type(
+            "_ProactorBasePipeTransport",
+            (),
+            {"__module__": "asyncio.proactor_events"},
+        )
+        transport_type = type(
+            "_ProactorSocketTransport",
+            (base_transport,),
+            {"__module__": "asyncio.proactor_events"},
+        )
+        transport = transport_type()
+        transport.get_extra_info = lambda key: {
+            "peername": ("127.0.0.1", 123),
+            "sockname": ("127.0.0.1", 8501),
+        }[key]
+        transport.get_protocol = lambda: SimpleNamespace(__module__="asyncio.protocols")
+        frame = SimpleNamespace(
+            f_globals={"__name__": "asyncio.proactor_events"},
+            f_code=SimpleNamespace(
+                co_name="_call_connection_lost",
+                co_qualname="_ProactorBasePipeTransport._call_connection_lost",
+                co_filename="proactor_events.py",
+            ),
+            f_locals={"self": transport},
+        )
+        traceback = SimpleNamespace(tb_frame=frame, tb_lineno=10, tb_next=None)
+        return logging.LogRecord(
+            logger_name,
+            logging.ERROR,
+            "",
+            1,
+            "original",
+            (),
+            (type(error), error, traceback),
+        )
+
+    def test_cleanup_observer_records_and_suppresses_only_exact_reset(self):
         error = ConnectionResetError("private")
         error.winerror = 10054
-        transport = Mock()
-        transport.get_extra_info.side_effect = lambda key: {"peername": ("127.0.0.1", 123), "sockname": ("127.0.0.1", 8501)}[key]
-        frame = SimpleNamespace(f_globals={"__name__": "asyncio.proactor_events"},
-                                f_code=SimpleNamespace(co_name="_call_connection_lost"),
-                                f_locals={"self": transport})
-        traceback = SimpleNamespace(tb_frame=frame, tb_next=None)
-        record = logging.LogRecord("asyncio", logging.ERROR, "", 1, "original", (), (type(error), error, traceback))
-        with patch("network_diagnostics.diagnostic") as event:
-            self.assertTrue(WindowsResetObserver().filter(record))
+        record = self.make_cleanup_record(error)
+        with patch.dict("os.environ", {"PORTFOLIO_NETWORK_DIAGNOSTICS": "1"}), \
+                patch("network_diagnostics.linecache.getline", return_value="self._sock.shutdown(socket.SHUT_RDWR)"), \
+                patch("network_diagnostics.diagnostic") as event:
+            self.assertFalse(WindowsResetObserver().filter(record))
             self.assertEqual(event.call_args.kwargs["local"], ("127.0.0.1", 8501))
             self.assertNotIn("private", str(event.call_args_list))
         self.assertIs(record.exc_info[1], error)
         self.assertEqual(record.getMessage(), "original")
-        frame.f_globals["__name__"] = "another_client"
-        with patch("network_diagnostics.diagnostic") as event:
-            self.assertTrue(WindowsResetObserver().filter(record))
-            event.assert_not_called()
+
+    def test_unmatched_cleanup_errors_reach_the_normal_logging_handler(self):
+        error = ConnectionResetError()
+        error.winerror = 10054
+        record = self.make_cleanup_record(error)
+        delivered = []
+
+        class CaptureHandler(logging.Handler):
+            def emit(self, log_record):
+                delivered.append(log_record)
+
+        logger = logging.getLogger("asyncio")
+        observer = WindowsResetObserver()
+        handler = CaptureHandler()
+        with patch.object(logger, "filters", [observer]), \
+                patch.object(logger, "handlers", [handler]), \
+                patch.object(logger, "propagate", False), \
+                patch("network_diagnostics.linecache.getline", return_value="self._sock.close()"):
+            logger.handle(record)
+        self.assertEqual(delivered, [record])
+
+    def test_unmatched_logger_and_windows_errors_are_not_classified(self):
+        error = ConnectionResetError()
+        error.winerror = 10054
+        observer = WindowsResetObserver()
+        record = self.make_cleanup_record(error, logger_name="another")
+        with patch("network_diagnostics.linecache.getline", return_value="self._sock.shutdown(socket.SHUT_RDWR)"):
+            self.assertTrue(observer.filter(record))
+        error.winerror = 10053
+        record = self.make_cleanup_record(error)
+        with patch("network_diagnostics.linecache.getline", return_value="self._sock.shutdown(socket.SHUT_RDWR)"):
+            self.assertTrue(observer.filter(record))
 
     def test_observer_inspection_failure_keeps_original_error(self):
         error = ConnectionResetError()
@@ -71,6 +133,10 @@ class NetworkDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([call.args[0] for call in event.call_args_list], [
                 "nicegui_client_connected", "nicegui_client_disconnected", "nicegui_startup", "nicegui_shutdown",
             ])
+            self.assertEqual(
+                event.call_args_list[2].kwargs["application_version"],
+                "2.1.1",
+            )
 
     def test_distinct_apps_each_receive_diagnostics(self):
         logger = logging.getLogger("asyncio")

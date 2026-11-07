@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 import exchange_calendars as xcals
 import pandas as pd
+from application_metadata import APPLICATION_NAME, APPLICATION_VERSION
 from network_diagnostics import network_operation, diagnostic
 
 from nicegui_app.services.configuration import (
@@ -154,8 +155,16 @@ class MarketRefreshWorker:
             self._stop_event.clear()
             self._thread = threading.Thread(target=self._run, name="market-refresh-worker", daemon=True)
             self._thread.start()
-        LOGGER.info("Background market refresh worker started.")
-        diagnostic("market_worker_started")
+        LOGGER.info(
+            "Background market refresh worker started for %s v%s.",
+            APPLICATION_NAME,
+            APPLICATION_VERSION,
+        )
+        diagnostic(
+            "market_worker_started",
+            application_name=APPLICATION_NAME,
+            application_version=APPLICATION_VERSION,
+        )
 
     def stop(self) -> None:
         with self._lifecycle_lock:
