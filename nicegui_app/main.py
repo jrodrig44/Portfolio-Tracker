@@ -29,8 +29,13 @@ from nicegui_app.process_lifecycle import (
     lifecycle,
     start_launcher_watchdog,
     start_shutdown_request_watcher,
+    write_shutdown_status,
 )
-from nicegui_app.research_worker_lifecycle import start_research_worker, stop_research_worker
+from nicegui_app.research_worker_lifecycle import (
+    ResearchWorkerStopOutcome,
+    start_research_worker,
+    stop_research_worker,
+)
 from nicegui_app.market_refresh_worker import start_market_refresh_worker, stop_market_refresh_worker
 from nicegui_app.services.ai_context import AIAnalysisState,ai_options,run_ai_analysis
 from nicegui_app.services.ai_snapshot import AIAnalysisSnapshotService, friendly_utc_timestamp, resolve_analysis_download, save_successful_analysis_snapshot
@@ -128,8 +133,10 @@ async def stop_background_workers() -> None:
     )
     names = ("market_refresh_worker", "supplemental_research_worker")
     failures: list[BaseException] = []
+    worker_outcomes: dict[str, str] = {}
     for name, outcome in zip(names, outcomes):
         if isinstance(outcome, BaseException):
+            worker_outcomes[name] = "failed"
             lifecycle.record_shutdown_issue(name)
             log_event(
                 logging.getLogger("portfolio_tracker"),
@@ -139,7 +146,10 @@ async def stop_background_workers() -> None:
                 error_type=type(outcome).__name__,
             )
             failures.append(outcome)
-        elif outcome is not True:
+        elif name == "market_refresh_worker" and outcome is True:
+            worker_outcomes[name] = "stopped"
+        elif name == "market_refresh_worker" and outcome is False:
+            worker_outcomes[name] = "unconfirmed"
             lifecycle.record_shutdown_issue(name)
             log_event(
                 logging.getLogger("portfolio_tracker"),
@@ -147,14 +157,49 @@ async def stop_background_workers() -> None:
                 "Background worker did not confirm shutdown",
                 worker=name,
             )
-            failures.append(RuntimeError(f"{name} did not stop"))
+        elif name == "supplemental_research_worker" and outcome is ResearchWorkerStopOutcome.STOPPED:
+            worker_outcomes[name] = "stopped"
+        elif name == "supplemental_research_worker" and outcome is ResearchWorkerStopOutcome.FORCE_STOPPED:
+            worker_outcomes[name] = "force_stopped"
+            lifecycle.record_forced_shutdown(name)
+            log_event(
+                logging.getLogger("portfolio_tracker"),
+                "worker_shutdown_force_stopped",
+                "Background worker required forced termination",
+                worker=name,
+            )
+        elif name == "supplemental_research_worker" and outcome is ResearchWorkerStopOutcome.UNCONFIRMED:
+            worker_outcomes[name] = "unconfirmed"
+            lifecycle.record_shutdown_issue(name)
+            log_event(
+                logging.getLogger("portfolio_tracker"),
+                "worker_shutdown_incomplete",
+                "Background worker termination could not be confirmed",
+                worker=name,
+            )
+        else:
+            worker_outcomes[name] = "failed"
+            lifecycle.record_shutdown_issue(name)
+            failures.append(RuntimeError(f"{name} returned an invalid shutdown outcome"))
+    status_outcome = (
+        "failed"
+        if failures
+        else "unconfirmed"
+        if "unconfirmed" in worker_outcomes.values()
+        else "forced"
+        if "force_stopped" in worker_outcomes.values()
+        else "graceful"
+    )
+    if not write_shutdown_status(status_outcome, worker_outcomes):
+        failures.append(RuntimeError("Application shutdown status could not be reported"))
     if failures:
         raise BaseExceptionGroup("One or more Portfolio Tracker workers did not stop cleanly", failures)
     log_event(
         logging.getLogger("portfolio_tracker"),
         "application_shutdown_workers_completed",
-        "All Portfolio Tracker workers stopped",
+        "Portfolio Tracker worker shutdown attempts completed",
         workers=list(names),
+        shutdown_outcome=status_outcome,
     )
 
 

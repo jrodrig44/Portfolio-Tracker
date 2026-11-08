@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from nicegui_app import research_worker_lifecycle
+from nicegui_app.research_worker_lifecycle import ResearchWorkerStopOutcome
 from supplemental_research_worker import _watch_stop_request
 
 
@@ -41,7 +42,10 @@ class ResearchWorkerShutdownTests(unittest.TestCase):
                 popen.call_args.kwargs["env"]["PORTFOLIO_RESEARCH_STOP_FILE"],
                 str(stop_file),
             )
-            self.assertTrue(research_worker_lifecycle.stop_research_worker())
+            self.assertIs(
+                research_worker_lifecycle.stop_research_worker(),
+                ResearchWorkerStopOutcome.STOPPED,
+            )
         self.assertTrue(stop_file is not None and not stop_file.exists())
         worker.wait.assert_called_once_with(timeout=10.0)
         worker.terminate.assert_not_called()
@@ -63,12 +67,13 @@ class ResearchWorkerShutdownTests(unittest.TestCase):
                 research_worker_lifecycle._worker = worker
                 research_worker_lifecycle._worker_stop_file = stop_file
             with patch("nicegui_app.research_worker_lifecycle.log_event") as event:
-                self.assertFalse(
+                self.assertIs(
                     research_worker_lifecycle.stop_research_worker(
                         graceful_timeout_seconds=0.01,
                         terminate_timeout_seconds=0.02,
                         kill_timeout_seconds=0.03,
-                    )
+                    ),
+                    ResearchWorkerStopOutcome.UNCONFIRMED,
                 )
             self.assertTrue(stop_file.is_file())
             worker.terminate.assert_called_once_with()
@@ -78,6 +83,53 @@ class ResearchWorkerShutdownTests(unittest.TestCase):
                 [0.01, 0.02, 0.03],
             )
             self.assertEqual(event.call_args_list[-1].args[1], "research_worker_stop_timed_out")
+
+    def test_terminate_fallback_is_reported_as_force_stopped(self) -> None:
+        worker = Mock()
+        worker.poll.side_effect = [None, None, None, 0, 0]
+        worker.wait.side_effect = [
+            subprocess.TimeoutExpired("research", 0.01),
+            None,
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            stop_file = Path(directory) / "stop.request"
+            with research_worker_lifecycle._LOCK:
+                research_worker_lifecycle._worker = worker
+                research_worker_lifecycle._worker_stop_file = stop_file
+            with patch("nicegui_app.research_worker_lifecycle.log_event") as event:
+                outcome = research_worker_lifecycle.stop_research_worker(
+                    graceful_timeout_seconds=0.01,
+                    terminate_timeout_seconds=0.02,
+                    kill_timeout_seconds=0.03,
+                )
+            self.assertIs(outcome, ResearchWorkerStopOutcome.FORCE_STOPPED)
+            worker.terminate.assert_called_once_with()
+            worker.kill.assert_not_called()
+            self.assertEqual(event.call_args_list[-1].args[1], "research_worker_force_stopped")
+
+    def test_kill_fallback_is_reported_as_force_stopped(self) -> None:
+        worker = Mock()
+        worker.poll.side_effect = [None, None, None, None, 0, 0]
+        worker.wait.side_effect = [
+            subprocess.TimeoutExpired("research", 0.01),
+            subprocess.TimeoutExpired("research", 0.02),
+            None,
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            stop_file = Path(directory) / "stop.request"
+            with research_worker_lifecycle._LOCK:
+                research_worker_lifecycle._worker = worker
+                research_worker_lifecycle._worker_stop_file = stop_file
+            with patch("nicegui_app.research_worker_lifecycle.log_event") as event:
+                outcome = research_worker_lifecycle.stop_research_worker(
+                    graceful_timeout_seconds=0.01,
+                    terminate_timeout_seconds=0.02,
+                    kill_timeout_seconds=0.03,
+                )
+            self.assertIs(outcome, ResearchWorkerStopOutcome.FORCE_STOPPED)
+            worker.terminate.assert_called_once_with()
+            worker.kill.assert_called_once_with()
+            self.assertEqual(event.call_args_list[-1].args[1], "research_worker_force_stopped")
 
     def test_child_stop_file_wakes_idle_event_wait(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

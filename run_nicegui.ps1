@@ -1,74 +1,204 @@
 $ErrorActionPreference = "Stop"
 $script:applicationReady = $false
+$script:trapExitCode = 1
 
 trap {
-    if ($script:applicationReady) {
+    if ($script:trapExitCode -eq 3) {
+        Write-Host "Portfolio Tracker could not confirm termination of the launched process tree."
+    }
+    elseif ($script:applicationReady) {
         Write-Host "Portfolio Tracker exited unexpectedly. $($_.Exception.Message)"
     }
     else {
         Write-Host "Portfolio Tracker failed to start. $($_.Exception.Message)"
     }
-    exit 1
+    exit $script:trapExitCode
 }
 
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $projectRoot
 
+function ConvertTo-CreationTimeUtcTicks {
+    param([Parameter(Mandatory = $true)]$CreationDate)
+
+    if ($CreationDate -is [DateTime]) {
+        return [long]$CreationDate.ToUniversalTime().Ticks
+    }
+    return [long][System.Management.ManagementDateTimeConverter]::ToDateTime(
+        [string]$CreationDate
+    ).ToUniversalTime().Ticks
+}
+
 function Get-TrackedProcessTreeIds {
-    param([Parameter(Mandatory = $true)][int]$RootProcessId)
+    param(
+        [Parameter(Mandatory = $true)][int]$RootProcessId,
+        [Parameter(Mandatory = $true)][long]$RootCreationTimeUtcTicks
+    )
 
     $processes = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)
-    $trackedIds = [System.Collections.Generic.HashSet[int]]::new()
-    [void]$trackedIds.Add($RootProcessId)
+    $byId = @{}
+    foreach ($process in $processes) {
+        $processId = [int]$process.ProcessId
+        $creationTicks = ConvertTo-CreationTimeUtcTicks -CreationDate $process.CreationDate
+        $byId[$processId] = [pscustomobject]@{
+            ProcessId = $processId
+            ParentProcessId = [int]$process.ParentProcessId
+            CreationTimeUtcTicks = [long]$creationTicks
+        }
+    }
+
+    if (-not $byId.ContainsKey($RootProcessId) -or
+        $byId[$RootProcessId].CreationTimeUtcTicks -ne $RootCreationTimeUtcTicks) {
+        return @()
+    }
+
+    $tracked = @{}
+    $rootIdentity = $byId[$RootProcessId]
+    $tracked["$RootProcessId`:$RootCreationTimeUtcTicks"] = $rootIdentity
     $changed = $true
     while ($changed) {
         $changed = $false
-        foreach ($process in $processes) {
-            $processId = [int]$process.ProcessId
-            if ($trackedIds.Contains([int]$process.ParentProcessId) -and $trackedIds.Add($processId)) {
+        foreach ($identity in $byId.Values) {
+            $parent = $byId[[int]$identity.ParentProcessId]
+            if ($null -eq $parent -or $parent.CreationTimeUtcTicks -lt $RootCreationTimeUtcTicks -or
+                $identity.CreationTimeUtcTicks -lt $parent.CreationTimeUtcTicks) {
+                continue
+            }
+            $parentKey = "$($parent.ProcessId):$($parent.CreationTimeUtcTicks)"
+            $identityKey = "$($identity.ProcessId):$($identity.CreationTimeUtcTicks)"
+            if ($tracked.ContainsKey($parentKey) -and -not $tracked.ContainsKey($identityKey)) {
+                $tracked[$identityKey] = $identity
                 $changed = $true
             }
         }
     }
-    return @($trackedIds)
+    return @($tracked.Values)
+}
+
+function Get-ProcessIdentity {
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+
+    $process = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction Stop
+    if ($null -eq $process) {
+        throw "Unable to capture the launched process identity."
+    }
+    return [pscustomobject]@{
+        ProcessId = [int]$process.ProcessId
+        CreationTimeUtcTicks = ConvertTo-CreationTimeUtcTicks -CreationDate $process.CreationDate
+    }
 }
 
 function Merge-TrackedProcessTreeIds {
     param(
-        [int[]]$ExistingIds = @(),
-        [int[]]$CurrentIds = @()
+        [AllowEmptyCollection()][object[]]$ExistingIds = @(),
+        [AllowEmptyCollection()][object[]]$CurrentIds = @()
     )
 
-    $trackedIds = [System.Collections.Generic.HashSet[int]]::new()
-    foreach ($processId in @($ExistingIds) + @($CurrentIds)) {
-        [void]$trackedIds.Add([int]$processId)
+    $tracked = @{}
+    foreach ($identity in @($ExistingIds) + @($CurrentIds)) {
+        if ($null -ne $identity) {
+            $key = "$([int]$identity.ProcessId):$([long]$identity.CreationTimeUtcTicks)"
+            $tracked[$key] = $identity
+        }
     }
-    return @($trackedIds)
+    return @($tracked.Values)
 }
 
 function Get-RunningTrackedProcessIds {
-    param([Parameter(Mandatory = $true)][int[]]$ProcessIds)
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$ProcessIds)
 
-    $runningIds = [System.Collections.Generic.List[int]]::new()
-    foreach ($processId in $ProcessIds) {
-        if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {
-            $runningIds.Add($processId)
+    $processes = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)
+    $currentById = @{}
+    foreach ($process in $processes) {
+        $processId = [int]$process.ProcessId
+        $currentById[$processId] = ConvertTo-CreationTimeUtcTicks -CreationDate $process.CreationDate
+    }
+    $running = [System.Collections.Generic.List[object]]::new()
+    foreach ($identity in $ProcessIds) {
+        $processId = [int]$identity.ProcessId
+        if ($currentById.ContainsKey($processId) -and
+            $currentById[$processId] -eq [long]$identity.CreationTimeUtcTicks) {
+            $running.Add($identity)
         }
     }
-    return @($runningIds)
+    return @($running)
+}
+
+function Get-IntentionalShutdownExitCode {
+    param(
+        [Parameter(Mandatory = $true)]$ApplicationStatus,
+        [Parameter(Mandatory = $true)][int]$ServerExitCode,
+        [Parameter(Mandatory = $true)][bool]$ForcedTreeTermination,
+        [Parameter(Mandatory = $true)][bool]$TreeTerminationConfirmed
+    )
+
+    if ($ApplicationStatus.outcome -eq "failed") {
+        return 1
+    }
+    if (-not $TreeTerminationConfirmed) {
+        return 3
+    }
+    if ($ServerExitCode -ne 0 -and -not $ForcedTreeTermination) {
+        return 1
+    }
+    if ($ApplicationStatus.outcome -in @("unconfirmed", "missing", "invalid")) {
+        return 3
+    }
+    if ($ForcedTreeTermination -or $ApplicationStatus.outcome -eq "forced") {
+        return 2
+    }
+    if ($ApplicationStatus.outcome -eq "graceful") {
+        return 0
+    }
+    return 3
+}
+
+function Get-StartupCleanupExitCode {
+    param([Parameter(Mandatory = $true)][bool]$TreeTerminationConfirmed)
+
+    if ($TreeTerminationConfirmed) {
+        return 1
+    }
+    return 3
+}
+
+function Read-ApplicationShutdownStatus {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return [pscustomobject]@{ outcome = "missing"; workers = @{} }
+    }
+    try {
+        $status = Get-Content -Raw -LiteralPath $Path -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if ($status.schema_version -ne 1 -or
+            $status.outcome -notin @("graceful", "forced", "unconfirmed", "failed")) {
+            return [pscustomobject]@{ outcome = "invalid"; workers = @{} }
+        }
+        return $status
+    }
+    catch {
+        Write-Host "Unable to read the application shutdown status file."
+        return [pscustomobject]@{ outcome = "invalid"; workers = @{} }
+    }
 }
 
 function Stop-TrackedProcessTree {
     param(
         [Parameter(Mandatory = $true)][int]$RootProcessId,
+        [Parameter(Mandatory = $true)][long]$RootCreationTimeUtcTicks,
         [Parameter(Mandatory = $true)][int]$ConfirmationTimeoutSeconds,
-        [int[]]$KnownProcessIds = @()
+        [object[]]$KnownProcessIds = @(),
+        [switch]$RequireObservedDescendantWhenRootGone
     )
 
     $snapshotSucceeded = $true
-    $trackedIds = @(Merge-TrackedProcessTreeIds -ExistingIds @($RootProcessId) -CurrentIds $KnownProcessIds)
+    $rootIdentity = [pscustomobject]@{
+        ProcessId = $RootProcessId
+        CreationTimeUtcTicks = $RootCreationTimeUtcTicks
+    }
+    $trackedIds = @(Merge-TrackedProcessTreeIds -ExistingIds @($rootIdentity) -CurrentIds $KnownProcessIds)
     try {
-        $currentIds = @(Get-TrackedProcessTreeIds -RootProcessId $RootProcessId)
+        $currentIds = @(Get-TrackedProcessTreeIds -RootProcessId $RootProcessId -RootCreationTimeUtcTicks $RootCreationTimeUtcTicks)
         $trackedIds = @(Merge-TrackedProcessTreeIds -ExistingIds $trackedIds -CurrentIds $currentIds)
     }
     catch {
@@ -76,14 +206,41 @@ function Stop-TrackedProcessTree {
         Write-Host "Unable to snapshot the launched process tree: $($_.Exception.Message)"
     }
 
-    $runningIds = @(Get-RunningTrackedProcessIds -ProcessIds $trackedIds)
     $taskkillSucceeded = $true
     $taskkillErrors = [System.Collections.Generic.List[string]]::new()
+    try {
+        $runningIds = @(Get-RunningTrackedProcessIds -ProcessIds $trackedIds)
+    }
+    catch {
+        $snapshotSucceeded = $false
+        $taskkillSucceeded = $false
+        $taskkillErrors.Add("Unable to verify tracked process identities: $($_.Exception.Message)")
+        $runningIds = @()
+    }
+    if ($RequireObservedDescendantWhenRootGone -and
+        -not ($runningIds | Where-Object { $_.ProcessId -eq $RootProcessId }) -and
+        $trackedIds.Count -le 1) {
+        $snapshotSucceeded = $false
+        $taskkillSucceeded = $false
+        $taskkillErrors.Add("The root exited before any descendant process identity was observed.")
+    }
     if ($runningIds.Count -gt 0) {
-        $targets = if ($runningIds -contains $RootProcessId) { @($RootProcessId) } else { $runningIds }
-        foreach ($processId in $targets) {
+        $targets = @($runningIds | Sort-Object CreationTimeUtcTicks -Descending)
+        foreach ($identity in $targets) {
+            $processId = [int]$identity.ProcessId
             try {
-                $null = & taskkill.exe /PID $processId /T /F 2>&1
+                $stillOwned = @(Get-RunningTrackedProcessIds -ProcessIds @($identity))
+            }
+            catch {
+                $taskkillSucceeded = $false
+                $taskkillErrors.Add("Unable to revalidate PID $processId before termination: $($_.Exception.Message)")
+                continue
+            }
+            if ($stillOwned.Count -eq 0) {
+                continue
+            }
+            try {
+                $null = & taskkill.exe /PID $processId /F 2>&1
                 $commandExitCode = $LASTEXITCODE
             }
             catch {
@@ -101,7 +258,14 @@ function Stop-TrackedProcessTree {
 
     $deadline = [DateTime]::UtcNow.AddSeconds($ConfirmationTimeoutSeconds)
     do {
-        $runningIds = @(Get-RunningTrackedProcessIds -ProcessIds $trackedIds)
+        try {
+            $runningIds = @(Get-RunningTrackedProcessIds -ProcessIds $trackedIds)
+        }
+        catch {
+            $snapshotSucceeded = $false
+            $runningIds = @($trackedIds)
+            $taskkillErrors.Add("Unable to confirm tracked process exit: $($_.Exception.Message)")
+        }
         if ($runningIds.Count -eq 0) {
             break
         }
@@ -112,7 +276,7 @@ function Stop-TrackedProcessTree {
         SnapshotSucceeded = $snapshotSucceeded
         TaskkillSucceeded = $taskkillSucceeded
         TaskkillErrors = @($taskkillErrors)
-        RunningProcessIds = @($runningIds)
+        RunningProcessIds = @($runningIds | ForEach-Object { $_.ProcessId })
         Terminated = $snapshotSucceeded -and $taskkillSucceeded -and $runningIds.Count -eq 0
     }
 }
@@ -450,8 +614,11 @@ $env:NICEGUI_LAUNCHER_PID = [string]$PID
 $shutdownToken = [Guid]::NewGuid().ToString("N")
 $shutdownRequestPath = Join-Path ([System.IO.Path]::GetTempPath()) "portfolio-tracker-stop-$shutdownToken.request"
 $shutdownWaitPath = Join-Path ([System.IO.Path]::GetTempPath()) "portfolio-tracker-stop-$shutdownToken.waiting"
+$shutdownStatusPath = Join-Path ([System.IO.Path]::GetTempPath()) "portfolio-tracker-stop-$shutdownToken.json"
 $env:NICEGUI_SHUTDOWN_REQUEST_FILE = $shutdownRequestPath
 $env:NICEGUI_SHUTDOWN_WAIT_FILE = $shutdownWaitPath
+$env:NICEGUI_SHUTDOWN_STATUS_FILE = $shutdownStatusPath
+$script:launcherExitCode = 0
 $gracefulShutdownTimeoutSeconds = 45
 $processTreeConfirmationTimeoutSeconds = 8
 $intentionalShutdown = $false
@@ -459,6 +626,8 @@ $launcherExitCode = 0
 try {
     $quotedNiceGuiMain = '"' + $niceGuiMain + '"'
     $child = Start-Process -FilePath $venvPython -ArgumentList @($quotedNiceGuiMain) -WorkingDirectory $projectRoot -NoNewWindow -PassThru
+    $rootIdentity = Get-ProcessIdentity -ProcessId $child.Id
+    $childCreationTimeUtcTicks = $rootIdentity.CreationTimeUtcTicks
     $ready = $false
     $readinessError = $null
     $readyDeadline = [DateTime]::UtcNow.AddSeconds(30)
@@ -474,8 +643,10 @@ try {
         }
     }
     if (-not $ready) {
-        $termination = Stop-TrackedProcessTree -RootProcessId $child.Id -ConfirmationTimeoutSeconds $processTreeConfirmationTimeoutSeconds -KnownProcessIds @($child.Id)
+        $termination = Stop-TrackedProcessTree -RootProcessId $child.Id -RootCreationTimeUtcTicks $childCreationTimeUtcTicks -ConfirmationTimeoutSeconds $processTreeConfirmationTimeoutSeconds -KnownProcessIds @($rootIdentity) -RequireObservedDescendantWhenRootGone
         if (-not $termination.Terminated) {
+            $launcherExitCode = Get-StartupCleanupExitCode -TreeTerminationConfirmed $false
+            $script:trapExitCode = $launcherExitCode
             throw "Portfolio Tracker failed readiness and the launched process tree could not be confirmed stopped. Remaining PIDs: $($termination.RunningProcessIds -join ', ')."
         }
         if ($readinessError) {
@@ -486,11 +657,11 @@ try {
     $script:applicationReady = $true
     $processTreeSnapshotSucceeded = $true
     try {
-        $trackedProcessIds = @(Get-TrackedProcessTreeIds -RootProcessId $child.Id)
+        $trackedProcessIds = @(Get-TrackedProcessTreeIds -RootProcessId $child.Id -RootCreationTimeUtcTicks $childCreationTimeUtcTicks)
     }
     catch {
         $processTreeSnapshotSucceeded = $false
-        $trackedProcessIds = @($child.Id)
+        $trackedProcessIds = @($rootIdentity)
         Write-Host "Unable to snapshot the launched process tree: $($_.Exception.Message)"
     }
     Write-Host "NiceGUI ready to go on $productionUrl"
@@ -510,7 +681,6 @@ try {
                     # 45-second graceful deadline.
                     $deadline = [DateTime]::UtcNow.AddSeconds($gracefulShutdownTimeoutSeconds)
                     $acknowledgementReported = $false
-                    $trackedProcessIds = @($child.Id)
                     while ([DateTime]::UtcNow -lt $deadline) {
                         $child.Refresh()
                         if (-not $acknowledgementReported -and (Test-Path -LiteralPath $shutdownWaitPath -PathType Leaf)) {
@@ -519,7 +689,7 @@ try {
                         }
                         if (-not $child.HasExited) {
                             try {
-                                $currentProcessIds = @(Get-TrackedProcessTreeIds -RootProcessId $child.Id)
+                                $currentProcessIds = @(Get-TrackedProcessTreeIds -RootProcessId $child.Id -RootCreationTimeUtcTicks $childCreationTimeUtcTicks)
                                 $trackedProcessIds = @(Merge-TrackedProcessTreeIds -ExistingIds $trackedProcessIds -CurrentIds $currentProcessIds)
                             }
                             catch {
@@ -536,7 +706,7 @@ try {
                     $child.Refresh()
                     if (-not $child.HasExited) {
                         try {
-                            $currentProcessIds = @(Get-TrackedProcessTreeIds -RootProcessId $child.Id)
+                            $currentProcessIds = @(Get-TrackedProcessTreeIds -RootProcessId $child.Id -RootCreationTimeUtcTicks $childCreationTimeUtcTicks)
                             $trackedProcessIds = @(Merge-TrackedProcessTreeIds -ExistingIds $trackedProcessIds -CurrentIds $currentProcessIds)
                         }
                         catch {
@@ -545,33 +715,51 @@ try {
                         }
                     }
                     $runningProcessIds = @(Get-RunningTrackedProcessIds -ProcessIds $trackedProcessIds)
+                    $forcedTreeTermination = $false
+                    $treeTerminationConfirmed = $processTreeSnapshotSucceeded -and
+                        $child.HasExited -and $runningProcessIds.Count -eq 0
                     if (-not $child.HasExited -or $runningProcessIds.Count -gt 0) {
                         Write-Host "Graceful shutdown timed out after $gracefulShutdownTimeoutSeconds seconds."
                         Write-Host "Attempting forced termination of the launched process tree..."
-                        $termination = Stop-TrackedProcessTree -RootProcessId $child.Id -ConfirmationTimeoutSeconds $processTreeConfirmationTimeoutSeconds -KnownProcessIds $trackedProcessIds
-                        if (-not $termination.Terminated -or -not $processTreeSnapshotSucceeded) {
+                        $termination = Stop-TrackedProcessTree -RootProcessId $child.Id -RootCreationTimeUtcTicks $childCreationTimeUtcTicks -ConfirmationTimeoutSeconds $processTreeConfirmationTimeoutSeconds -KnownProcessIds $trackedProcessIds
+                        $forcedTreeTermination = $termination.Terminated
+                        $treeTerminationConfirmed = $termination.Terminated -and
+                            $termination.SnapshotSucceeded -and $processTreeSnapshotSucceeded
+                        if (-not $treeTerminationConfirmed) {
                             Write-Host "Portfolio Tracker could not confirm termination of its launched process tree."
                             Write-Host "taskkill succeeded: $($termination.TaskkillSucceeded); process-tree snapshots succeeded: $($termination.SnapshotSucceeded -and $processTreeSnapshotSucceeded); remaining PIDs: $($termination.RunningProcessIds -join ', ')."
                             if ($termination.TaskkillErrors.Count -gt 0) {
                                 Write-Host ($termination.TaskkillErrors -join "; ")
                             }
-                            $launcherExitCode = 3
-                        }
-                        else {
-                            Write-Host "Graceful shutdown timed out; forced termination was required. The launched process tree is confirmed stopped; this was not a safe graceful shutdown."
-                            $launcherExitCode = 2
                         }
                     }
-                    else {
-                        if (-not $processTreeSnapshotSucceeded) {
-                            Write-Host "NiceGUI exited, but the launched process tree could not be verified."
-                            $launcherExitCode = 3
-                        }
-                        elseif ($child.ExitCode -ne 0) {
-                            throw "NiceGUI exited with code $($child.ExitCode) during the requested graceful shutdown."
-                        }
-                        else {
+                    $child.Refresh()
+                    $applicationStatus = Read-ApplicationShutdownStatus -Path $shutdownStatusPath
+                    $serverExitCode = if ($child.HasExited) { $child.ExitCode } else { -1 }
+                    $launcherExitCode = Get-IntentionalShutdownExitCode `
+                        -ApplicationStatus $applicationStatus `
+                        -ServerExitCode $serverExitCode `
+                        -ForcedTreeTermination $forcedTreeTermination `
+                        -TreeTerminationConfirmed $treeTerminationConfirmed
+                    $script:launcherExitCode = $launcherExitCode
+                    switch ($launcherExitCode) {
+                        0 {
                             Write-Host "Portfolio Tracker stopped gracefully; the launched process tree has exited."
+                        }
+                        1 {
+                            Write-Host "The application reported a shutdown failure or exited unexpectedly."
+                        }
+                        2 {
+                            if ($applicationStatus.outcome -eq "forced") {
+                                Write-Host "A worker required forced termination; the application and launched process tree exited."
+                            }
+                            else {
+                                Write-Host "Graceful shutdown timed out; forced termination of the launched process tree was required."
+                            }
+                            Write-Host "This was not a wholly graceful shutdown."
+                        }
+                        3 {
+                            Write-Host "Portfolio Tracker could not confirm shutdown of a worker or its launched process tree."
                         }
                     }
                     break
@@ -593,8 +781,10 @@ finally {
     Remove-Item Env:NICEGUI_LAUNCHER_PID -ErrorAction SilentlyContinue
     Remove-Item Env:NICEGUI_SHUTDOWN_REQUEST_FILE -ErrorAction SilentlyContinue
     Remove-Item Env:NICEGUI_SHUTDOWN_WAIT_FILE -ErrorAction SilentlyContinue
+    Remove-Item Env:NICEGUI_SHUTDOWN_STATUS_FILE -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $shutdownRequestPath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $shutdownWaitPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $shutdownStatusPath -Force -ErrorAction SilentlyContinue
 }
 
 exit $launcherExitCode

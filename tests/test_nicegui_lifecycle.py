@@ -4,17 +4,20 @@ import asyncio
 import threading
 import time
 import tempfile
+import json
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from nicegui_app.main import critical_io, stop_background_workers
+from nicegui_app.research_worker_lifecycle import ResearchWorkerStopOutcome
 
 from nicegui_app.process_lifecycle import (
     LifecycleCoordinator,
     ShutdownInProgress,
     start_launcher_watchdog,
     start_shutdown_request_watcher,
+    write_shutdown_status,
 )
 
 
@@ -217,6 +220,29 @@ class LifecycleCoordinatorTests(unittest.TestCase):
             start_launcher_watchdog()
         thread.assert_not_called()
 
+    def test_shutdown_status_is_atomic_and_invocation_scoped(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            status_path = Path(directory) / "unique-status.json"
+            with patch.dict(
+                "os.environ",
+                {"NICEGUI_SHUTDOWN_STATUS_FILE": str(status_path)},
+            ):
+                self.assertTrue(
+                    write_shutdown_status(
+                        "forced",
+                        {"supplemental_research_worker": "force_stopped"},
+                    )
+                )
+            self.assertEqual(
+                json.loads(status_path.read_text(encoding="utf-8")),
+                {
+                    "schema_version": 1,
+                    "outcome": "forced",
+                    "workers": {"supplemental_research_worker": "force_stopped"},
+                },
+            )
+            self.assertEqual(list(Path(directory).iterdir()), [status_path])
+
     def test_rejected_critical_io_emits_one_warning_and_no_error(self) -> None:
         coordinator = LifecycleCoordinator()
         coordinator.begin_shutdown()
@@ -274,9 +300,9 @@ class LifecycleCoordinatorTests(unittest.TestCase):
             attempted.add("market")
             return False
 
-        def stop_research() -> bool:
+        def stop_research() -> ResearchWorkerStopOutcome:
             attempted.add("research")
-            return True
+            return ResearchWorkerStopOutcome.STOPPED
 
         async def run_test() -> None:
             async def fake_to_thread(operation):
@@ -286,15 +312,51 @@ class LifecycleCoordinatorTests(unittest.TestCase):
                 "nicegui_app.main.stop_market_refresh_worker", stop_market
             ), patch("nicegui_app.main.stop_research_worker", stop_research), patch(
                 "nicegui_app.main.asyncio.to_thread", fake_to_thread
-            ), patch("nicegui_app.main.log_event") as event:
-                with self.assertRaises(BaseExceptionGroup):
-                    await stop_background_workers()
+            ), patch("nicegui_app.main.log_event") as event, patch(
+                "nicegui_app.main.write_shutdown_status"
+            ) as write_status:
+                await stop_background_workers()
             self.assertEqual(attempted, {"market", "research"})
             self.assertEqual(coordinator.shutdown_issues(), ("market_refresh_worker",))
-            self.assertEqual(event.call_args.args[1], "worker_shutdown_incomplete")
+            write_status.assert_called_once_with(
+                "unconfirmed",
+                {"market_refresh_worker": "unconfirmed", "supplemental_research_worker": "stopped"},
+            )
+            self.assertIn(
+                "worker_shutdown_incomplete",
+                [call.args[1] for call in event.call_args_list],
+            )
+            self.assertEqual(event.call_args.args[1], "application_shutdown_workers_completed")
 
         asyncio.run(run_test())
 
+    def test_force_stopped_research_worker_is_reported_without_exception(self) -> None:
+        coordinator = LifecycleCoordinator()
+
+        async def run_test() -> None:
+            async def fake_to_thread(operation):
+                return operation()
+
+            with patch("nicegui_app.main.lifecycle", coordinator), patch(
+                "nicegui_app.main.stop_market_refresh_worker", return_value=True
+            ), patch(
+                "nicegui_app.main.stop_research_worker",
+                return_value=ResearchWorkerStopOutcome.FORCE_STOPPED,
+            ), patch("nicegui_app.main.asyncio.to_thread", fake_to_thread), patch(
+                "nicegui_app.main.log_event"
+            ) as event, patch("nicegui_app.main.write_shutdown_status") as write_status:
+                await stop_background_workers()
+            self.assertEqual(coordinator.forced_shutdown_stages(), ("supplemental_research_worker",))
+            write_status.assert_called_once_with(
+                "forced",
+                {"market_refresh_worker": "stopped", "supplemental_research_worker": "force_stopped"},
+            )
+            self.assertIn(
+                "worker_shutdown_force_stopped",
+                [call.args[1] for call in event.call_args_list],
+            )
+
+        asyncio.run(run_test())
 
 if __name__ == "__main__":
     unittest.main()

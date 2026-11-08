@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import time
+from enum import Enum
 from pathlib import Path
 from uuid import uuid4
 
@@ -25,6 +26,12 @@ LOGGER = logging.getLogger("portfolio_tracker")
 WORKER_GRACEFUL_STOP_TIMEOUT_SECONDS = 10.0
 WORKER_TERMINATE_TIMEOUT_SECONDS = 2.0
 WORKER_KILL_TIMEOUT_SECONDS = 2.0
+
+
+class ResearchWorkerStopOutcome(str, Enum):
+    STOPPED = "stopped"
+    FORCE_STOPPED = "force_stopped"
+    UNCONFIRMED = "unconfirmed"
 
 
 def start_research_worker() -> None:
@@ -70,14 +77,14 @@ def stop_research_worker(
     graceful_timeout_seconds: float = WORKER_GRACEFUL_STOP_TIMEOUT_SECONDS,
     terminate_timeout_seconds: float = WORKER_TERMINATE_TIMEOUT_SECONDS,
     kill_timeout_seconds: float = WORKER_KILL_TIMEOUT_SECONDS,
-) -> bool:
+) -> ResearchWorkerStopOutcome:
     """Request prompt exit, then use bounded terminate/kill waits on this child."""
     with _STOP_LOCK:
         with _LOCK:
             worker = _worker
             stop_file = _worker_stop_file
         if worker is None:
-            return True
+            return ResearchWorkerStopOutcome.STOPPED
 
         started = time.monotonic()
         log_event(
@@ -98,6 +105,7 @@ def stop_research_worker(
                     error_type=type(exc).__name__,
                 )
 
+        force_attempted = False
         if worker.poll() is None:
             try:
                 worker.wait(timeout=max(graceful_timeout_seconds, 0.0))
@@ -109,6 +117,7 @@ def stop_research_worker(
                     timeout_seconds=graceful_timeout_seconds,
                 )
                 if worker.poll() is None:
+                    force_attempted = True
                     worker.terminate()
                     try:
                         worker.wait(timeout=max(terminate_timeout_seconds, 0.0))
@@ -120,6 +129,7 @@ def stop_research_worker(
                             timeout_seconds=terminate_timeout_seconds,
                         )
                         if worker.poll() is None:
+                            force_attempted = True
                             worker.kill()
                             try:
                                 worker.wait(timeout=max(kill_timeout_seconds, 0.0))
@@ -137,16 +147,24 @@ def stop_research_worker(
                 terminate_timeout_seconds=terminate_timeout_seconds,
                 kill_timeout_seconds=kill_timeout_seconds,
             )
-            return False
+            return ResearchWorkerStopOutcome.UNCONFIRMED
 
         _clear_worker_if_exited(worker, stop_file)
+        outcome = (
+            ResearchWorkerStopOutcome.FORCE_STOPPED
+            if force_attempted
+            else ResearchWorkerStopOutcome.STOPPED
+        )
         log_event(
             LOGGER,
-            "research_worker_stop_completed",
-            "Supplemental Research worker stopped",
+            "research_worker_force_stopped" if force_attempted else "research_worker_stop_completed",
+            "Supplemental Research worker was force-stopped"
+            if force_attempted
+            else "Supplemental Research worker stopped cooperatively",
             duration_ms=round((time.monotonic() - started) * 1000, 3),
+            stop_outcome=outcome.value,
         )
-        return True
+        return outcome
 
 
 atexit.register(stop_research_worker)

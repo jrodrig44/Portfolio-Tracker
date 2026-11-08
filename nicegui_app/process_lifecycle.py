@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import ctypes
+import json
 import logging
 import os
 import threading
@@ -46,6 +47,7 @@ class LifecycleCoordinator:
         self._shutting_down = False
         self._shutdown_started_at: float | None = None
         self._shutdown_issues: set[str] = set()
+        self._forced_shutdown_stages: set[str] = set()
 
     @property
     def is_shutting_down(self) -> bool:
@@ -78,6 +80,14 @@ class LifecycleCoordinator:
     def shutdown_issues(self) -> tuple[str, ...]:
         with self._condition:
             return tuple(sorted(self._shutdown_issues))
+
+    def record_forced_shutdown(self, stage: str) -> None:
+        with self._condition:
+            self._forced_shutdown_stages.add(stage)
+
+    def forced_shutdown_stages(self) -> tuple[str, ...]:
+        with self._condition:
+            return tuple(sorted(self._forced_shutdown_stages))
 
     @contextmanager
     def critical_operation(self, name: str) -> Iterator[None]:
@@ -156,16 +166,59 @@ def _log_final_shutdown_outcome() -> None:
     if elapsed is None:
         return
     issues = lifecycle.shutdown_issues()
+    forced_stages = lifecycle.forced_shutdown_stages()
     operations = lifecycle.active_operation_details()
+    final_outcome = (
+        "unconfirmed"
+        if issues or operations
+        else "forced"
+        if forced_stages
+        else "graceful"
+    )
     log_event(
         LOGGER,
         "shutdown_process_exit",
         "Portfolio Tracker process is exiting after shutdown request",
-        final_shutdown_outcome="graceful" if not issues and not operations else "graceful_with_unresolved_work",
+        final_shutdown_outcome=final_outcome,
         duration_ms=round(elapsed * 1000, 3),
         shutdown_issues=list(issues),
+        forced_shutdown_stages=list(forced_stages),
         active_operations=_operation_fields(operations),
     )
+
+
+def write_shutdown_status(outcome: str, workers: dict[str, str]) -> bool:
+    """Atomically publish this launcher's worker shutdown outcome when requested."""
+    raw_path = os.environ.get("NICEGUI_SHUTDOWN_STATUS_FILE", "").strip()
+    if not raw_path:
+        return True
+    if outcome not in {"graceful", "forced", "unconfirmed", "failed"}:
+        raise ValueError(f"Unsupported shutdown outcome: {outcome}")
+    status_path = Path(raw_path)
+    temporary_path = status_path.with_name(f"{status_path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary_path.write_text(
+            json.dumps(
+                {"schema_version": 1, "outcome": outcome, "workers": workers},
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        os.replace(temporary_path, status_path)
+        return True
+    except OSError as exc:
+        lifecycle.record_shutdown_issue("shutdown_status_write")
+        log_event(
+            LOGGER,
+            "shutdown_status_write_failed",
+            "Unable to publish application shutdown status to the launcher",
+            error_type=type(exc).__name__,
+        )
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
 
 
 atexit.register(_log_final_shutdown_outcome)

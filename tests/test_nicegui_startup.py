@@ -1,6 +1,7 @@
 import os
 import shutil
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -153,39 +154,56 @@ class NiceGuiStartupTests(unittest.TestCase):
         self.assertIn("$gracefulShutdownTimeoutSeconds = 45", self.script)
         self.assertIn("$processTreeConfirmationTimeoutSeconds = 8", self.script)
         self.assertIn("NICEGUI_SHUTDOWN_REQUEST_FILE", self.script)
+        self.assertIn("NICEGUI_SHUTDOWN_STATUS_FILE", self.script)
         self.assertIn("[Console]::TreatControlCAsInput = $true", self.script)
-        self.assertIn("taskkill.exe /PID $processId /T /F", self.script)
+        self.assertIn("taskkill.exe /PID $processId /F", self.script)
         self.assertIn("Get-TrackedProcessTreeIds", self.script)
+        self.assertIn("Get-StartupCleanupExitCode", self.script)
         self.assertIn("Get-RunningTrackedProcessIds", self.script)
         self.assertIn("Merge-TrackedProcessTreeIds", self.script)
+        self.assertIn("CreationTimeUtcTicks", self.script)
+        self.assertNotIn("$trackedProcessIds = @($child.Id)", self.script)
         self.assertNotIn("taskkill /IM", self.script)
         self.assertIn("Portfolio Tracker stopped gracefully;", self.script)
-        self.assertIn("Graceful shutdown timed out; forced termination was required.", self.script)
-        self.assertIn("$launcherExitCode = 2", self.script)
-        self.assertIn("$launcherExitCode = 3", self.script)
+        self.assertIn("A worker required forced termination", self.script)
+        self.assertIn("$launcherExitCode = Get-IntentionalShutdownExitCode", self.script)
 
     def test_batch_distinguishes_all_launcher_outcomes(self) -> None:
         self.assertIn('if "%TRACKER_EXIT_CODE%"=="2"', self.batch)
         self.assertIn('if "%TRACKER_EXIT_CODE%"=="3"', self.batch)
         self.assertIn("failed during startup or exited unexpectedly", self.batch)
-        self.assertIn("This was not a safe graceful shutdown.", self.batch)
-        self.assertIn("could not confirm termination", self.batch)
+        self.assertIn("This was not a wholly graceful shutdown.", self.batch)
+        self.assertIn("could not confirm shutdown of a worker or its launched process tree", self.batch)
         self.assertNotIn("failed to start or exited with an error", self.batch)
 
     def test_forced_stop_success_requires_checked_termination_and_empty_tree(self) -> None:
-        termination = self.script.index("if (-not $termination.Terminated)")
-        forced_success = self.script.index("$launcherExitCode = 2", termination)
         self.assertIn(
             "Terminated = $snapshotSucceeded -and $taskkillSucceeded -and $runningIds.Count -eq 0",
             self.script,
         )
-        self.assertLess(termination, forced_success)
-        failure_branch = self.script[termination:forced_success]
-        self.assertIn("$launcherExitCode = 3", failure_branch)
-        self.assertIn("$termination.RunningProcessIds", failure_branch)
-        self.assertIn("& taskkill.exe /PID $processId /T /F", self.script)
+        classifier = self.script[
+            self.script.index("function Get-IntentionalShutdownExitCode"):
+            self.script.index("function Get-StartupCleanupExitCode")
+        ]
+        self.assertIn('if ($ApplicationStatus.outcome -eq "failed")', classifier)
+        self.assertIn("if (-not $TreeTerminationConfirmed)", classifier)
+        self.assertIn('if ($ForcedTreeTermination -or $ApplicationStatus.outcome -eq "forced")', classifier)
+        self.assertIn('if ($ApplicationStatus.outcome -eq "graceful")', classifier)
+        self.assertIn("& taskkill.exe /PID $processId /F", self.script)
         self.assertIn("$commandExitCode = $LASTEXITCODE", self.script)
         self.assertIn("-KnownProcessIds $trackedProcessIds", self.script)
+        self.assertIn("$termination.RunningProcessIds", self.script)
+        self.assertIn("$script:trapExitCode = $launcherExitCode", self.script)
+        readiness_cleanup = self.script[
+            self.script.index("if (-not $ready) {"):
+            self.script.index("$script:applicationReady = $true")
+        ]
+        self.assertIn(
+            "$launcherExitCode = Get-StartupCleanupExitCode -TreeTerminationConfirmed $false",
+            readiness_cleanup,
+        )
+        self.assertIn("throw \"Portfolio Tracker failed readiness", readiness_cleanup)
+        self.assertIn("finally {", self.script[self.script.index("if (-not $ready) {"):])
 
     @unittest.skipUnless(os.name == "nt" and shutil.which("powershell"), "Windows PowerShell is required")
     def test_process_tree_force_result_checks_command_and_exit_confirmation(self) -> None:
@@ -194,38 +212,61 @@ $source = Get-Content -Raw -LiteralPath $env:TRACKER_LAUNCHER_SCRIPT
 $tokens = $null
 $errors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$errors)
-foreach ($name in @("Get-TrackedProcessTreeIds", "Merge-TrackedProcessTreeIds", "Get-RunningTrackedProcessIds", "Stop-TrackedProcessTree")) {
+foreach ($name in @("ConvertTo-CreationTimeUtcTicks", "Get-TrackedProcessTreeIds", "Get-ProcessIdentity", "Merge-TrackedProcessTreeIds", "Get-RunningTrackedProcessIds", "Stop-TrackedProcessTree", "Get-IntentionalShutdownExitCode", "Get-StartupCleanupExitCode")) {
     $definition = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
     if ($null -eq $definition) { throw "Missing function $name" }
     Invoke-Expression $definition.Extent.Text
 }
 function Get-CimInstance { return @($script:processSnapshot) }
-function Get-Process {
-    param([int]$Id, [string]$ErrorAction)
-    if ($script:runningPids.Contains($Id)) { return [pscustomobject]@{ Id = $Id } }
-}
 function taskkill.exe {
     $script:killedProcessId = [int]$args[1]
+    $script:killCount++
     $global:LASTEXITCODE = $script:taskkillExitCode
-    if ($global:LASTEXITCODE -eq 0) { $script:runningPids.Clear() }
+    if ($global:LASTEXITCODE -eq 0) {
+        $script:processSnapshot = @($script:processSnapshot | Where-Object { [int]$_.ProcessId -ne $script:killedProcessId })
+    }
 }
-$script:processSnapshot = @([pscustomobject]@{ ProcessId = 100; ParentProcessId = 1 }, [pscustomobject]@{ ProcessId = 101; ParentProcessId = 100 })
-$script:runningPids = [System.Collections.Generic.HashSet[int]]::new()
-[void]$script:runningPids.Add(100)
-[void]$script:runningPids.Add(101)
+$rootDate = [DateTime]::UtcNow.AddSeconds(-3)
+$childDate = [DateTime]::UtcNow.AddSeconds(-2)
+$script:processSnapshot = @(
+    [pscustomobject]@{ ProcessId = 100; ParentProcessId = 1; CreationDate = $rootDate },
+    [pscustomobject]@{ ProcessId = 101; ParentProcessId = 100; CreationDate = $childDate }
+)
+$rootTicks = $script:processSnapshot[0].CreationDate.ToUniversalTime().Ticks
+$observed = @(Get-TrackedProcessTreeIds -RootProcessId 100 -RootCreationTimeUtcTicks $rootTicks)
+if ($observed.Count -ne 2) { exit 10 }
+$script:processSnapshot = @($script:processSnapshot | Where-Object { $_.ProcessId -ne 100 })
+$preserved = @(Merge-TrackedProcessTreeIds -ExistingIds $observed -CurrentIds @())
+if (@(Get-RunningTrackedProcessIds -ProcessIds $preserved).Count -ne 1) { exit 11 }
 $script:taskkillExitCode = 5
-$failed = Stop-TrackedProcessTree -RootProcessId 100 -ConfirmationTimeoutSeconds 0 -KnownProcessIds @(100, 101)
-if ($failed.Terminated -or $failed.TaskkillSucceeded -or $failed.RunningProcessIds.Count -eq 0) { exit 11 }
-$script:runningPids.Clear()
-[void]$script:runningPids.Add(100)
-[void]$script:runningPids.Add(101)
+$failed = Stop-TrackedProcessTree -RootProcessId 100 -RootCreationTimeUtcTicks $rootTicks -ConfirmationTimeoutSeconds 0 -KnownProcessIds $preserved
+if ($failed.Terminated -or $failed.TaskkillSucceeded -or $failed.RunningProcessIds.Count -ne 1) { exit 12 }
 $script:taskkillExitCode = 0
-$succeeded = Stop-TrackedProcessTree -RootProcessId 100 -ConfirmationTimeoutSeconds 0 -KnownProcessIds @(100, 101)
-if (-not $succeeded.Terminated -or -not $succeeded.TaskkillSucceeded -or $succeeded.RunningProcessIds.Count -ne 0) { exit 12 }
-$script:processSnapshot = @([pscustomobject]@{ ProcessId = 101; ParentProcessId = 100 })
-[void]$script:runningPids.Add(101)
-$orphanedChild = Stop-TrackedProcessTree -RootProcessId 100 -ConfirmationTimeoutSeconds 0 -KnownProcessIds @(100, 101)
-if (-not $orphanedChild.Terminated -or $script:killedProcessId -ne 101) { exit 13 }
+$script:killCount = 0
+$succeeded = Stop-TrackedProcessTree -RootProcessId 100 -RootCreationTimeUtcTicks $rootTicks -ConfirmationTimeoutSeconds 0 -KnownProcessIds $preserved
+if (-not $succeeded.Terminated -or $script:killedProcessId -ne 101) { exit 13 }
+$oldIdentity = $preserved | Where-Object { $_.ProcessId -eq 101 } | Select-Object -First 1
+$killCountBeforeReuse = $script:killCount
+$script:processSnapshot = @([pscustomobject]@{
+    ProcessId = 101
+    ParentProcessId = 1
+    CreationDate = [DateTime]::UtcNow
+})
+$reused = Stop-TrackedProcessTree -RootProcessId 100 -RootCreationTimeUtcTicks $rootTicks -ConfirmationTimeoutSeconds 0 -KnownProcessIds @($oldIdentity)
+if (-not $reused.Terminated -or $script:killCount -ne $killCountBeforeReuse) { exit 14 }
+$status = [pscustomobject]@{ outcome = "graceful" }
+if ((Get-IntentionalShutdownExitCode $status 0 $false $true) -ne 0) { exit 15 }
+$status.outcome = "forced"
+if ((Get-IntentionalShutdownExitCode $status 0 $false $true) -ne 2) { exit 16 }
+$status.outcome = "unconfirmed"
+if ((Get-IntentionalShutdownExitCode $status 0 $false $true) -ne 3) { exit 17 }
+$status.outcome = "failed"
+if ((Get-IntentionalShutdownExitCode $status 1 $false $true) -ne 1) { exit 18 }
+if ((Get-IntentionalShutdownExitCode ([pscustomobject]@{ outcome = "graceful" }) 0 $true $true) -ne 2) { exit 19 }
+if ((Get-IntentionalShutdownExitCode ([pscustomobject]@{ outcome = "graceful" }) 1 $false $true) -ne 1) { exit 20 }
+if ((Get-IntentionalShutdownExitCode ([pscustomobject]@{ outcome = "graceful" }) 0 $false $false) -ne 3) { exit 21 }
+if ((Get-StartupCleanupExitCode $true) -ne 1) { exit 22 }
+if ((Get-StartupCleanupExitCode $false) -ne 3) { exit 23 }
 """
         environment = os.environ.copy()
         environment["TRACKER_LAUNCHER_SCRIPT"] = str(ROOT / "run_nicegui.ps1")
@@ -237,6 +278,56 @@ if (-not $orphanedChild.Terminated -or $script:killedProcessId -ne 101) { exit 1
             timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(os.name == "nt" and shutil.which("powershell"), "Windows PowerShell is required")
+    def test_observed_research_child_is_stopped_after_root_exits(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root_script = Path(directory) / "short_root.ps1"
+            child_pid_path = Path(directory) / "child.pid"
+            root_script.write_text(
+                "$child = Start-Process -FilePath 'powershell.exe' "
+                "-ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 30') -PassThru\n"
+                f"Set-Content -LiteralPath '{child_pid_path}' -Value $child.Id -NoNewline\n"
+                "Start-Sleep -Seconds 2\n",
+                encoding="utf-8",
+            )
+            command = r"""
+$source = Get-Content -Raw -LiteralPath $env:TRACKER_LAUNCHER_SCRIPT
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$errors)
+foreach ($name in @("ConvertTo-CreationTimeUtcTicks", "Get-TrackedProcessTreeIds", "Get-ProcessIdentity", "Merge-TrackedProcessTreeIds", "Get-RunningTrackedProcessIds", "Stop-TrackedProcessTree")) {
+    $definition = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
+    if ($null -eq $definition) { throw "Missing function $name" }
+    Invoke-Expression $definition.Extent.Text
+}
+$root = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$env:TRACKER_TEST_ROOT_SCRIPT) -PassThru
+$identity = Get-ProcessIdentity -ProcessId $root.Id
+$deadline = [DateTime]::UtcNow.AddSeconds(10)
+while (-not (Test-Path -LiteralPath $env:TRACKER_TEST_CHILD_PID) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 50 }
+if (-not (Test-Path -LiteralPath $env:TRACKER_TEST_CHILD_PID)) { throw "Test child was not launched" }
+$childId = [int](Get-Content -Raw -LiteralPath $env:TRACKER_TEST_CHILD_PID)
+$observed = @(Get-TrackedProcessTreeIds -RootProcessId $root.Id -RootCreationTimeUtcTicks $identity.CreationTimeUtcTicks)
+if (-not ($observed | Where-Object { $_.ProcessId -eq $childId })) { throw "Research child was not observed under its root" }
+$root.WaitForExit()
+$stillRunning = @(Get-RunningTrackedProcessIds -ProcessIds $observed)
+if (-not ($stillRunning | Where-Object { $_.ProcessId -eq $childId })) { throw "Child exited before the shutdown fallback test" }
+$result = Stop-TrackedProcessTree -RootProcessId $root.Id -RootCreationTimeUtcTicks $identity.CreationTimeUtcTicks -ConfirmationTimeoutSeconds 5 -KnownProcessIds $observed
+if (-not $result.Terminated) { throw "The observed child was not confirmed stopped" }
+if (Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $childId" -ErrorAction SilentlyContinue) { throw "Test child remains alive" }
+"""
+            environment = os.environ.copy()
+            environment["TRACKER_LAUNCHER_SCRIPT"] = str(ROOT / "run_nicegui.ps1")
+            environment["TRACKER_TEST_ROOT_SCRIPT"] = str(root_script)
+            environment["TRACKER_TEST_CHILD_PID"] = str(child_pid_path)
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+                capture_output=True,
+                text=True,
+                env=environment,
+                timeout=20,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_intentional_and_failed_exits_remain_distinct(self) -> None:
         self.assertIn("$intentionalShutdown = $true", self.script)
@@ -283,7 +374,12 @@ if (-not $orphanedChild.Terminated -or $script:killedProcessId -ne 101) { exit 1
                 research_worker_lifecycle.start_research_worker()
                 research_worker_lifecycle.start_research_worker()
                 popen.assert_called_once()
-                self.assertTrue(research_worker_lifecycle.stop_research_worker())
+                from nicegui_app.research_worker_lifecycle import ResearchWorkerStopOutcome
+
+                self.assertIs(
+                    research_worker_lifecycle.stop_research_worker(),
+                    ResearchWorkerStopOutcome.STOPPED,
+                )
             worker.wait.assert_called_once_with(timeout=10.0)
             worker.terminate.assert_not_called()
             worker.kill.assert_not_called()

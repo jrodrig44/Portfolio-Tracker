@@ -19,7 +19,12 @@ historical release dates or tags are implied.
 - Added distinct launcher outcomes for graceful shutdown, confirmed forced
   termination, startup/runtime failure, and unconfirmed process-tree
   termination. The launcher checks force-termination status and waits for the
-  owned process tree to exit.
+  owned process tree to exit. Observed process identities include creation
+  times to avoid acting on recycled PIDs; worker outcomes are communicated in
+  an invocation-specific status file. A confirmed forced research-worker stop
+  maps to exit 2, while an unconfirmed worker stop maps to exit 3. Startup
+  cleanup that cannot confirm process-tree termination also maps to exit 3.
+  These corrections complete the 2.1.2 patch; the version remains unchanged.
 - The reported multi-day shutdown delay was not reproduced. The changes improve
   observability and enforce bounded shutdown; they do not establish which
   shutdown stage caused the reported delay.

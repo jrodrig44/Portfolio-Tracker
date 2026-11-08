@@ -6,15 +6,15 @@ set "TRACKER_EXIT_CODE=%ERRORLEVEL%"
 
 if "%TRACKER_EXIT_CODE%"=="2" (
     echo.
-    echo Graceful shutdown timed out. Forced termination was required, and the launched process tree is confirmed stopped.
-    echo This was not a safe graceful shutdown.
+    echo Shutdown required forced termination of a worker or the launched process tree; all required exits were confirmed.
+    echo This was not a wholly graceful shutdown.
     pause
     exit /b 2
 )
 
 if "%TRACKER_EXIT_CODE%"=="3" (
     echo.
-    echo ERROR: Portfolio Tracker could not confirm termination of its launched process tree. Processes may remain active.
+    echo ERROR: Portfolio Tracker could not confirm shutdown of a worker or its launched process tree. Processes may remain active.
     pause
     exit /b 3
 )
