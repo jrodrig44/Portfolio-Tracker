@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 from datetime import datetime
 import logging
+import os
 from pathlib import Path
 import sqlite3
+import threading
 import time
 
 from dotenv import load_dotenv
@@ -117,6 +119,14 @@ def run_once(project_root: Path) -> int:
     return 0
 
 
+def _watch_stop_request(stop_event: threading.Event, stop_file: str) -> None:
+    while not stop_event.wait(0.1):
+        if Path(stop_file).is_file():
+            log_event(LOGGER, "worker_stop_requested", "Supplemental research worker stop request received")
+            stop_event.set()
+            return
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the Portfolio Tracker supplemental research worker.")
     parser.add_argument("--once", action="store_true", help="Check and process due research once, then exit.")
@@ -129,15 +139,37 @@ def main() -> int:
             return run_once(project_root)
         finally:
             log_event(LOGGER, "worker_stopping", "Supplemental research worker stopping", status="once")
-    while True:
-        try:
-            run_once(project_root)
-        except Exception:
-            log_event(LOGGER, "worker_unhandled_error", "Supplemental research worker check failed", level=logging.ERROR, exception_type="unknown", sanitized_error="Worker check failed")
-            LOGGER.exception("Supplemental research worker check failed.")
-        next_check_at = (datetime.now().astimezone() + WORKER_CHECK_INTERVAL).isoformat(timespec="seconds")
-        log_event(LOGGER, "worker_sleeping", "Supplemental research worker sleeping", next_check_at=next_check_at)
-        time.sleep(WORKER_CHECK_INTERVAL.total_seconds())
+
+    stop_event = threading.Event()
+    stop_file = os.environ.get("PORTFOLIO_RESEARCH_STOP_FILE", "").strip()
+    stop_watcher = None
+    if stop_file:
+        stop_watcher = threading.Thread(
+            target=_watch_stop_request,
+            args=(stop_event, stop_file),
+            name="supplemental-research-stop-watcher",
+            daemon=True,
+        )
+        stop_watcher.start()
+
+    try:
+        while not stop_event.is_set():
+            try:
+                run_once(project_root)
+            except Exception:
+                log_event(LOGGER, "worker_unhandled_error", "Supplemental research worker check failed", level=logging.ERROR, exception_type="unknown", sanitized_error="Worker check failed")
+                LOGGER.exception("Supplemental research worker check failed.")
+            if stop_event.is_set():
+                break
+            next_check_at = (datetime.now().astimezone() + WORKER_CHECK_INTERVAL).isoformat(timespec="seconds")
+            log_event(LOGGER, "worker_sleeping", "Supplemental research worker sleeping", next_check_at=next_check_at)
+            stop_event.wait(WORKER_CHECK_INTERVAL.total_seconds())
+    finally:
+        stop_event.set()
+        if stop_watcher is not None:
+            stop_watcher.join(timeout=0.2)
+        log_event(LOGGER, "worker_stopping", "Supplemental research worker stopping", status="requested")
+    return 0
 
 
 if __name__ == "__main__":

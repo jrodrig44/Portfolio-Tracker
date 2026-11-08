@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import logging
 import threading
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Callable
@@ -12,6 +13,8 @@ import exchange_calendars as xcals
 import pandas as pd
 from application_metadata import APPLICATION_NAME, APPLICATION_VERSION
 from network_diagnostics import network_operation, diagnostic
+from logging_setup import log_event
+from nicegui_app.process_lifecycle import ShutdownInProgress, lifecycle
 
 from nicegui_app.services.configuration import (
     MARKET_BACKGROUND_CHECK_INTERVAL_SECONDS,
@@ -24,6 +27,7 @@ from nicegui_app.services.yahoo import clear_price_cache, current_market_data
 
 LOGGER = logging.getLogger("portfolio_tracker")
 EASTERN = ZoneInfo("America/New_York")
+WORKER_STOP_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -143,7 +147,10 @@ class MarketRefreshWorker:
     def _run(self) -> None:
         while not self._stop_event.is_set():
             try:
-                self.run_once()
+                with lifecycle.critical_operation("market_refresh"):
+                    self.run_once()
+            except ShutdownInProgress:
+                break
             except Exception:
                 LOGGER.exception("Background market worker check failed; a later check will retry.")
             self._stop_event.wait(self.check_interval_seconds)
@@ -166,16 +173,53 @@ class MarketRefreshWorker:
             application_version=APPLICATION_VERSION,
         )
 
-    def stop(self) -> None:
+    def stop(self, timeout_seconds: float = WORKER_STOP_TIMEOUT_SECONDS) -> bool:
         with self._lifecycle_lock:
             thread = self._thread
-            self._thread = None
             self._stop_event.set()
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=max(self.check_interval_seconds + 1.0, 2.0))
-        if thread is not None:
-            LOGGER.info("Background market refresh worker stopped.")
-            diagnostic("market_worker_stopped")
+        if thread is None:
+            return True
+
+        started = time.monotonic()
+        log_event(
+            LOGGER,
+            "market_worker_stop_started",
+            "Background market refresh worker stop started",
+            timeout_seconds=timeout_seconds,
+        )
+        if thread is not threading.current_thread():
+            thread.join(timeout=max(timeout_seconds, 0.0))
+        stopped = not thread.is_alive()
+        elapsed_ms = round((time.monotonic() - started) * 1000, 3)
+        if stopped:
+            with self._lifecycle_lock:
+                if self._thread is thread:
+                    self._thread = None
+            log_event(
+                LOGGER,
+                "market_worker_stop_completed",
+                "Background market refresh worker stopped",
+                duration_ms=elapsed_ms,
+            )
+            diagnostic("market_worker_stopped", duration_ms=elapsed_ms)
+            return True
+
+        lifecycle.record_shutdown_issue("market_refresh_worker")
+        log_event(
+            LOGGER,
+            "market_worker_stop_timed_out",
+            "Background market refresh worker remains active after its stop timeout",
+            duration_ms=elapsed_ms,
+            timeout_seconds=timeout_seconds,
+            thread_name=thread.name,
+        )
+        diagnostic(
+            "market_worker_stop_timed_out",
+            duration_ms=elapsed_ms,
+            timeout_seconds=timeout_seconds,
+            thread_name=thread.name,
+        )
+        return False
 
 
 _worker = MarketRefreshWorker()
@@ -185,8 +229,8 @@ def start_market_refresh_worker() -> None:
     _worker.start()
 
 
-def stop_market_refresh_worker() -> None:
-    _worker.stop()
+def stop_market_refresh_worker(timeout_seconds: float = WORKER_STOP_TIMEOUT_SECONDS) -> bool:
+    return _worker.stop(timeout_seconds)
 
 
 atexit.register(stop_market_refresh_worker)

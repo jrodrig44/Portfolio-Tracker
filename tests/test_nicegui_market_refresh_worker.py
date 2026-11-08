@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 import unittest
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 from nicegui_app.market_refresh_worker import MarketRefreshWorker, market_session_state
+from nicegui_app.process_lifecycle import LifecycleCoordinator
 from nicegui_app.services import yahoo
 from shared_data_preparation import persist_live_snapshot_if_ready
 from stash_history import ensure_history_schema
@@ -132,6 +134,71 @@ class WorkerTests(unittest.TestCase):
         worker.stop()
         self.assertFalse(thread.is_alive())
 
+    def test_idle_worker_stop_is_prompt_and_logged_as_complete(self) -> None:
+        worker = MarketRefreshWorker(
+            check_interval_seconds=60,
+            state_loader=lambda value, **kw: self.state(value, opened=False, session_day=None),
+        )
+        worker.start()
+        thread = worker._thread
+        with patch("nicegui_app.market_refresh_worker.log_event") as event:
+            started = datetime.now(timezone.utc)
+            self.assertTrue(worker.stop(timeout_seconds=0.5))
+            self.assertLess((datetime.now(timezone.utc) - started).total_seconds(), 0.5)
+        self.assertFalse(thread.is_alive())
+        self.assertIsNone(worker._thread)
+        self.assertEqual(
+            [call.args[1] for call in event.call_args_list],
+            ["market_worker_stop_started", "market_worker_stop_completed"],
+        )
+
+    def test_stalled_worker_stop_reports_timeout_and_remains_tracked(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+
+        def stalled_state(now, **_):
+            entered.set()
+            release.wait(1)
+            return self.state(now, opened=False, session_day=None)
+
+        worker = MarketRefreshWorker(state_loader=stalled_state)
+        worker.start()
+        self.assertTrue(entered.wait(1))
+        thread = worker._thread
+        with patch("nicegui_app.market_refresh_worker.log_event") as event:
+            self.assertFalse(worker.stop(timeout_seconds=0.02))
+        self.assertTrue(thread.is_alive())
+        self.assertIs(worker._thread, thread)
+        self.assertEqual(event.call_args.args[1], "market_worker_stop_timed_out")
+        release.set()
+        thread.join(1)
+        self.assertFalse(thread.is_alive())
+        self.assertTrue(worker.stop(timeout_seconds=0.1))
+
+    def test_in_flight_background_refresh_is_protected_until_it_finishes(self) -> None:
+        coordinator = LifecycleCoordinator()
+        entered = threading.Event()
+        release = threading.Event()
+
+        def stalled_state(now, **_):
+            entered.set()
+            release.wait(1)
+            return self.state(now, opened=False, session_day=None)
+
+        worker = MarketRefreshWorker(state_loader=stalled_state)
+        with patch("nicegui_app.market_refresh_worker.lifecycle", coordinator):
+            worker.start()
+            self.assertTrue(entered.wait(1))
+            self.assertEqual(
+                [operation.name for operation in coordinator.active_operation_details()],
+                ["market_refresh"],
+            )
+            self.assertTrue(coordinator.begin_shutdown())
+            self.assertFalse(coordinator.wait_for_critical_operations(0.02))
+            release.set()
+            self.assertTrue(worker.stop(timeout_seconds=1))
+            self.assertTrue(coordinator.wait_for_critical_operations(0.1))
+
 
 class PersistenceAndCacheTests(unittest.TestCase):
     def test_same_day_snapshot_is_updated_not_duplicated(self) -> None:
@@ -165,7 +232,9 @@ class PersistenceAndCacheTests(unittest.TestCase):
         source = (Path(__file__).parents[1] / "nicegui_app" / "main.py").read_text(encoding="utf-8")
         worker_source = (Path(__file__).parents[1] / "nicegui_app" / "market_refresh_worker.py").read_text(encoding="utf-8")
         self.assertIn("app.on_startup(start_market_refresh_worker)", source)
-        self.assertIn("app.on_shutdown(stop_market_refresh_worker)", source)
+        self.assertIn("app.on_shutdown(stop_background_workers)", source)
+        self.assertIn("asyncio.to_thread(stop_market_refresh_worker)", source)
+        self.assertIn("asyncio.to_thread(stop_research_worker)", source)
         self.assertIn("ui.timer(DB_REFRESH_INTERVAL_SECONDS", source)
         self.assertNotIn("ui.timer", worker_source)
         self.assertNotIn("ui.context.client", worker_source)

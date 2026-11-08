@@ -1,7 +1,121 @@
 $ErrorActionPreference = "Stop"
+$script:applicationReady = $false
+
+trap {
+    if ($script:applicationReady) {
+        Write-Host "Portfolio Tracker exited unexpectedly. $($_.Exception.Message)"
+    }
+    else {
+        Write-Host "Portfolio Tracker failed to start. $($_.Exception.Message)"
+    }
+    exit 1
+}
 
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $projectRoot
+
+function Get-TrackedProcessTreeIds {
+    param([Parameter(Mandatory = $true)][int]$RootProcessId)
+
+    $processes = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)
+    $trackedIds = [System.Collections.Generic.HashSet[int]]::new()
+    [void]$trackedIds.Add($RootProcessId)
+    $changed = $true
+    while ($changed) {
+        $changed = $false
+        foreach ($process in $processes) {
+            $processId = [int]$process.ProcessId
+            if ($trackedIds.Contains([int]$process.ParentProcessId) -and $trackedIds.Add($processId)) {
+                $changed = $true
+            }
+        }
+    }
+    return @($trackedIds)
+}
+
+function Merge-TrackedProcessTreeIds {
+    param(
+        [int[]]$ExistingIds = @(),
+        [int[]]$CurrentIds = @()
+    )
+
+    $trackedIds = [System.Collections.Generic.HashSet[int]]::new()
+    foreach ($processId in @($ExistingIds) + @($CurrentIds)) {
+        [void]$trackedIds.Add([int]$processId)
+    }
+    return @($trackedIds)
+}
+
+function Get-RunningTrackedProcessIds {
+    param([Parameter(Mandatory = $true)][int[]]$ProcessIds)
+
+    $runningIds = [System.Collections.Generic.List[int]]::new()
+    foreach ($processId in $ProcessIds) {
+        if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {
+            $runningIds.Add($processId)
+        }
+    }
+    return @($runningIds)
+}
+
+function Stop-TrackedProcessTree {
+    param(
+        [Parameter(Mandatory = $true)][int]$RootProcessId,
+        [Parameter(Mandatory = $true)][int]$ConfirmationTimeoutSeconds,
+        [int[]]$KnownProcessIds = @()
+    )
+
+    $snapshotSucceeded = $true
+    $trackedIds = @(Merge-TrackedProcessTreeIds -ExistingIds @($RootProcessId) -CurrentIds $KnownProcessIds)
+    try {
+        $currentIds = @(Get-TrackedProcessTreeIds -RootProcessId $RootProcessId)
+        $trackedIds = @(Merge-TrackedProcessTreeIds -ExistingIds $trackedIds -CurrentIds $currentIds)
+    }
+    catch {
+        $snapshotSucceeded = $false
+        Write-Host "Unable to snapshot the launched process tree: $($_.Exception.Message)"
+    }
+
+    $runningIds = @(Get-RunningTrackedProcessIds -ProcessIds $trackedIds)
+    $taskkillSucceeded = $true
+    $taskkillErrors = [System.Collections.Generic.List[string]]::new()
+    if ($runningIds.Count -gt 0) {
+        $targets = if ($runningIds -contains $RootProcessId) { @($RootProcessId) } else { $runningIds }
+        foreach ($processId in $targets) {
+            try {
+                $null = & taskkill.exe /PID $processId /T /F 2>&1
+                $commandExitCode = $LASTEXITCODE
+            }
+            catch {
+                $commandExitCode = -1
+                $taskkillErrors.Add("taskkill for PID $processId failed: $($_.Exception.Message)")
+            }
+            if ($commandExitCode -ne 0) {
+                $taskkillSucceeded = $false
+                if ($commandExitCode -ne -1) {
+                    $taskkillErrors.Add("taskkill for PID $processId returned $commandExitCode")
+                }
+            }
+        }
+    }
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($ConfirmationTimeoutSeconds)
+    do {
+        $runningIds = @(Get-RunningTrackedProcessIds -ProcessIds $trackedIds)
+        if ($runningIds.Count -eq 0) {
+            break
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    return [pscustomobject]@{
+        SnapshotSucceeded = $snapshotSucceeded
+        TaskkillSucceeded = $taskkillSucceeded
+        TaskkillErrors = @($taskkillErrors)
+        RunningProcessIds = @($runningIds)
+        Terminated = $snapshotSucceeded -and $taskkillSucceeded -and $runningIds.Count -eq 0
+    }
+}
 
 $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
 if ([string]::IsNullOrWhiteSpace($localAppData)) {
@@ -338,9 +452,10 @@ $shutdownRequestPath = Join-Path ([System.IO.Path]::GetTempPath()) "portfolio-tr
 $shutdownWaitPath = Join-Path ([System.IO.Path]::GetTempPath()) "portfolio-tracker-stop-$shutdownToken.waiting"
 $env:NICEGUI_SHUTDOWN_REQUEST_FILE = $shutdownRequestPath
 $env:NICEGUI_SHUTDOWN_WAIT_FILE = $shutdownWaitPath
-$gracefulShutdownTimeoutSeconds = 15
+$gracefulShutdownTimeoutSeconds = 45
+$processTreeConfirmationTimeoutSeconds = 8
 $intentionalShutdown = $false
-$forcedShutdown = $false
+$launcherExitCode = 0
 try {
     $quotedNiceGuiMain = '"' + $niceGuiMain + '"'
     $child = Start-Process -FilePath $venvPython -ArgumentList @($quotedNiceGuiMain) -WorkingDirectory $projectRoot -NoNewWindow -PassThru
@@ -359,13 +474,24 @@ try {
         }
     }
     if (-not $ready) {
-        if (-not $child.HasExited) {
-            & taskkill.exe /PID $child.Id /T /F | Out-Null
+        $termination = Stop-TrackedProcessTree -RootProcessId $child.Id -ConfirmationTimeoutSeconds $processTreeConfirmationTimeoutSeconds -KnownProcessIds @($child.Id)
+        if (-not $termination.Terminated) {
+            throw "Portfolio Tracker failed readiness and the launched process tree could not be confirmed stopped. Remaining PIDs: $($termination.RunningProcessIds -join ', ')."
         }
         if ($readinessError) {
             throw "Portfolio Tracker did not become ready on $readinessUrl within 30 seconds. Last readiness error: $readinessError"
         }
         throw "Portfolio Tracker did not become ready on $readinessUrl within 30 seconds."
+    }
+    $script:applicationReady = $true
+    $processTreeSnapshotSucceeded = $true
+    try {
+        $trackedProcessIds = @(Get-TrackedProcessTreeIds -RootProcessId $child.Id)
+    }
+    catch {
+        $processTreeSnapshotSucceeded = $false
+        $trackedProcessIds = @($child.Id)
+        Write-Host "Unable to snapshot the launched process tree: $($_.Exception.Message)"
     }
     Write-Host "NiceGUI ready to go on $productionUrl"
     $oldTreatControlCAsInput = [Console]::TreatControlCAsInput
@@ -379,27 +505,74 @@ try {
                     Write-Host "Stopping Portfolio Tracker safely..."
                     New-Item -ItemType File -Path $shutdownRequestPath -Force | Out-Null
                     # Ask the application to reject new protected writes and
-                    # drain admitted ones. Only the exact child process tree is
-                    # terminated if the bounded graceful interval expires.
+                    # drain admitted ones. The application allows 20 seconds for
+                    # protected work; worker and server cleanup share this total
+                    # 45-second graceful deadline.
                     $deadline = [DateTime]::UtcNow.AddSeconds($gracefulShutdownTimeoutSeconds)
-                    $waitingReported = $false
-                    while (-not $child.HasExited -and [DateTime]::UtcNow -lt $deadline) {
-                        if (-not $waitingReported -and (Test-Path -LiteralPath $shutdownWaitPath -PathType Leaf)) {
-                            Write-Host "Waiting for active operations to finish..."
-                            $waitingReported = $true
+                    $acknowledgementReported = $false
+                    $trackedProcessIds = @($child.Id)
+                    while ([DateTime]::UtcNow -lt $deadline) {
+                        $child.Refresh()
+                        if (-not $acknowledgementReported -and (Test-Path -LiteralPath $shutdownWaitPath -PathType Leaf)) {
+                            Write-Host "Application acknowledged the shutdown request."
+                            $acknowledgementReported = $true
+                        }
+                        if (-not $child.HasExited) {
+                            try {
+                                $currentProcessIds = @(Get-TrackedProcessTreeIds -RootProcessId $child.Id)
+                                $trackedProcessIds = @(Merge-TrackedProcessTreeIds -ExistingIds $trackedProcessIds -CurrentIds $currentProcessIds)
+                            }
+                            catch {
+                                $processTreeSnapshotSucceeded = $false
+                                Write-Host "Unable to inspect the launched process tree during shutdown: $($_.Exception.Message)"
+                            }
+                        }
+                        $runningProcessIds = @(Get-RunningTrackedProcessIds -ProcessIds $trackedProcessIds)
+                        if ($child.HasExited -and $runningProcessIds.Count -eq 0) {
+                            break
                         }
                         Start-Sleep -Milliseconds 100
-                        $child.Refresh()
                     }
+                    $child.Refresh()
                     if (-not $child.HasExited) {
+                        try {
+                            $currentProcessIds = @(Get-TrackedProcessTreeIds -RootProcessId $child.Id)
+                            $trackedProcessIds = @(Merge-TrackedProcessTreeIds -ExistingIds $trackedProcessIds -CurrentIds $currentProcessIds)
+                        }
+                        catch {
+                            $processTreeSnapshotSucceeded = $false
+                            Write-Host "Unable to verify the launched process tree after shutdown: $($_.Exception.Message)"
+                        }
+                    }
+                    $runningProcessIds = @(Get-RunningTrackedProcessIds -ProcessIds $trackedProcessIds)
+                    if (-not $child.HasExited -or $runningProcessIds.Count -gt 0) {
                         Write-Host "Graceful shutdown timed out after $gracefulShutdownTimeoutSeconds seconds."
-                        Write-Host "Forcing Portfolio Tracker to stop..."
-                        & taskkill.exe /PID $child.Id /T /F | Out-Null
-                        $forcedShutdown = $true
-                        Write-Host "Portfolio Tracker was force-stopped."
+                        Write-Host "Attempting forced termination of the launched process tree..."
+                        $termination = Stop-TrackedProcessTree -RootProcessId $child.Id -ConfirmationTimeoutSeconds $processTreeConfirmationTimeoutSeconds -KnownProcessIds $trackedProcessIds
+                        if (-not $termination.Terminated -or -not $processTreeSnapshotSucceeded) {
+                            Write-Host "Portfolio Tracker could not confirm termination of its launched process tree."
+                            Write-Host "taskkill succeeded: $($termination.TaskkillSucceeded); process-tree snapshots succeeded: $($termination.SnapshotSucceeded -and $processTreeSnapshotSucceeded); remaining PIDs: $($termination.RunningProcessIds -join ', ')."
+                            if ($termination.TaskkillErrors.Count -gt 0) {
+                                Write-Host ($termination.TaskkillErrors -join "; ")
+                            }
+                            $launcherExitCode = 3
+                        }
+                        else {
+                            Write-Host "Graceful shutdown timed out; forced termination was required. The launched process tree is confirmed stopped; this was not a safe graceful shutdown."
+                            $launcherExitCode = 2
+                        }
                     }
                     else {
-                        Write-Host "Portfolio Tracker stopped safely."
+                        if (-not $processTreeSnapshotSucceeded) {
+                            Write-Host "NiceGUI exited, but the launched process tree could not be verified."
+                            $launcherExitCode = 3
+                        }
+                        elseif ($child.ExitCode -ne 0) {
+                            throw "NiceGUI exited with code $($child.ExitCode) during the requested graceful shutdown."
+                        }
+                        else {
+                            Write-Host "Portfolio Tracker stopped gracefully; the launched process tree has exited."
+                        }
                     }
                     break
                 }
@@ -411,11 +584,8 @@ try {
     finally {
         [Console]::TreatControlCAsInput = $oldTreatControlCAsInput
     }
-    if ($forcedShutdown) {
-        exit 2
-    }
-    if (-not $intentionalShutdown -and $child.ExitCode -ne 0) {
-        throw "NiceGUI exited with code $($child.ExitCode)."
+    if ($launcherExitCode -eq 0 -and -not $intentionalShutdown) {
+        throw "NiceGUI exited unexpectedly with code $($child.ExitCode)."
     }
 }
 finally {
@@ -426,3 +596,5 @@ finally {
     Remove-Item -LiteralPath $shutdownRequestPath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $shutdownWaitPath -Force -ErrorAction SilentlyContinue
 }
+
+exit $launcherExitCode

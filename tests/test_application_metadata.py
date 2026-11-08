@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class ApplicationMetadataTests(unittest.TestCase):
     def test_product_identity_and_release_version_are_centralized(self) -> None:
         self.assertEqual(APPLICATION_NAME, "Portfolio Tracker")
-        self.assertEqual(APPLICATION_VERSION, "2.1.1")
+        self.assertEqual(APPLICATION_VERSION, "2.1.2")
 
     def test_both_interfaces_and_startup_logs_use_shared_metadata(self) -> None:
         nicegui_source = (ROOT / "nicegui_app" / "main.py").read_text(encoding="utf-8")

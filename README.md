@@ -141,7 +141,7 @@ The launcher:
 4. Refuses to replace another listener on production port 8501.
 5. Starts NiceGUI, checks `http://localhost:8501` readiness, and starts one Supplemental Research child plus one in-process Market Refresh worker through the NiceGUI lifecycle.
 
-First-time setup requires internet access to install Python (when needed) and the project dependencies. If `winget` is unavailable or blocked by device policy, install Python 3.12 manually and start the launcher again. Keep the PowerShell window/server process running. Browser auto-open is disabled, and the browser may remain closed after readiness while both background systems continue. Press Ctrl+C for graceful shutdown; protected writes drain before an exact-process-tree forced stop is used only if the 15-second grace period expires.
+First-time setup requires internet access to install Python (when needed) and the project dependencies. If `winget` is unavailable or blocked by device policy, install Python 3.12 manually and start the launcher again. Keep the PowerShell window/server process running. Browser auto-open is disabled, and the browser may remain closed after readiness while both background systems continue. Ctrl+C starts shutdown with up to 20 seconds for protected writes to drain and a 45-second total graceful deadline. If that expires, only this launcher's process tree is force-terminated, with up to 8 seconds to confirm exit; launcher outcomes are documented in [nicegui_app/README.md](nicegui_app/README.md).
 
 PowerShell alternative:
 
@@ -166,7 +166,7 @@ NiceGUI remains the production interface. Streamlit is a supported maintenance a
 
 ## Application Versioning
 
-The current product version is **v2.1.1**, sourced from `application_metadata.py`.
+The current product version is **v2.1.2**, sourced from `application_metadata.py`.
 The 1.x Streamlit generation, 2.0 NiceGUI production generation, and 2.1.0
 pre-patch NiceGUI baseline are historical context adopted in
 [CHANGELOG.md](CHANGELOG.md); they were not previously published GitHub releases.
@@ -178,6 +178,10 @@ changes. Increment once per intentional release, not per commit or startup.
 
 Structured application logs use JSONL, switch to new date-and-process-stamped files at local midnight, retain 14 calendar days, and redact sensitive fields. The configured filename patterns are:
 
+- `logs/nicegui.YYYY-MM-DD.PID.jsonl` for the application/version startup
+  record, shutdown requests and acknowledgements, protected-operation drain
+  durations, worker stop stages, callback signaling, and final process-exit
+  outcomes.
 - `logs/streamlit.YYYY-MM-DD.PID.jsonl` for the temporary Streamlit rollback lifecycle and its Yahoo/cache events.
 - `logs/supplemental_research_worker.YYYY-MM-DD.PID.jsonl` for independent research-worker checks, leases, outcomes, and sleep/shutdown events.
 

@@ -102,12 +102,14 @@ class NiceGuiBrandingTests(unittest.TestCase):
 
     def test_shared_product_metadata_is_used_in_nicegui_surfaces(self) -> None:
         self.assertEqual(APPLICATION_NAME, "Portfolio Tracker")
-        self.assertEqual(APPLICATION_VERSION, "2.1.1")
+        self.assertEqual(APPLICATION_VERSION, "2.1.2")
         self.assertIn("ui.label(APPLICATION_NAME)", MAIN_SOURCE)
         self.assertIn('ui.label(f"v{APPLICATION_VERSION}")', MAIN_SOURCE)
         self.assertIn('("Application", APPLICATION_NAME, False)', MAIN_SOURCE)
         self.assertIn('("Version", APPLICATION_VERSION, False)', MAIN_SOURCE)
         self.assertIn("title=APPLICATION_NAME", MAIN_SOURCE)
+        self.assertIn('"application_starting"', MAIN_SOURCE)
+        self.assertIn("application_version=APPLICATION_VERSION", MAIN_SOURCE)
 
     def test_head_metadata_and_clean_production_title(self) -> None:
         self.assertIn('rel="icon" href="/favicon.ico" sizes="any"', MAIN_SOURCE)

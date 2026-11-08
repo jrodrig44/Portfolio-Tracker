@@ -135,7 +135,7 @@ class NetworkDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             ])
             self.assertEqual(
                 event.call_args_list[2].kwargs["application_version"],
-                "2.1.1",
+                "2.1.2",
             )
 
     def test_distinct_apps_each_receive_diagnostics(self):

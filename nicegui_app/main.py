@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 import sys
 import uuid
@@ -21,7 +23,13 @@ ENVIRONMENT_STATUS = initialize_project_environment(PROJECT_ROOT)
 
 from nicegui import app, run, ui
 from network_diagnostics import install_client_diagnostics
-from nicegui_app.process_lifecycle import ShutdownInProgress, lifecycle, start_launcher_watchdog, start_shutdown_request_watcher
+from nicegui_app.process_lifecycle import (
+    ShutdownInProgress,
+    configure_nicegui_logging,
+    lifecycle,
+    start_launcher_watchdog,
+    start_shutdown_request_watcher,
+)
 from nicegui_app.research_worker_lifecycle import start_research_worker, stop_research_worker
 from nicegui_app.market_refresh_worker import start_market_refresh_worker, stop_market_refresh_worker
 from nicegui_app.services.ai_context import AIAnalysisState,ai_options,run_ai_analysis
@@ -61,6 +69,7 @@ from hd_espp_lifetime import build_hd_lifetime_economics
 from hd_espp_integration import load_hd_historical_integration_context
 from hd_espp_evidence import merge_hd_evidence
 from shared_data_preparation import prepare_shared_data
+from logging_setup import log_event
 
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("PORTFOLIO_TRACKER_PORT", "8501"))
@@ -107,9 +116,49 @@ HOLDING_NUMERIC_VALUE_PARSER = (
 
 install_client_diagnostics(app)
 app.on_startup(start_research_worker)
-app.on_shutdown(stop_research_worker)
 app.on_startup(start_market_refresh_worker)
-app.on_shutdown(stop_market_refresh_worker)
+
+
+async def stop_background_workers() -> None:
+    """Stop independent workers without blocking NiceGUI's event loop."""
+    outcomes = await asyncio.gather(
+        asyncio.to_thread(stop_market_refresh_worker),
+        asyncio.to_thread(stop_research_worker),
+        return_exceptions=True,
+    )
+    names = ("market_refresh_worker", "supplemental_research_worker")
+    failures: list[BaseException] = []
+    for name, outcome in zip(names, outcomes):
+        if isinstance(outcome, BaseException):
+            lifecycle.record_shutdown_issue(name)
+            log_event(
+                logging.getLogger("portfolio_tracker"),
+                "worker_shutdown_failed",
+                "Background worker shutdown raised an exception",
+                worker=name,
+                error_type=type(outcome).__name__,
+            )
+            failures.append(outcome)
+        elif outcome is not True:
+            lifecycle.record_shutdown_issue(name)
+            log_event(
+                logging.getLogger("portfolio_tracker"),
+                "worker_shutdown_incomplete",
+                "Background worker did not confirm shutdown",
+                worker=name,
+            )
+            failures.append(RuntimeError(f"{name} did not stop"))
+    if failures:
+        raise BaseExceptionGroup("One or more Portfolio Tracker workers did not stop cleanly", failures)
+    log_event(
+        logging.getLogger("portfolio_tracker"),
+        "application_shutdown_workers_completed",
+        "All Portfolio Tracker workers stopped",
+        workers=list(names),
+    )
+
+
+app.on_shutdown(stop_background_workers)
 app.add_static_files("/branding", STATIC_DIR)
 app.add_static_file(local_file=FAVICON_PATH, url_path="/favicon.ico")
 for icon_route in APPLE_TOUCH_ICON_ROUTES:
@@ -206,7 +255,19 @@ async def critical_io(name: str, operation: Callable[..., Any], *args: Any, **kw
     """Run one admitted mutation to completion, including its blocking worker."""
     try:
         with lifecycle.critical_operation(name):
-            return await run.io_bound(operation, *args, **kwargs)
+            task = asyncio.create_task(run.io_bound(operation, *args, **kwargs))
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                # Shielding alone would release the operation context while the
+                # executor thread could still be writing to the database.
+                while not task.done():
+                    try:
+                        await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        continue
+                task.result()
+                raise
     except ShutdownInProgress as exc:
         ui.notify(str(exc), type="warning")
         raise
@@ -1650,6 +1711,14 @@ async def index() -> None:
 
 
 if __name__ in {"__main__", "__mp_main__"}:
+    configure_nicegui_logging()
+    log_event(
+        logging.getLogger("portfolio_tracker"),
+        "application_starting",
+        f"{APPLICATION_NAME} v{APPLICATION_VERSION} starting",
+        application_name=APPLICATION_NAME,
+        application_version=APPLICATION_VERSION,
+    )
     start_launcher_watchdog()
     start_shutdown_request_watcher(app.shutdown)
     ui.run(host=HOST, port=PORT, title=APPLICATION_NAME, favicon=FAVICON_PATH, reload=False, show=False, storage_secret=STORAGE_SECRET)

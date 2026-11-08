@@ -24,6 +24,7 @@ from portfolio_analysis import FUND_ASSET_TYPES, canonical_asset_type, resolve_f
 # forced price refresh does not silently fan out into every Yahoo endpoint.
 _cache: dict[tuple[str,str],tuple[float,Any]]={}
 LOGGER = logging.getLogger("portfolio_tracker")
+YAHOO_PRICE_REQUEST_TIMEOUT_SECONDS = 10.0
 
 
 def _cached(key:tuple[str,str],loader,ttl:float):
@@ -72,7 +73,16 @@ def current_market_data(tickers:list[str]|tuple[str,...])->tuple[dict[str,float]
     def prices_loader():
         output={ticker:0.0 for ticker in normalized}
         try:
-            history=yf.download(list(normalized),period="5d",interval="1d",auto_adjust=False,progress=False,group_by="column",threads=True)
+            history=yf.download(
+                list(normalized),
+                period="5d",
+                interval="1d",
+                auto_adjust=False,
+                progress=False,
+                group_by="column",
+                threads=True,
+                timeout=YAHOO_PRICE_REQUEST_TIMEOUT_SECONDS,
+            )
             if isinstance(history,pd.DataFrame) and not history.empty:
                 if isinstance(history.columns,pd.MultiIndex):
                     for ticker in normalized:

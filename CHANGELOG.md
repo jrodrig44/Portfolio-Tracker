@@ -4,6 +4,26 @@ This changelog adopts the product-version history now as release-convention
 context. The earlier milestones below were not published GitHub releases; no
 historical release dates or tags are implied.
 
+## 2.1.2
+
+- Added structured shutdown-stage events for request detection and
+  acknowledgement, protected-operation drain, worker stops, application
+  shutdown signaling, and final process exit. Added the application/version
+  startup record. Active operation names and elapsed times are recorded
+  without portfolio contents or credentials.
+- Bounded protected-operation draining, market-worker joins, and research
+  worker termination; idle workers can now be woken promptly. Protected
+  database writes remain tracked through completion if their caller is
+  cancelled. Batched Yahoo price downloads now use an explicit 10-second
+  request timeout where the provider API supports it.
+- Added distinct launcher outcomes for graceful shutdown, confirmed forced
+  termination, startup/runtime failure, and unconfirmed process-tree
+  termination. The launcher checks force-termination status and waits for the
+  owned process tree to exit.
+- The reported multi-day shutdown delay was not reproduced. The changes improve
+  observability and enforce bounded shutdown; they do not establish which
+  shutdown stage caused the reported delay.
+
 ## 2.1.1
 
 - Added the missing 240x240 Apple touch-icon aliases using the existing PNG.

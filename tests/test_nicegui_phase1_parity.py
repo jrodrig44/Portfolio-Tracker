@@ -71,6 +71,10 @@ class NiceGuiPhase1ParityTests(unittest.TestCase):
         self.assertEqual(first,({"ABC":50.0},{"ABC":5.0}))
         self.assertEqual(second,first)
         download.assert_called_once()
+        self.assertEqual(
+            download.call_args.kwargs["timeout"],
+            yahoo.YAHOO_PRICE_REQUEST_TIMEOUT_SECONDS,
+        )
         ticker_factory.assert_called_once_with("ABC")
 
 

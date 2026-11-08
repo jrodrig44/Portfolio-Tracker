@@ -1,3 +1,6 @@
+import os
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -147,19 +150,98 @@ class NiceGuiStartupTests(unittest.TestCase):
         self.assertEqual(self.script.count("Start-Process -FilePath $venvPython"), 1)
 
     def test_launcher_has_bounded_exact_pid_shutdown(self) -> None:
-        self.assertIn("$gracefulShutdownTimeoutSeconds = 15", self.script)
+        self.assertIn("$gracefulShutdownTimeoutSeconds = 45", self.script)
+        self.assertIn("$processTreeConfirmationTimeoutSeconds = 8", self.script)
         self.assertIn("NICEGUI_SHUTDOWN_REQUEST_FILE", self.script)
         self.assertIn("[Console]::TreatControlCAsInput = $true", self.script)
-        self.assertIn("taskkill.exe /PID $child.Id /T /F", self.script)
+        self.assertIn("taskkill.exe /PID $processId /T /F", self.script)
+        self.assertIn("Get-TrackedProcessTreeIds", self.script)
+        self.assertIn("Get-RunningTrackedProcessIds", self.script)
+        self.assertIn("Merge-TrackedProcessTreeIds", self.script)
         self.assertNotIn("taskkill /IM", self.script)
-        self.assertIn("Portfolio Tracker stopped safely.", self.script)
-        self.assertIn("Portfolio Tracker was force-stopped.", self.script)
-        self.assertIn("exit 2", self.script)
+        self.assertIn("Portfolio Tracker stopped gracefully;", self.script)
+        self.assertIn("Graceful shutdown timed out; forced termination was required.", self.script)
+        self.assertIn("$launcherExitCode = 2", self.script)
+        self.assertIn("$launcherExitCode = 3", self.script)
+
+    def test_batch_distinguishes_all_launcher_outcomes(self) -> None:
+        self.assertIn('if "%TRACKER_EXIT_CODE%"=="2"', self.batch)
+        self.assertIn('if "%TRACKER_EXIT_CODE%"=="3"', self.batch)
+        self.assertIn("failed during startup or exited unexpectedly", self.batch)
+        self.assertIn("This was not a safe graceful shutdown.", self.batch)
+        self.assertIn("could not confirm termination", self.batch)
+        self.assertNotIn("failed to start or exited with an error", self.batch)
+
+    def test_forced_stop_success_requires_checked_termination_and_empty_tree(self) -> None:
+        termination = self.script.index("if (-not $termination.Terminated)")
+        forced_success = self.script.index("$launcherExitCode = 2", termination)
+        self.assertIn(
+            "Terminated = $snapshotSucceeded -and $taskkillSucceeded -and $runningIds.Count -eq 0",
+            self.script,
+        )
+        self.assertLess(termination, forced_success)
+        failure_branch = self.script[termination:forced_success]
+        self.assertIn("$launcherExitCode = 3", failure_branch)
+        self.assertIn("$termination.RunningProcessIds", failure_branch)
+        self.assertIn("& taskkill.exe /PID $processId /T /F", self.script)
+        self.assertIn("$commandExitCode = $LASTEXITCODE", self.script)
+        self.assertIn("-KnownProcessIds $trackedProcessIds", self.script)
+
+    @unittest.skipUnless(os.name == "nt" and shutil.which("powershell"), "Windows PowerShell is required")
+    def test_process_tree_force_result_checks_command_and_exit_confirmation(self) -> None:
+        command = r"""
+$source = Get-Content -Raw -LiteralPath $env:TRACKER_LAUNCHER_SCRIPT
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$errors)
+foreach ($name in @("Get-TrackedProcessTreeIds", "Merge-TrackedProcessTreeIds", "Get-RunningTrackedProcessIds", "Stop-TrackedProcessTree")) {
+    $definition = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
+    if ($null -eq $definition) { throw "Missing function $name" }
+    Invoke-Expression $definition.Extent.Text
+}
+function Get-CimInstance { return @($script:processSnapshot) }
+function Get-Process {
+    param([int]$Id, [string]$ErrorAction)
+    if ($script:runningPids.Contains($Id)) { return [pscustomobject]@{ Id = $Id } }
+}
+function taskkill.exe {
+    $script:killedProcessId = [int]$args[1]
+    $global:LASTEXITCODE = $script:taskkillExitCode
+    if ($global:LASTEXITCODE -eq 0) { $script:runningPids.Clear() }
+}
+$script:processSnapshot = @([pscustomobject]@{ ProcessId = 100; ParentProcessId = 1 }, [pscustomobject]@{ ProcessId = 101; ParentProcessId = 100 })
+$script:runningPids = [System.Collections.Generic.HashSet[int]]::new()
+[void]$script:runningPids.Add(100)
+[void]$script:runningPids.Add(101)
+$script:taskkillExitCode = 5
+$failed = Stop-TrackedProcessTree -RootProcessId 100 -ConfirmationTimeoutSeconds 0 -KnownProcessIds @(100, 101)
+if ($failed.Terminated -or $failed.TaskkillSucceeded -or $failed.RunningProcessIds.Count -eq 0) { exit 11 }
+$script:runningPids.Clear()
+[void]$script:runningPids.Add(100)
+[void]$script:runningPids.Add(101)
+$script:taskkillExitCode = 0
+$succeeded = Stop-TrackedProcessTree -RootProcessId 100 -ConfirmationTimeoutSeconds 0 -KnownProcessIds @(100, 101)
+if (-not $succeeded.Terminated -or -not $succeeded.TaskkillSucceeded -or $succeeded.RunningProcessIds.Count -ne 0) { exit 12 }
+$script:processSnapshot = @([pscustomobject]@{ ProcessId = 101; ParentProcessId = 100 })
+[void]$script:runningPids.Add(101)
+$orphanedChild = Stop-TrackedProcessTree -RootProcessId 100 -ConfirmationTimeoutSeconds 0 -KnownProcessIds @(100, 101)
+if (-not $orphanedChild.Terminated -or $script:killedProcessId -ne 101) { exit 13 }
+"""
+        environment = os.environ.copy()
+        environment["TRACKER_LAUNCHER_SCRIPT"] = str(ROOT / "run_nicegui.ps1")
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+            capture_output=True,
+            text=True,
+            env=environment,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_intentional_and_failed_exits_remain_distinct(self) -> None:
         self.assertIn("$intentionalShutdown = $true", self.script)
-        self.assertIn("-not $intentionalShutdown -and $child.ExitCode -ne 0", self.script)
-        self.assertIn('throw "NiceGUI exited with code $($child.ExitCode)."', self.script)
+        self.assertIn("$launcherExitCode -eq 0 -and -not $intentionalShutdown", self.script)
+        self.assertIn('throw "NiceGUI exited unexpectedly with code $($child.ExitCode)."', self.script)
 
     def test_production_startup_chain_targets_only_nicegui(self) -> None:
         self.assertIn("run_nicegui.ps1", self.batch)
@@ -184,25 +266,32 @@ class NiceGuiStartupTests(unittest.TestCase):
     def test_production_starts_one_tracked_research_worker_child(self) -> None:
         worker_lifecycle = (ROOT / "nicegui_app" / "research_worker_lifecycle.py").read_text(encoding="utf-8")
         self.assertIn("app.on_startup(start_research_worker)", self.main)
-        self.assertIn("app.on_shutdown(stop_research_worker)", self.main)
+        self.assertIn("app.on_shutdown(stop_background_workers)", self.main)
         self.assertEqual(worker_lifecycle.count("subprocess.Popen("), 1)
         self.assertIn("worker.terminate()", worker_lifecycle)
-        self.assertIn("worker.wait(timeout=10)", worker_lifecycle)
+        self.assertIn("worker.wait(timeout=max(graceful_timeout_seconds, 0.0))", worker_lifecycle)
+        self.assertIn("worker.wait(timeout=max(terminate_timeout_seconds, 0.0))", worker_lifecycle)
+        self.assertIn("worker.wait(timeout=max(kill_timeout_seconds, 0.0))", worker_lifecycle)
 
     def test_research_worker_start_is_idempotent_and_shutdown_targets_tracked_child(self) -> None:
         worker = Mock()
-        worker.poll.return_value = None
+        worker.poll.side_effect = [None, None, None, 0, 0]
         research_worker_lifecycle._worker = None
+        research_worker_lifecycle._worker_stop_file = None
         try:
             with patch("nicegui_app.research_worker_lifecycle.subprocess.Popen", return_value=worker) as popen:
                 research_worker_lifecycle.start_research_worker()
                 research_worker_lifecycle.start_research_worker()
                 popen.assert_called_once()
-                research_worker_lifecycle.stop_research_worker()
-            worker.terminate.assert_called_once_with()
-            worker.wait.assert_called_once_with(timeout=10)
+                self.assertTrue(research_worker_lifecycle.stop_research_worker())
+            worker.wait.assert_called_once_with(timeout=10.0)
+            worker.terminate.assert_not_called()
+            worker.kill.assert_not_called()
         finally:
+            if research_worker_lifecycle._worker_stop_file is not None:
+                research_worker_lifecycle._worker_stop_file.unlink(missing_ok=True)
             research_worker_lifecycle._worker = None
+            research_worker_lifecycle._worker_stop_file = None
 
 
 if __name__ == "__main__":

@@ -6,7 +6,11 @@ NiceGUI is the production Portfolio Tracker interface. Normal Windows startup is
 Start Portfolio Tracker.bat -> run_nicegui.ps1 -> nicegui_app/main.py
 ```
 
-The server binds to `0.0.0.0:8501`, so it is available at `http://localhost:8501` and over the LAN when local firewall/network policy allows it. Browser auto-open is disabled. The launcher rejects an occupied production port, checks the lightweight `/healthz` endpoint over IPv4 loopback for readiness without waiting for the portfolio page's market-data fetch, keeps the server attached, and provides graceful shutdown with a 15-second drain before exact-child-process-tree fallback.
+The server binds to `0.0.0.0:8501`, so it is available at `http://localhost:8501` and over the LAN when local firewall/network policy allows it. Browser auto-open is disabled. The launcher rejects an occupied production port, checks the lightweight `/healthz` endpoint over IPv4 loopback for readiness without waiting for the portfolio page's market-data fetch, and keeps the server attached.
+
+Ctrl+C starts a bounded shutdown: protected operations receive up to 20 seconds to drain inside a 45-second total graceful deadline. Market-worker stop waits at most 5 seconds; the research child receives a stop-file request, then bounded 10-second graceful, 2-second terminate, and 2-second kill waits. Worker joins and subprocess waits run outside NiceGUI's event loop. If the total graceful deadline expires, the launcher targets only this invocation's process tree and waits up to 8 seconds to confirm it exited.
+
+Launcher outcomes are distinct: exit code 0 means graceful shutdown completed; exit code 2 means graceful shutdown timed out but forced termination and process-tree exit were confirmed; exit code 1 means startup failure or unexpected runtime exit; exit code 3 means the launched process tree could not be confirmed terminated. A forced stop is not described as safe. Shutdown stage events are in `logs/nicegui.YYYY-MM-DD.PID.jsonl`; active operation names and elapsed durations identify a stalled drain. No process selected merely by port is terminated.
 
 NiceGUI owns two browser-independent background lifecycles:
 

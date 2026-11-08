@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from nicegui_app.main import critical_io
+from nicegui_app.main import critical_io, stop_background_workers
 
 from nicegui_app.process_lifecycle import (
     LifecycleCoordinator,
@@ -30,6 +30,30 @@ class LifecycleCoordinatorTests(unittest.TestCase):
             self.assertEqual(coordinator.active_operations, 1)
             with coordinator.critical_operation("nested"):
                 self.assertEqual(coordinator.active_operations, 2)
+        self.assertEqual(coordinator.active_operations, 0)
+
+    def test_concurrent_operations_with_same_name_have_unique_durations(self) -> None:
+        coordinator = LifecycleCoordinator()
+        entered = [threading.Event(), threading.Event()]
+        release = threading.Event()
+
+        def operation(index: int) -> None:
+            with coordinator.critical_operation("same_write"):
+                entered[index].set()
+                release.wait(1)
+
+        workers = [threading.Thread(target=operation, args=(index,)) for index in range(2)]
+        for worker in workers:
+            worker.start()
+        self.assertTrue(all(event.wait(1) for event in entered))
+        details = coordinator.active_operation_details()
+        self.assertEqual(coordinator.active_operations, 2)
+        self.assertEqual([item.name for item in details], ["same_write", "same_write"])
+        self.assertEqual(len({item.operation_id for item in details}), 2)
+        self.assertTrue(all(item.elapsed_seconds >= 0 for item in details))
+        release.set()
+        for worker in workers:
+            worker.join(1)
         self.assertEqual(coordinator.active_operations, 0)
 
     def test_exception_releases_operation(self) -> None:
@@ -126,6 +150,66 @@ class LifecycleCoordinatorTests(unittest.TestCase):
                 self.assertTrue(callback.wait(1))
             worker.join(1)
 
+    def test_idle_request_is_acknowledged_and_shutdown_callback_runs_promptly(self) -> None:
+        coordinator = LifecycleCoordinator()
+        callback = threading.Event()
+        with tempfile.TemporaryDirectory() as directory:
+            request = Path(directory) / "stop.request"
+            waiting = Path(directory) / "stop.waiting"
+            with patch("nicegui_app.process_lifecycle.lifecycle", coordinator), patch(
+                "nicegui_app.process_lifecycle.configure_nicegui_logging"
+            ), patch("nicegui_app.process_lifecycle.log_event") as event, patch.dict(
+                "os.environ",
+                {"NICEGUI_SHUTDOWN_REQUEST_FILE": str(request), "NICEGUI_SHUTDOWN_WAIT_FILE": str(waiting)},
+            ):
+                start = time.monotonic()
+                start_shutdown_request_watcher(callback.set)
+                request.touch()
+                self.assertTrue(callback.wait(1))
+                self.assertLess(time.monotonic() - start, 0.5)
+                self.assertTrue(waiting.is_file())
+            event_names = [call.args[1] for call in event.call_args_list]
+            self.assertIn("shutdown_requested", event_names)
+            self.assertIn("shutdown_request_acknowledged", event_names)
+            self.assertIn("protected_operation_drain_completed", event_names)
+            self.assertIn("application_shutdown_callback_requested", event_names)
+
+    def test_stalled_operation_timeout_logs_names_and_elapsed_duration(self) -> None:
+        coordinator = LifecycleCoordinator()
+        entered = threading.Event()
+        release = threading.Event()
+        callback = threading.Event()
+
+        def slow_operation() -> None:
+            with coordinator.critical_operation("statement_import"):
+                entered.set()
+                release.wait(1)
+
+        operation_thread = threading.Thread(target=slow_operation)
+        operation_thread.start()
+        self.assertTrue(entered.wait(1))
+        with tempfile.TemporaryDirectory() as directory:
+            request = Path(directory) / "stop.request"
+            with patch("nicegui_app.process_lifecycle.lifecycle", coordinator), patch(
+                "nicegui_app.process_lifecycle.configure_nicegui_logging"
+            ), patch("nicegui_app.process_lifecycle.log_event") as event, patch.dict(
+                "os.environ", {"NICEGUI_SHUTDOWN_REQUEST_FILE": str(request)}
+            ):
+                start_shutdown_request_watcher(callback.set, drain_timeout_seconds=0.03)
+                request.touch()
+                self.assertTrue(callback.wait(1))
+            timeout_event = next(
+                call for call in event.call_args_list
+                if call.args[1] == "protected_operation_drain_timed_out"
+            )
+            self.assertEqual(timeout_event.kwargs["active_operation_count"], 1)
+            operation = timeout_event.kwargs["active_operations"][0]
+            self.assertEqual(operation["operation_name"], "statement_import")
+            self.assertGreater(operation["elapsed_ms"], 0)
+        release.set()
+        operation_thread.join(1)
+        self.assertFalse(operation_thread.is_alive())
+
     def test_invalid_launcher_pid_does_not_start_watchdog(self) -> None:
         with patch.dict("os.environ", {"NICEGUI_LAUNCHER_PID": "not-a-pid"}), patch(
             "nicegui_app.process_lifecycle.threading.Thread"
@@ -157,6 +241,59 @@ class LifecycleCoordinatorTests(unittest.TestCase):
                 start_shutdown_request_watcher(callback.set)
                 self.assertTrue(callback.wait(1))
         output.assert_not_called()
+
+    def test_cancelled_critical_io_keeps_protected_operation_until_thread_finishes(self) -> None:
+        async def run_test() -> None:
+            coordinator = LifecycleCoordinator()
+            started = threading.Event()
+            release = threading.Event()
+
+            def slow_write() -> None:
+                started.set()
+                release.wait(1)
+
+            with patch("nicegui_app.main.lifecycle", coordinator):
+                task = asyncio.create_task(critical_io("holdings_save", slow_write))
+                self.assertTrue(await asyncio.to_thread(started.wait, 1))
+                task.cancel()
+                asyncio.get_running_loop().call_later(0.01, task.cancel)
+                await asyncio.sleep(0.03)
+                self.assertEqual(coordinator.active_operations, 1)
+                release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                self.assertEqual(coordinator.active_operations, 0)
+
+        asyncio.run(run_test())
+
+    def test_worker_shutdown_reports_a_timeout_after_attempting_each_worker(self) -> None:
+        coordinator = LifecycleCoordinator()
+        attempted = set()
+
+        def stop_market() -> bool:
+            attempted.add("market")
+            return False
+
+        def stop_research() -> bool:
+            attempted.add("research")
+            return True
+
+        async def run_test() -> None:
+            async def fake_to_thread(operation):
+                return operation()
+
+            with patch("nicegui_app.main.lifecycle", coordinator), patch(
+                "nicegui_app.main.stop_market_refresh_worker", stop_market
+            ), patch("nicegui_app.main.stop_research_worker", stop_research), patch(
+                "nicegui_app.main.asyncio.to_thread", fake_to_thread
+            ), patch("nicegui_app.main.log_event") as event:
+                with self.assertRaises(BaseExceptionGroup):
+                    await stop_background_workers()
+            self.assertEqual(attempted, {"market", "research"})
+            self.assertEqual(coordinator.shutdown_issues(), ("market_refresh_worker",))
+            self.assertEqual(event.call_args.args[1], "worker_shutdown_incomplete")
+
+        asyncio.run(run_test())
 
 
 if __name__ == "__main__":
