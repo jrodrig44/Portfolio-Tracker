@@ -138,13 +138,16 @@ function Get-IntentionalShutdownExitCode {
     if (-not $TreeTerminationConfirmed) {
         return 3
     }
-    if ($ServerExitCode -ne 0 -and -not $ForcedTreeTermination) {
+    if ($ForcedTreeTermination) {
+        return 2
+    }
+    if ($ServerExitCode -ne 0) {
         return 1
     }
     if ($ApplicationStatus.outcome -in @("unconfirmed", "missing", "invalid")) {
         return 3
     }
-    if ($ForcedTreeTermination -or $ApplicationStatus.outcome -eq "forced") {
+    if ($ApplicationStatus.outcome -eq "forced") {
         return 2
     }
     if ($ApplicationStatus.outcome -eq "graceful") {

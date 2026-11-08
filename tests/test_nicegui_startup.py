@@ -187,8 +187,12 @@ class NiceGuiStartupTests(unittest.TestCase):
         ]
         self.assertIn('if ($ApplicationStatus.outcome -eq "failed")', classifier)
         self.assertIn("if (-not $TreeTerminationConfirmed)", classifier)
-        self.assertIn('if ($ForcedTreeTermination -or $ApplicationStatus.outcome -eq "forced")', classifier)
+        self.assertIn("if ($ForcedTreeTermination)", classifier)
+        self.assertIn('if ($ApplicationStatus.outcome -eq "forced")', classifier)
         self.assertIn('if ($ApplicationStatus.outcome -eq "graceful")', classifier)
+        self.assertLess(classifier.index('if ($ApplicationStatus.outcome -eq "failed")'), classifier.index("if (-not $TreeTerminationConfirmed)"))
+        self.assertLess(classifier.index("if (-not $TreeTerminationConfirmed)"), classifier.index("if ($ForcedTreeTermination)"))
+        self.assertLess(classifier.index("if ($ForcedTreeTermination)"), classifier.index('if ($ServerExitCode -ne 0)'))
         self.assertIn("& taskkill.exe /PID $processId /F", self.script)
         self.assertIn("$commandExitCode = $LASTEXITCODE", self.script)
         self.assertIn("-KnownProcessIds $trackedProcessIds", self.script)
@@ -254,17 +258,28 @@ $script:processSnapshot = @([pscustomobject]@{
 })
 $reused = Stop-TrackedProcessTree -RootProcessId 100 -RootCreationTimeUtcTicks $rootTicks -ConfirmationTimeoutSeconds 0 -KnownProcessIds @($oldIdentity)
 if (-not $reused.Terminated -or $script:killCount -ne $killCountBeforeReuse) { exit 14 }
-$status = [pscustomobject]@{ outcome = "graceful" }
-if ((Get-IntentionalShutdownExitCode $status 0 $false $true) -ne 0) { exit 15 }
-$status.outcome = "forced"
-if ((Get-IntentionalShutdownExitCode $status 0 $false $true) -ne 2) { exit 16 }
-$status.outcome = "unconfirmed"
-if ((Get-IntentionalShutdownExitCode $status 0 $false $true) -ne 3) { exit 17 }
-$status.outcome = "failed"
-if ((Get-IntentionalShutdownExitCode $status 1 $false $true) -ne 1) { exit 18 }
-if ((Get-IntentionalShutdownExitCode ([pscustomobject]@{ outcome = "graceful" }) 0 $true $true) -ne 2) { exit 19 }
-if ((Get-IntentionalShutdownExitCode ([pscustomobject]@{ outcome = "graceful" }) 1 $false $true) -ne 1) { exit 20 }
-if ((Get-IntentionalShutdownExitCode ([pscustomobject]@{ outcome = "graceful" }) 0 $false $false) -ne 3) { exit 21 }
+$cases = @(
+    @{ Name = "missing status with confirmed forced tree termination"; Status = "missing"; ServerExitCode = 0; ForcedTree = $true; TreeConfirmed = $true; Expected = 2 },
+    @{ Name = "invalid status with confirmed forced tree termination"; Status = "invalid"; ServerExitCode = 0; ForcedTree = $true; TreeConfirmed = $true; Expected = 2 },
+    @{ Name = "graceful status with confirmed forced tree termination"; Status = "graceful"; ServerExitCode = 0; ForcedTree = $true; TreeConfirmed = $true; Expected = 2 },
+    @{ Name = "missing status without forced termination"; Status = "missing"; ServerExitCode = 0; ForcedTree = $false; TreeConfirmed = $true; Expected = 3 },
+    @{ Name = "unconfirmed application status"; Status = "unconfirmed"; ServerExitCode = 0; ForcedTree = $false; TreeConfirmed = $true; Expected = 3 },
+    @{ Name = "confirmed forced worker stop"; Status = "forced"; ServerExitCode = 0; ForcedTree = $false; TreeConfirmed = $true; Expected = 2 },
+    @{ Name = "successful graceful shutdown"; Status = "graceful"; ServerExitCode = 0; ForcedTree = $false; TreeConfirmed = $true; Expected = 0 },
+    @{ Name = "explicit application failure"; Status = "failed"; ServerExitCode = 0; ForcedTree = $false; TreeConfirmed = $true; Expected = 1 },
+    @{ Name = "application failure despite unconfirmed tree"; Status = "failed"; ServerExitCode = 0; ForcedTree = $true; TreeConfirmed = $false; Expected = 1 },
+    @{ Name = "missing status with unconfirmed tree"; Status = "missing"; ServerExitCode = 0; ForcedTree = $true; TreeConfirmed = $false; Expected = 3 },
+    @{ Name = "missing status after unsuccessful force attempt"; Status = "missing"; ServerExitCode = 0; ForcedTree = $false; TreeConfirmed = $false; Expected = 3 },
+    @{ Name = "unexpected nonzero server exit"; Status = "graceful"; ServerExitCode = 1; ForcedTree = $false; TreeConfirmed = $true; Expected = 1 },
+    @{ Name = "unexpected nonzero server exit with missing status"; Status = "missing"; ServerExitCode = 1; ForcedTree = $false; TreeConfirmed = $true; Expected = 1 }
+)
+foreach ($case in $cases) {
+    $status = [pscustomobject]@{ outcome = $case.Status }
+    $actual = Get-IntentionalShutdownExitCode $status $case.ServerExitCode $case.ForcedTree $case.TreeConfirmed
+    if ($actual -ne $case.Expected) {
+        throw "$($case.Name): expected exit code $($case.Expected), got $actual"
+    }
+}
 if ((Get-StartupCleanupExitCode $true) -ne 1) { exit 22 }
 if ((Get-StartupCleanupExitCode $false) -ne 3) { exit 23 }
 """
